@@ -456,7 +456,7 @@ def fetch_gamagori_comments(date_yyyymmdd, jcd, rno, race):
     # 1) 蒲郡公式「コメント＆モーター一覧」
     try:
         html = _get(GAMAGORI_COMMENT_ALL)
-        
+        found = _extract_comments_from_document(html, race)
 
         for idx, row in race.iterrows():
             lane = int(row["lane"])
