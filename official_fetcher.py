@@ -564,10 +564,46 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
             "source_pitreport": [""] * 6,
         })
 
-    # 場公式サイトの独自コメント。未対応・失敗時は空欄で続行。
     try:
-        venue_comments = fetch_venue_comments(date_yyyymmdd, jcd, rno, base)
-    except Exception:
+           # 場公式サイトの独自コメント
+        print(
+            "[OFFICIAL_FETCHER] venue comment start:",
+            "date=", date_yyyymmdd,
+            "jcd=", jcd,
+            "rno=", rno,
+        )
+
+        venue_comments = fetch_venue_comments(
+            date_yyyymmdd,
+            jcd,
+            rno,
+            base,
+        )
+
+        print(
+            "[OFFICIAL_FETCHER] venue comment done:",
+            "rows=", len(venue_comments),
+            "comments=",
+            int(
+                (
+                    venue_comments["venue_comment"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    != ""
+                ).sum()
+            )
+            if "venue_comment" in venue_comments.columns
+            else 0,
+        )
+
+    except Exception as e:
+        print(
+            "[OFFICIAL_FETCHER] venue comment ERROR:",
+            type(e).__name__,
+            str(e),
+        )
+
         venue_comments = pd.DataFrame({
             "lane": range(1, 7),
             "venue_comment": [""] * 6,
