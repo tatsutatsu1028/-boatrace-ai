@@ -1,3 +1,6 @@
+import io
+from pypdf import PdfReader
+
 from __future__ import annotations
 
 import html as html_lib
@@ -315,7 +318,126 @@ def _extract_comments_from_document(html, race):
 
     return out
 
+def _fetch_gamagori_pdf_comments(date_yyyymmdd, rno, race):
+    """
+    蒲郡公式「ガマスポ通常版PDF」から
+    指定レースの6艇コメントを取得する。
+    """
+    out = _empty(race)
 
+    pdf_url = (
+        "https://www.gamagori-kyotei.com/asp/gamagori/kyogi/"
+        "kyogihtml/pdf_A3/"
+        f"pdf_A3{date_yyyymmdd}07.pdf"
+    )
+
+    try:
+        r = requests.get(pdf_url, headers=UA, timeout=20)
+        r.raise_for_status()
+
+        reader = PdfReader(io.BytesIO(r.content))
+        text = "\n".join(
+            page.extract_text() or ""
+            for page in reader.pages
+        )
+
+        text = unicodedata.normalize("NFKC", text)
+    # 3) HTMLで取れなかった艇だけ
+    #    蒲郡公式「ガマスポPDF」から補完
+    if (out["venue_comment"].astype(str).str.strip() == "").any():
+        try:
+            pdf_out = _fetch_gamagori_pdf_comments(
+                date_yyyymmdd,
+                rno,
+                race,
+            )
+
+            for idx in out.index:
+                if _norm(out.loc[idx, "venue_comment"]):
+                    continue
+
+                c = _norm(pdf_out.loc[idx, "venue_comment"])
+
+                if c:
+                    out.loc[idx, "venue_comment"] = c
+                    out.loc[idx, "venue_comment_source"] = pdf_out.loc[
+                        idx, "venue_comment_source"
+                    ]
+                    out.loc[idx, "venue_comment_url"] = pdf_out.loc[
+                        idx, "venue_comment_url"
+                    ]
+
+        except Exception:
+            pass
+    except Exception:
+        return out
+
+    # 指定Rだけを切り出す
+    start_pat = re.compile(
+        rf"(?m)^\s*{int(rno)}R\s*$"
+    )
+    start = start_pat.search(text)
+
+    if not start:
+        return out
+
+    if int(rno) < 12:
+        end_pat = re.compile(
+            rf"(?m)^\s*{int(rno) + 1}R\s*$"
+        )
+        end = end_pat.search(text, start.end())
+        block = text[start.start():end.start()] if end else text[start.start():]
+    else:
+        block = text[start.start():]
+
+    # レース内の「コメント」より後だけを見る
+    comment_pos = block.rfind("コメント")
+    if comment_pos < 0:
+        return out
+
+    comment_block = block[comment_pos + len("コメント"):]
+
+    lines = []
+    for line in comment_block.splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            lines.append(line)
+
+    for idx, row in race.iterrows():
+        lane = int(row["lane"])
+        name = _norm(row.get("racer_name", ""))
+
+        if not name:
+            continue
+
+        # 姓だけ取り出す
+        parts = name.split()
+        surname = parts[0] if parts else name
+
+        # PDFでは
+        # 1 安田 コメント...
+        # S .15 2 佐藤 コメント...
+        # のような形式になる
+        pat = re.compile(
+            rf"^(?:[SD]\s*\.\d+\s*)?"
+            rf"{lane}\s+{re.escape(surname)}\s+(.+)$"
+        )
+
+        for line in lines:
+            m = pat.search(line)
+
+            if not m:
+                continue
+
+            comment = _norm(m.group(1))
+
+            if comment and _looks_like_natural_comment(comment):
+                out.loc[idx, "venue_comment"] = comment
+                out.loc[idx, "venue_comment_source"] = "蒲郡公式・ガマスポPDF"
+                out.loc[idx, "venue_comment_url"] = pdf_url
+                break
+
+    return out
 def fetch_gamagori_comments(date_yyyymmdd, jcd, rno, race):
     """
     蒲郡(07)の選手コメント。
@@ -414,6 +536,33 @@ def fetch_tsu_comments(date_yyyymmdd, jcd, rno, race):
             out.loc[idx, "venue_comment_source"] = "津公式・選手コメント"
             out.loc[idx, "venue_comment_url"] = url
 
+        # 3) HTMLで取れなかった艇だけ
+    #    蒲郡公式「ガマスポPDF」から補完
+    if (out["venue_comment"].astype(str).str.strip() == "").any():
+        try:
+            pdf_out = _fetch_gamagori_pdf_comments(
+                date_yyyymmdd,
+                rno,
+                race,
+            )
+
+            for idx in out.index:
+                if _norm(out.loc[idx, "venue_comment"]):
+                    continue
+
+                c = _norm(pdf_out.loc[idx, "venue_comment"])
+
+                if c:
+                    out.loc[idx, "venue_comment"] = c
+                    out.loc[idx, "venue_comment_source"] = pdf_out.loc[
+                        idx, "venue_comment_source"
+                    ]
+                    out.loc[idx, "venue_comment_url"] = pdf_out.loc[
+                        idx, "venue_comment_url"
+                    ]
+
+        except Exception:
+            pass
     return out
 
 
