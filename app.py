@@ -267,6 +267,27 @@ with tab1:
             "official_comment":"","comment_confidence":np.nan,
             "venue_comment":"","venue_comment_source":"","auto_comment":"","auto_comment_source":"",
         }).sort_values("lane").reset_index(drop=True)
+        st.markdown("### 🧪 今節成績テスト")
+
+        meet_cols = [
+            "lane",
+            "racer_name",
+            "current_meet_avg_finish",
+            "current_meet_top2_rate",
+            "current_meet_avg_st",
+            "current_meet_races",
+        ]
+
+        existing_meet_cols = [
+            c for c in meet_cols
+            if c in race.columns
+        ]
+
+        st.dataframe(
+            race[existing_meet_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
 
         st.markdown("### ① 選手・機力データ")
         basic_cols = ["lane","racer_name","racer_win_rate","local_win_rate","motor_2ren","boat_2ren","avg_st"]
