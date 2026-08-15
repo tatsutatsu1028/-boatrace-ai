@@ -113,7 +113,12 @@ def _racer_name(text):
     s = re.split(r"\d+歳", s, maxsplit=1)[0]
     m = re.search(r"([一-龥々ぁ-んァ-ヶー]+(?:\s+[一-龥々ぁ-んァ-ヶー]+)*)", s)
     return _norm(m.group(1)) if m else ""
-
+    
+def _racer_id(text):
+    s = _norm(text)
+    m = re.search(r"^\s*(\d{4})\s*/\s*[AB][12]", s)
+    return m.group(1) if m else ""
+    
 def _looks_like_racer(cell):
     s = _norm(cell)
     return bool(re.search(r"\d{4}\s*/\s*[AB][12]", s)) or (
@@ -139,6 +144,7 @@ def _parse_racelist_row(ln, row):
     if racer_i is None:
         return rec
 
+    rec["racer_id"] = _racer_id(row[racer_i])
     rec["racer_name"] = _racer_name(row[racer_i])
 
     def at(offset):
@@ -167,7 +173,6 @@ def _parse_racelist_row(ln, row):
         rec["boat_2ren"] = boat[1]
 
     return rec
-
 def fetch_racelist(date_yyyymmdd, jcd, rno):
     html, url = _get("racelist", date_yyyymmdd, jcd, rno)
     soup = BeautifulSoup(html, "lxml")
