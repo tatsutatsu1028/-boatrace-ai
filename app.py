@@ -299,7 +299,36 @@ with tab1:
             width="stretch",
             hide_index=True,
         )
+        st.markdown("### 📐 コース適性")
 
+        course_cols = [
+            "lane",
+            "racer_name",
+            "course_top3_rate",
+            "course_avg_st",
+            "course_start_rank",
+        ]
+
+        existing_course_cols = [
+            c for c in course_cols
+            if c in race.columns
+        ]
+
+        course_display = race[existing_course_cols].copy()
+
+        course_display = course_display.rename(columns={
+            "lane": "艇",
+            "racer_name": "選手",
+            "course_top3_rate": "コース3連対率",
+            "course_avg_st": "コース平均ST",
+            "course_start_rank": "コースST順位",
+        })
+
+        st.dataframe(
+            course_display,
+            width="stretch",
+            hide_index=True,
+        )
         st.markdown("### ① 選手・機力データ")
         basic_cols = ["lane","racer_name","racer_win_rate","local_win_rate","motor_2ren","boat_2ren","avg_st"]
         basic = st.data_editor(
