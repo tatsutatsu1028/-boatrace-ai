@@ -267,7 +267,7 @@ with tab1:
             "official_comment":"","comment_confidence":np.nan,
             "venue_comment":"","venue_comment_source":"","auto_comment":"","auto_comment_source":"",
         }).sort_values("lane").reset_index(drop=True)
-        st.markdown("### 🧪 今節成績テスト")
+        st.markdown("### 📊 今節成績")
 
         meet_cols = [
             "lane",
@@ -283,9 +283,20 @@ with tab1:
             if c in race.columns
         ]
 
+        meet_display = race[existing_meet_cols].copy()
+
+        meet_display = meet_display.rename(columns={
+            "lane": "艇",
+            "racer_name": "選手",
+            "current_meet_avg_finish": "今節平均着順",
+            "current_meet_top2_rate": "今節2連対率",
+            "current_meet_avg_st": "今節平均ST",
+            "current_meet_races": "今節走数",
+        })
+
         st.dataframe(
-            race[existing_meet_cols],
-            use_container_width=True,
+            meet_display,
+            width="stretch",
             hide_index=True,
         )
 
