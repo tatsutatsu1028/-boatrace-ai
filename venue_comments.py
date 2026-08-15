@@ -342,8 +342,8 @@ def _fetch_gamagori_pdf_comments(date_yyyymmdd, rno, race):
         )
 
         text = unicodedata.normalize("NFKC", text)
-        
-     except Exception:
+
+    except Exception:
         return out
     
     # 3) HTMLで取れなかった艇だけ
