@@ -345,34 +345,6 @@ def _fetch_gamagori_pdf_comments(date_yyyymmdd, rno, race):
 
     except Exception:
         return out
-    
-    # 3) HTMLで取れなかった艇だけ
-    #    蒲郡公式「ガマスポPDF」から補完
-    if (out["venue_comment"].astype(str).str.strip() == "").any():
-        try:
-            pdf_out = _fetch_gamagori_pdf_comments(
-                date_yyyymmdd,
-                rno,
-                race,
-            )
-
-            for idx in out.index:
-                if _norm(out.loc[idx, "venue_comment"]):
-                    continue
-
-                c = _norm(pdf_out.loc[idx, "venue_comment"])
-
-                if c:
-                    out.loc[idx, "venue_comment"] = c
-                    out.loc[idx, "venue_comment_source"] = pdf_out.loc[
-                        idx, "venue_comment_source"
-                    ]
-                    out.loc[idx, "venue_comment_url"] = pdf_out.loc[
-                        idx, "venue_comment_url"
-                    ]
-
-        except Exception:
-            pass
 
     # 指定Rだけを切り出す
     start_pat = re.compile(
@@ -485,7 +457,33 @@ def fetch_gamagori_comments(date_yyyymmdd, jcd, rno, race):
                     out.loc[idx, "venue_comment_url"] = GAMAGORI_LINE_VOOM
         except Exception:
             pass
+  # 3) HTMLで取れなかった艇だけ           
+  #    蒲郡公式「ガマスポPDF」から補完
+    if (out["venue_comment"].astype(str).str.strip() == "").any():
+        try:
+            pdf_out = _fetch_gamagori_pdf_comments(
+                date_yyyymmdd,
+                rno,
+                race,
+            )
 
+            for idx in out.index:
+                if _norm(out.loc[idx, "venue_comment"]):
+                    continue
+
+                c = _norm(pdf_out.loc[idx, "venue_comment"])
+
+                if c:
+                    out.loc[idx, "venue_comment"] = c
+                    out.loc[idx, "venue_comment_source"] = pdf_out.loc[
+                        idx, "venue_comment_source"
+                    ]
+                    out.loc[idx, "venue_comment_url"] = pdf_out.loc[
+                        idx, "venue_comment_url"
+                    ]
+
+        except Exception:
+            pass
     return out
 
 
@@ -538,33 +536,8 @@ def fetch_tsu_comments(date_yyyymmdd, jcd, rno, race):
             out.loc[idx, "venue_comment_source"] = "津公式・選手コメント"
             out.loc[idx, "venue_comment_url"] = url
 
-        # 3) HTMLで取れなかった艇だけ
-    #    蒲郡公式「ガマスポPDF」から補完
-    if (out["venue_comment"].astype(str).str.strip() == "").any():
-        try:
-            pdf_out = _fetch_gamagori_pdf_comments(
-                date_yyyymmdd,
-                rno,
-                race,
-            )
-
-            for idx in out.index:
-                if _norm(out.loc[idx, "venue_comment"]):
-                    continue
-
-                c = _norm(pdf_out.loc[idx, "venue_comment"])
-
-                if c:
-                    out.loc[idx, "venue_comment"] = c
-                    out.loc[idx, "venue_comment_source"] = pdf_out.loc[
-                        idx, "venue_comment_source"
-                    ]
-                    out.loc[idx, "venue_comment_url"] = pdf_out.loc[
-                        idx, "venue_comment_url"
-                    ]
-
-        except Exception:
-            pass
+       
+    
     return out
 
 
