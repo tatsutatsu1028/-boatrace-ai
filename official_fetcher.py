@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from venue_comments import fetch_venue_comments
-
+from current_meet_fetcher import fetch_current_meet
 BASE = "https://www.boatrace.jp/owpc/pc/race"
 UA = {
     "User-Agent": "Mozilla/5.0 (compatible; BoatraceAIMobile/2.5; personal-analysis-tool)"
@@ -545,13 +545,54 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
     try:
         base = fetch_racelist(date_yyyymmdd, jcd, rno)
     except Exception as e:
-        raise RuntimeError(f"racelist取得失敗: {type(e).__name__}: {e}") from e
+        raise RuntimeError(
+            f"racelist取得失敗: {type(e).__name__}: {e}"
+        ) from e
+
+    # 今節成績を取得
+    try:
+        meet = fetch_current_meet(
+            date_yyyymmdd,
+            jcd,
+            rno,
+        )
+        base = base.merge(
+            meet,
+            on="lane",
+            how="left",
+        )
+
+        print(
+            "[CURRENT_MEET]",
+            base[
+                [
+                    "lane",
+                    "current_meet_avg_finish",
+                    "current_meet_top2_rate",
+                    "current_meet_avg_st",
+                    "current_meet_races",
+                ]
+            ].to_dict("records"),
+        )
+
+    except Exception as e:
+        print(
+            "[CURRENT_MEET ERROR]",
+            type(e).__name__,
+            str(e),
+        )
+        base["current_meet_avg_finish"] = np.nan
+        base["current_meet_top2_rate"] = np.nan
+        base["current_meet_avg_st"] = np.nan
+        base["current_meet_races"] = 0
 
     try:
         before = fetch_beforeinfo(date_yyyymmdd, jcd, rno)
     except Exception as e:
-        raise RuntimeError(f"beforeinfo取得失敗: {type(e).__name__}: {e}") from e
-
+        raise RuntimeError(
+            f"beforeinfo取得失敗: {type(e).__name__}: {e}"
+        ) from e
+    
     # ピットレポートは未掲載のレースもあるため、
     # ここだけは取得失敗してもレース全体の取得を止めない。
     try:
