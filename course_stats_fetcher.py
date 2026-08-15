@@ -1,3 +1,225 @@
+どれ？
+どれ？
+どこ？
+どこ？
+どうやってテキスト開く？
+再起動はどこ？
+再起動できてる？
+昨日 17:26
+AI予想したら
+どうしたらいい？
+この画面ではない？
+元々そうなっています
+貼り付けられたテキスト（1 点）.txt
+ドキュメント
+貼り付けられたテキスト（1 点）(1).txt
+ドキュメント
+貼り付けられたテキスト（1 点）(2).txt
+ドキュメント
+貼り付けられたテキスト（1 点）(3).txt
+ドキュメント
+貼り付けられたテキスト（1 点）(4).txt
+ドキュメント
+どこに追加？
+貼り付けられたテキスト（1 点）(5).txt
+ドキュメント
+あってます？
+2026 08 15T15 22 Export
+日本語にして
+貼り付けられたテキスト（1 点）(6).txt
+ドキュメント
+貼り付けられたテキスト（1 点）(7).txt
+ドキュメント
+貼り付けられたテキスト（1 点）(8).txt
+ドキュメント
+あってます？
+貼り付けられたテキスト（1 点）(9).txt
+ドキュメント
+貼り付けられたテキスト（1 点）(10).txt
+ドキュメント
+貼り付けられたテキスト（1 点）(20260815-161508).txt
+ドキュメント
+
+はい、確認しました。追加位置は合っています。 👍
+
+import も正しく追加されています。
+
+さらに fetch_official_race() 内も、
+
+今節成績取得 → コース別成績取得 → 展示情報取得
+
+という狙いどおりの順番になっています。
+
+特に、取得した course_stats を lane で base に結合し、失敗時には3項目を NaN にする処理まで入っているのでOKです。
+
+次は実際に取得できるか確認です
+
+この official_fetcher.py をGitHubに保存・コミットして、Streamlitが再起動したらレースを1つ読み込んでください。
+
+ログに、
+
+[COURSE_STATS]
+
+または
+
+[COURSE_STATS ERROR]
+
+が出るはずです。
+
+その部分のログをそのまま送ってください。
+
+ここが成功したら、course_top3_rate・course_avg_st・course_start_rank が本当に6艇分取れているか確認します。
+
+まだ予想ロジックには入れません。取得確認 → データの正しさ確認 → その後に予想へ組み込み、の順で進めましょう。
+
+logs-tatsutatsu1028--boatrace-ai-main-app.py-2026-08-15T16_18_36.007Z.txt
+ドキュメント
+
+ログ確認しました。かなり重要なところまで来ています。
+
+今回のログでは、course_stats_fetcher.py 自体は実行されています。 course_stats_fetcher.py:95 の警告が6回出ているので、6艇それぞれについてページ取得・解析処理まで入っていると考えられます。
+
+一方で、期待していた
+
+[COURSE_STATS] ...
+
+も
+
+[COURSE_STATS ERROR] ...
+
+もログには出ていません。検索しても両方とも0件でした。
+
+つまり現状は、
+
+「新しい取得処理はちゃんと呼ばれている。でも取得結果の中身が正しいかは、まだ確認できていない」
+
+という状態です。
+
+なお大量に出ている XMLParsedAsHTMLWarning は、今回の本命エラーではありません。アプリもその後まで動いています。
+
+なので、ここで予想ロジックへ組み込むのはまだ待った方がいいです。
+
+次は course_stats_fetcher.py の実際の取得値を直接ログへ出すようにしましょう。そこで6艇について、
+
+course_top3_rate / course_avg_st / course_start_rank
+
+が正しい数字になっているか確認します。
+
+次は私の方で、確認用ログを入れた course_stats_fetcher.py をそのままGitHubへアップロードできるファイルにして渡すのが一番確実です。
+
+お願い
+分析が終了しました
+from pathlib import Path
+                "lane=", lane,
+                "racer_id=EMPTY",
+            )
+            rows.append(rec)
+            continue
+
+
+        try:
+            stats = fetch_racer_course_stats(racer_id)
+
+
+            print(
+                "[COURSE_STATS DEBUG RAW]",
+                "lane=", lane,
+                "racer_id=", racer_id,
+                stats.to_dict("records"),
+            )
+
+
+            hit = stats[stats["course"] == lane]
+
+
+            if len(hit):
+                x = hit.iloc[0]
+                rec["course_top3_rate"] = x["course_top3_rate"]
+                rec["course_avg_st"] = x["course_avg_st"]
+                rec["course_start_rank"] = x["course_start_rank"]
+
+
+            print(
+                "[COURSE_STATS DEBUG PICK]",
+                "lane=", lane,
+                "racer_id=", racer_id,
+                "top3=", rec["course_top3_rate"],
+                "avg_st=", rec["course_avg_st"],
+                "start_rank=", rec["course_start_rank"],
+            )
+
+
+        except Exception as e:
+            print(
+                "[COURSE_STATS ERROR]",
+                "lane=", lane,
+                "racer_id=", racer_id,
+                type(e).__name__,
+                str(e),
+            )
+
+
+        rows.append(rec)
+
+
+    out = (
+        pd.DataFrame(rows)
+        .sort_values("lane")
+        .reset_index(drop=True)
+    )
+
+
+    print(
+        "[COURSE_STATS DEBUG FINAL]",
+        out.to_dict("records"),
+    )
+
+
+    return out
+'''
+
+
+if old not in text:
+    raise RuntimeError("対象関数が見つかりませんでした。")
+
+
+text = text.replace(old, new, 1)
+compile(text, "course_stats_fetcher_debug.py", "exec")
+
+
+out = Path("/mnt/data/course_stats_fetcher_debug.py")
+out.write_text(text, encoding="utf-8")
+
+
+print("✅ course_stats_fetcher_debug.py を作成しました")
+
+
+STDOUT/STDERR
+✅ course_stats_fetcher_debug.py を作成しました
+
+
+作りました。今回は取得値をログへ直接出す確認用版です。
+
+course_stats_fetcher_debug.py をダウンロード
+
+GitHubでは、今ある course_stats_fetcher.py の中身をこのファイルの中身で置き換えてください。ファイル名は最終的に course_stats_fetcher.py のままです。
+
+コミット後にレースを1つ取得すると、ログへ
+
+[COURSE_STATS DEBUG RAW]
+[COURSE_STATS DEBUG PICK]
+[COURSE_STATS DEBUG FINAL]
+
+が出ます。
+
+その3種類が出ている部分を送ってください。そこで6艇分のコース3連対率・コース平均ST・コースST順位が本当に正しく取れているか確認します。 
+
+course_stats_fetcher_debug.py
+コード
+
+ライブラリ
+/
+course_stats_fetcher_debug.py
 from __future__ import annotations
 
 import re
@@ -141,11 +363,23 @@ def fetch_course_stats_for_race(race):
         }
 
         if not racer_id:
+            print(
+                "[COURSE_STATS DEBUG]",
+                "lane=", lane,
+                "racer_id=EMPTY",
+            )
             rows.append(rec)
             continue
 
         try:
             stats = fetch_racer_course_stats(racer_id)
+
+            print(
+                "[COURSE_STATS DEBUG RAW]",
+                "lane=", lane,
+                "racer_id=", racer_id,
+                stats.to_dict("records"),
+            )
 
             hit = stats[stats["course"] == lane]
 
@@ -154,6 +388,15 @@ def fetch_course_stats_for_race(race):
                 rec["course_top3_rate"] = x["course_top3_rate"]
                 rec["course_avg_st"] = x["course_avg_st"]
                 rec["course_start_rank"] = x["course_start_rank"]
+
+            print(
+                "[COURSE_STATS DEBUG PICK]",
+                "lane=", lane,
+                "racer_id=", racer_id,
+                "top3=", rec["course_top3_rate"],
+                "avg_st=", rec["course_avg_st"],
+                "start_rank=", rec["course_start_rank"],
+            )
 
         except Exception as e:
             print(
@@ -166,8 +409,15 @@ def fetch_course_stats_for_race(race):
 
         rows.append(rec)
 
-    return (
+    out = (
         pd.DataFrame(rows)
         .sort_values("lane")
         .reset_index(drop=True)
     )
+
+    print(
+        "[COURSE_STATS DEBUG FINAL]",
+        out.to_dict("records"),
+    )
+
+    return out
