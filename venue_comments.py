@@ -175,7 +175,39 @@ def _looks_like_natural_comment(s):
     jp = len(re.findall(r"[一-龥々ぁ-んァ-ヶー]", s))
     if jp < 5:
         return False
+ # 選手成績・モーター一覧などの表データを除外する
+    nums = re.findall(r"\d+(?:\.\d+)?", s)
 
+    table_words = (
+        "登録番号",
+        "級別",
+        "勝率/2連率",
+        "勝率",
+        "2連率",
+        "通算",
+        "近況",
+        "モーター一覧",
+        "コメント&モーター",
+        "コメント＆モーター",
+    )
+
+    # 数字が大量に並ぶ文章はコメントではなく表データの可能性が高い
+    if len(nums) >= 4:
+        return False
+
+    # B1 / A1 などの級別と複数の数値が混在する場合も除外
+    if re.search(r"(?:^|\s)[AB][12](?:\s|$|\))", s) and len(nums) >= 2:
+        return False
+
+    # 成績表特有の見出しが複数含まれる文章を除外
+    table_hits = sum(1 for k in table_words if k in s)
+    if table_hits >= 2:
+        return False
+
+    # 文章全体に数字が多すぎるものも除外
+    digit_count = sum(ch.isdigit() for ch in s)
+    if digit_count >= 8 and digit_count / max(len(s), 1) > 0.12:
+        return False
     race_words = (
         "足", "伸び", "出足", "回り", "まわり", "乗り",
         "スタート", "ターン", "気配", "エンジン", "モーター",
@@ -300,7 +332,7 @@ def fetch_gamagori_comments(date_yyyymmdd, jcd, rno, race):
     # 1) 蒲郡公式「コメント＆モーター一覧」
     try:
         html = _get(GAMAGORI_COMMENT_ALL)
-        found = _extract_comments_from_document(html, race)
+        
 
         for idx, row in race.iterrows():
             lane = int(row["lane"])
