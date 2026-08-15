@@ -342,6 +342,10 @@ def _fetch_gamagori_pdf_comments(date_yyyymmdd, rno, race):
         )
 
         text = unicodedata.normalize("NFKC", text)
+        
+         except Exception:
+        return out
+    
     # 3) HTMLで取れなかった艇だけ
     #    蒲郡公式「ガマスポPDF」から補完
     if (out["venue_comment"].astype(str).str.strip() == "").any():
@@ -369,8 +373,6 @@ def _fetch_gamagori_pdf_comments(date_yyyymmdd, rno, race):
 
         except Exception:
             pass
-    except Exception:
-        return out
 
     # 指定Rだけを切り出す
     start_pat = re.compile(
