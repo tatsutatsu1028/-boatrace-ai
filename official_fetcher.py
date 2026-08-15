@@ -8,6 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 from venue_comments import fetch_venue_comments
 from current_meet_fetcher import fetch_current_meet
+from course_stats_fetcher import fetch_course_stats_for_race
 BASE = "https://www.boatrace.jp/owpc/pc/race"
 UA = {
     "User-Agent": "Mozilla/5.0 (compatible; BoatraceAIMobile/2.5; personal-analysis-tool)"
@@ -590,7 +591,39 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
         base["current_meet_top2_rate"] = np.nan
         base["current_meet_avg_st"] = np.nan
         base["current_meet_races"] = 0
+    # 選手のコース別成績を取得
+    try:
+        course_stats = fetch_course_stats_for_race(base)
 
+        base = base.merge(
+            course_stats,
+            on="lane",
+            how="left",
+        )
+
+        print(
+            "[COURSE_STATS]",
+            base[
+                [
+                    "lane",
+                    "racer_id",
+                    "course_top3_rate",
+                    "course_avg_st",
+                    "course_start_rank",
+                ]
+            ].to_dict("records"),
+        )
+
+    except Exception as e:
+        print(
+            "[COURSE_STATS ERROR]",
+            type(e).__name__,
+            str(e),
+        )
+
+        base["course_top3_rate"] = np.nan
+        base["course_avg_st"] = np.nan
+        base["course_start_rank"] = np.nan
     try:
         before = fetch_beforeinfo(date_yyyymmdd, jcd, rno)
     except Exception as e:
