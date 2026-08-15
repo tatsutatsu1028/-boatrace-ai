@@ -115,7 +115,7 @@ def fetch_racelist(date_yyyymmdd, jcd, rno):
             temp["racer_name"]=vals.iloc[:len(temp)].str.replace(r"\s+"," ",regex=True)
         elif "全国" in cs and "勝率" in cs and "racer_win_rate" not in temp:
             temp["racer_win_rate"]=pd.to_numeric(vals.str.extract(r"(\d+\.\d+)")[0],errors="coerce").iloc[:len(temp)].to_numpy()
-        elif ("当地" in cs or "当地" in " ".join(vals.iloc[:3])) and "勝率" in cs and "local_win_rate" not in temp:
+        elif ("当地" in cs or "当地" in " ".join(str(x) for x in np.asarray(vals.iloc[:3]).ravel())) and "勝率" in cs and "local_win_rate" not in temp: and "勝率" in cs and "local_win_rate" not in temp:
             temp["local_win_rate"]=pd.to_numeric(vals.str.extract(r"(\d+\.\d+)")[0],errors="coerce").iloc[:len(temp)].to_numpy()
         elif "モーター" in cs and ("2連" in cs or "２連" in cs) and "motor_2ren" not in temp:
             temp["motor_2ren"]=pd.to_numeric(vals.str.extract(r"(\d+\.\d+)")[0],errors="coerce").iloc[:len(temp)].to_numpy()
