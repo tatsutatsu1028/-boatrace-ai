@@ -424,7 +424,7 @@ def assess_favorite_risk(race, final):
     # 展示F・出遅れ
     st = pd.to_numeric(pd.Series([fav.get("exhibition_st")]), errors="coerce").iloc[0]
     if pd.notna(st) and st < 0:
-        score += 3
+        score += 1
         reasons.append("本命艇が展示F")
 
     # 展示タイムが場内で下位
