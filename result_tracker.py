@@ -1308,3 +1308,56 @@ def calibration_table(df=None):
     ).round(1)
 
     return g
+# -----------------------------
+# Phase 4: 分析ビュー読込
+# -----------------------------
+
+ANALYSIS_VIEWS = {
+    "summary": "ai_performance_summary",
+    "venue": "ai_performance_by_venue",
+    "p1_lane": "ai_performance_by_p1_lane",
+    "p1_prob": "ai_performance_by_p1_prob",
+    "ticket_group": "ai_performance_by_ticket_group",
+    "expected_return": "ai_performance_by_expected_return",
+}
+
+
+def load_analysis_view(kind):
+    """
+    Supabase上のPhase 4分析ビューをDataFrameで取得する。
+    接続失敗・ビュー未作成時は空DataFrameを返す。
+    """
+    if not _use_supabase():
+        return pd.DataFrame()
+
+    view_name = ANALYSIS_VIEWS.get(str(kind))
+    if not view_name:
+        return pd.DataFrame()
+
+    try:
+        url, _ = _supabase_config()
+        endpoint = f"{url}/rest/v1/{view_name}?select=*"
+
+        r = requests.get(
+            endpoint,
+            headers=_headers(),
+            timeout=20,
+        )
+        r.raise_for_status()
+
+        data = r.json()
+
+        if not data:
+            return pd.DataFrame()
+
+        return pd.DataFrame(data)
+
+    except Exception as e:
+        print(
+            "[RESULT_TRACKER] analysis view load error:",
+            view_name,
+            type(e).__name__,
+            str(e),
+            flush=True,
+        )
+        return pd.DataFrame()
