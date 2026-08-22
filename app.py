@@ -13,6 +13,7 @@ from stake_allocator import allocate_stakes_smart
 from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 from result_tracker import (
     load_results,
+    load_analysis_view,
     save_race_result,
     delete_result,
     result_exists,
@@ -232,6 +233,16 @@ with tab3:
 with tab4:
     st.subheader("📊 予想検証")
     results_df = load_results()
+    st.markdown("### 📈 AI成績分析")
+    analysis_summary = load_analysis_view("summary")
+    if analysis_summary.empty:
+        st.info("まだAI成績分析データがありません。")
+    else:
+        st.dataframe(
+            analysis_summary,
+            use_container_width=True,
+            hide_index=True,
+        )
     vm = validation_metrics(results_df)
 
     if vm["races"] == 0:
