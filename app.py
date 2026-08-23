@@ -1,5 +1,6 @@
 import json
 import hmac
+import time
 from datetime import date
 from pathlib import Path
 
@@ -101,34 +102,63 @@ def _login_gate():
         )
         st.stop()
 
-    if st.session_state.get("auth_role") in {"admin", "staff"}:
-        return
+    # 24時間ログイン保持用
+    params = st.query_params
+    saved_role = params.get("login_role", "")
+    saved_until = params.get("login_until", "")
 
-    st.subheader("🔐 ログイン")
-    pin = st.text_input("PIN", type="password", key="login_pin")
-    if st.button("ログイン", key="login_button"):
-        if hmac.compare_digest(pin, admin_pin):
-            st.session_state["auth_role"] = "admin"
-            st.session_state["collector_name"] = "owner"
+    if st.session_state.get("auth_role") not in {"admin", "staff"}:
+        try:
+            if saved_role in {"admin", "staff"} and saved_until:
+                if int(saved_until) > int(time.time()):
+                    st.session_state["auth_role"] = saved_role
+                    st.session_state["collector_name"] = (
+                        "owner" if saved_role == "admin" else "Aさん"
+                    )
+        except (ValueError, TypeError):
+            pass
+
+    if st.session_state.get("auth_role") not in {"admin", "staff"}:
+        st.subheader("🔐 ログイン")
+        pin = st.text_input("PIN", type="password", key="login_pin")
+
+        if st.button("ログイン", key="login_button"):
+            if hmac.compare_digest(pin, admin_pin):
+                role = "admin"
+                collector = "owner"
+            elif hmac.compare_digest(pin, staff_pin):
+                role = "staff"
+                collector = "Aさん"
+            else:
+                st.error("PINが違います。")
+                st.stop()
+
+            st.session_state["auth_role"] = role
+            st.session_state["collector_name"] = collector
+
+            st.query_params["login_role"] = role
+            st.query_params["login_until"] = str(int(time.time()) + 86400)
+
             st.rerun()
-        elif hmac.compare_digest(pin, staff_pin):
-            st.session_state["auth_role"] = "staff"
-            st.session_state["collector_name"] = "Aさん"
-            st.rerun()
-        else:
-            st.error("PINが違います。")
-    st.stop()
 
+        st.stop()
 
-_login_gate()
-IS_ADMIN = st.session_state.get("auth_role") == "admin"
-COLLECTOR_NAME = st.session_state.get("collector_name", "owner")
-st.caption(f"👤 {COLLECTOR_NAME} / {'管理者' if IS_ADMIN else '収集スタッフ'}")
+    IS_ADMIN = st.session_state.get("auth_role") == "admin"
+    COLLECTOR_NAME = st.session_state.get("collector_name", "owner")
 
-if st.button("ログアウト", key="logout_button"):
-    for _key in ("auth_role", "collector_name", "login_pin"):
-        st.session_state.pop(_key, None)
-    st.rerun()
+    st.caption(
+        f"👤 {COLLECTOR_NAME} / "
+        f"{'管理者' if IS_ADMIN else '収集スタッフ'}"
+    )
+
+    if st.button("ログアウト", key="logout_button"):
+        for _key in ("auth_role", "collector_name", "login_pin"):
+            st.session_state.pop(_key, None)
+
+        st.query_params.pop("login_role", None)
+        st.query_params.pop("login_until", None)
+
+        st.rerun()
 
 @st.cache_data
 def load_demo_history():
