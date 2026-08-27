@@ -3,7 +3,8 @@ name: Track Odds
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 8-22 * * *"
+      timezone: "Asia/Tokyo"
 
 jobs:
   track-odds:
