@@ -1,0 +1,91 @@
+name: Collect History
+
+# 学習用の過去データ（展示タイム・級別・天候を含む）を公式サイトから集める。
+#
+# 現在の学習データ sample_history.csv には出走表の5項目しか入っておらず、
+# 展示データをモデルが一度も学習していない。それを解消するための収集。
+#
+# 手動実行のみ。1回あたり5時間で打ち切り、集めた分をリポジトリへ
+# コミットする。同じ期間を指定して再実行すれば続きから再開する。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "開始日 (YYYYMMDD)"
+        required: true
+        default: "20260601"
+      end:
+        description: "終了日 (YYYYMMDD)"
+        required: true
+        default: "20260831"
+      max_hours:
+        description: "1回の実行時間(時間)。GitHubの上限6時間なので5推奨"
+        required: true
+        default: "5"
+
+# 前の実行が終わる前に次が始まると、同じレースを二重に取ってしまう。
+concurrency:
+  group: collect-history
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    # 打ち切り時間より少し長めに取る（コミットの時間を残す）
+    timeout-minutes: 350
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas numpy
+
+      - name: Collect
+        run: |
+          python collect_history.py \
+            --start "${{ inputs.start }}" \
+            --end "${{ inputs.end }}" \
+            --out history_full.csv \
+            --max-hours "${{ inputs.max_hours }}"
+
+      - name: Show result
+        run: |
+          if [ -f history_full.csv ]; then
+            echo "行数: $(wc -l < history_full.csv)"
+            echo "サイズ: $(du -h history_full.csv | cut -f1)"
+          else
+            echo "ファイルが作られませんでした"
+          fi
+
+      # 途中で止まっても集めた分は残す。次回はここから再開する。
+      - name: Commit collected data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f history_full.csv ]; then
+            git add history_full.csv
+            git diff --staged --quiet || git commit -m "collect history data [skip ci]"
+            git pull --rebase
+            git push
+          fi
+
+      # ダウンロードしやすいように成果物としても残す。
+      - name: Upload as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: history_full
+          path: history_full.csv
+          if-no-files-found: warn
+          retention-days: 30
