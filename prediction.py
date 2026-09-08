@@ -207,21 +207,50 @@ def train(history):
             "学習CSVに不足列: " + ", ".join(sorted(missing))
         )
 
+    # 1着モデルは従来どおり、呼び出し側の学習CSVを使う。
+    # 既存の1着予想を不用意に変えないため、ここは挙動を維持する。
     m = _pipeline()
-
-    y = (
+    y_first = (
         pd.to_numeric(history["finish"], errors="coerce") == 1
     ).astype(int)
+    m.fit(history[BASE_NUM + BASE_CAT], y_first)
 
-    m.fit(history[BASE_NUM + BASE_CAT], y)
+    # 2着・3着は実レースの history_full.csv を優先して専用学習する。
+    # 「1着は弱いが2着・3着には来る」外枠タイプを p_first の使い回しで
+    # 潰さないため。実履歴が読めない場合だけ呼び出し側 history にフォールバック。
+    position_history = history
+    try:
+        hist_path = Path(__file__).parent / "history_full.csv"
+        if hist_path.exists():
+            usecols = list(dict.fromkeys(BASE_NUM + BASE_CAT + ["finish"]))
+            real_history = pd.read_csv(hist_path, usecols=usecols)
+            if len(real_history) >= 100:
+                position_history = real_history
+    except Exception:
+        position_history = history
+
+    m_second = _pipeline()
+    y_second = (
+        pd.to_numeric(position_history["finish"], errors="coerce") == 2
+    ).astype(int)
+    m_second.fit(position_history[BASE_NUM + BASE_CAT], y_second)
+
+    m_third = _pipeline()
+    y_third = (
+        pd.to_numeric(position_history["finish"], errors="coerce") == 3
+    ).astype(int)
+    m_third.fit(position_history[BASE_NUM + BASE_CAT], y_third)
+
+    m._second_model = m_second
+    m._third_model = m_third
+    m._position_model_rows = int(len(position_history))
 
     # 予想時に選手×想定コースの決まり手補正を使えるよう、
     # まず学習CSV自身からプロファイルを作る。
     kimarite_stats = _build_course_kimarite_stats(history)
 
     # 既定の sample_history.csv には決まり手列がないため、
-    # 1着モデルの学習元は従来のまま変えず、決まり手プロファイルだけ
-    # 実レース収集データ history_full.csv から補完する。
+    # 決まり手プロファイルだけ実レース収集データから補完する。
     if not kimarite_stats:
         try:
             hist_path = Path(__file__).parent / "history_full.csv"
@@ -655,12 +684,63 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
 
     p = strength / strength.sum()
 
+    # -----------------------------
+    # 2着・3着専用モデル
+    # -----------------------------
+    # 1着確率の使い回しではなく、finish==2 / finish==3 を直接学習した
+    # 専用モデルの出力を使う。さらに場の2着率・3着率を各着順へ直接反映。
+    # これにより「頭は薄いがヒモでは強い」外枠を表現できる。
+    p_second = p.copy()
+    p_third = p.copy()
+
+    try:
+        second_model = getattr(model, "_second_model", None)
+        if second_model is not None:
+            raw_second = second_model.predict_proba(x[BASE_NUM + BASE_CAT])[:, 1]
+            second_adj = np.zeros(len(x), dtype=float)
+
+            if "venue_course_2nd" in x.columns:
+                z_v2 = _rank_score_higher_better(x["venue_course_2nd"])
+                second_adj += 0.20 * np.clip(z_v2, -1.0, 1.0)
+
+            if "course_top3_rate" in x.columns:
+                z_c3 = _rank_score_higher_better(x["course_top3_rate"])
+                second_adj += 0.08 * np.clip(z_c3, -1.0, 1.0)
+
+            second_strength = raw_second * np.exp(second_adj)
+            if second_strength.sum() > 0:
+                p_second = second_strength / second_strength.sum()
+    except Exception:
+        p_second = p.copy()
+
+    try:
+        third_model = getattr(model, "_third_model", None)
+        if third_model is not None:
+            raw_third = third_model.predict_proba(x[BASE_NUM + BASE_CAT])[:, 1]
+            third_adj = np.zeros(len(x), dtype=float)
+
+            if "venue_course_3rd" in x.columns:
+                z_v3 = _rank_score_higher_better(x["venue_course_3rd"])
+                third_adj += 0.18 * np.clip(z_v3, -1.0, 1.0)
+
+            if "course_top3_rate" in x.columns:
+                z_c3 = _rank_score_higher_better(x["course_top3_rate"])
+                third_adj += 0.10 * np.clip(z_c3, -1.0, 1.0)
+
+            third_strength = raw_third * np.exp(third_adj)
+            if third_strength.sum() > 0:
+                p_third = third_strength / third_strength.sum()
+    except Exception:
+        p_third = p.copy()
+
     out = x[["lane"]].copy()
 
     if "racer_name" in x:
         out["racer_name"] = x["racer_name"]
 
     out["p_first"] = p
+    out["p_second"] = p_second
+    out["p_third"] = p_third
     out["adjustment"] = adjustment
 
     # 決まり手補正はlog強度で計算しているため、UIでは
@@ -876,7 +956,7 @@ COURSE_2ND_PROB = {
 }
 # 2着確率に占める実績分布(COURSE_2ND_PROB)のブレンド比率。
 # 0なら従来通り実力(p_first)のみ、1なら実績分布のみに依存する。
-COURSE_2ND_WEIGHT = 0.4
+COURSE_2ND_WEIGHT = 0.2
 
 # 3着の実績分布（残り4艇を若い番号順に並べたときの順位別出現率）。
 # 実レース14,092件（sample_history.csv、1〜3着が揃うレース）から集計。
@@ -889,7 +969,7 @@ COURSE_2ND_WEIGHT = 0.4
 # （最少49件）ため、より頑健な「残り艇内の番号順位」という一般化した
 # 形で使う。
 COURSE_3RD_RANK_PROB = {1: 0.3384, 2: 0.2641, 3: 0.2233, 4: 0.1741}
-COURSE_3RD_WEIGHT = 0.3
+COURSE_3RD_WEIGHT = 0.15
 
 
 def trifecta(
@@ -915,8 +995,10 @@ def trifecta(
     平均予測確率(14.3%→10.8%)が実際の的中率(10.8%)とほぼ一致した。
     どの買い目を選ぶか自体は変わらず、確率の較正だけが改善する。
 
-    さらに2着確率については、実力(p_first)だけのHarville推定に
-    COURSE_2ND_PROB（実績ベースのコース別2連対分布）をブレンドする。
+    2着・3着については、p_firstの使い回しではなく finish==2 / finish==3
+    を直接学習した専用モデルを使用する。場の venue_course_2nd /
+    venue_course_3rd も各着順に直接反映する。COURSE_2ND_PROB等の
+    コース分布は、勝者との条件付き関係を補う弱い事前分布としてだけ残す。
     検証57レースの分析で、1号艇が1着のレースの48%で2号艇が2着に
     入っていたのに、買い目の中に2号艇絡みの組が十分にカバーされて
     おらず（平均で購入点数の1割強にとどまる）3連単的中率が低い
@@ -933,6 +1015,26 @@ def trifecta(
             first["p_first"].astype(float),
         )
     )
+    # 専用2着・3着モデルがある新データはそちらを使い、
+    # 旧保存データ等で列がない場合だけp_firstへフォールバックする。
+    s2 = dict(
+        zip(
+            first["lane"].astype(int),
+            pd.to_numeric(
+                first["p_second"] if "p_second" in first.columns else first["p_first"],
+                errors="coerce",
+            ).fillna(0.0).astype(float),
+        )
+    )
+    s3 = dict(
+        zip(
+            first["lane"].astype(int),
+            pd.to_numeric(
+                first["p_third"] if "p_third" in first.columns else first["p_first"],
+                errors="coerce",
+            ).fillna(0.0).astype(float),
+        )
+    )
 
     rows = []
 
@@ -940,10 +1042,10 @@ def trifecta(
         pa = s[a] / sum(s.values())
 
         denom_b = sum(
-            (v ** gamma_b) for k, v in s.items()
+            (max(v, 1e-12) ** gamma_b) for k, v in s2.items()
             if k != a
         )
-        pb_ability = (s[b] ** gamma_b) / denom_b
+        pb_ability = (max(s2[b], 1e-12) ** gamma_b) / denom_b
         pb_course = COURSE_2ND_PROB.get(a, {}).get(b)
         if pb_course is not None and course_weight > 0:
             pb = (1 - course_weight) * pb_ability + course_weight * pb_course
@@ -951,10 +1053,10 @@ def trifecta(
             pb = pb_ability
 
         denom_c = sum(
-            (v ** gamma_c) for k, v in s.items()
+            (max(v, 1e-12) ** gamma_c) for k, v in s3.items()
             if k not in (a, b)
         )
-        pc_ability = (s[c] ** gamma_c) / denom_c
+        pc_ability = (max(s3[c], 1e-12) ** gamma_c) / denom_c
 
         remaining_sorted = sorted(k for k in s if k not in (a, b))
         c_rank = remaining_sorted.index(c) + 1
