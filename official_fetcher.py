@@ -517,6 +517,26 @@ def fetch_race_result(date_yyyymmdd, jcd, rno):
     combo = f"{first}-{second}-{third}"
 
     # -------------------------------------------------
+    # 1.5) 決まり手を取得
+    # -------------------------------------------------
+    # 公式結果ページの「決まり手」欄から取得する。
+    # 表構造は会場・時期で多少変わるため、ページ本文からラベル近傍を読む。
+    # 表記ゆれ（捲り/まくり、捲り差し/まくり差し）は標準化する。
+    kimarite = None
+    page_text = _norm(soup.get_text(" ", strip=True))
+    km = re.search(
+        r"決まり手\s*(逃げ|差し|まくり差し|捲り差し|まくり|捲り|抜き|恵まれ)",
+        page_text,
+    )
+    if km:
+        kimarite = km.group(1)
+        kimarite = (
+            kimarite
+            .replace("捲り差し", "まくり差し")
+            .replace("捲り", "まくり")
+        )
+
+    # -------------------------------------------------
     # 2) 着順表は補助チェックとして読む
     # -------------------------------------------------
     finishes = {}
@@ -561,6 +581,7 @@ def fetch_race_result(date_yyyymmdd, jcd, rno):
         "third": third,
         "trifecta": combo,
         "trifecta_payout_per_100": int(trifecta_payout),
+        "kimarite": kimarite,
         "source_url": url,
     }
 
