@@ -27,6 +27,131 @@ BASE_CAT = ["venue"]
 # 有効な値がこの数に満たない列は評価対象外にする。
 _ORIGINAL_MIN_VALID = 4
 
+# 選手×想定コースの決まり手実績。
+# BOAT RACE公式の選手「コース別成績」ページには決まり手別内訳がないため、
+# history_full.csv に保存した公式レース結果から自前集計する。
+# 現行システムと同じく艇番＝想定コースとして扱う。
+_KIMARITE_METHODS = (
+    "nige",
+    "makuri",
+    "sashi",
+    "makuri_sashi",
+    "nuki",
+    "megumare",
+)
+_KIMARITE_JA = {
+    "nige": "逃げ",
+    "makuri": "まくり",
+    "sashi": "差し",
+    "makuri_sashi": "まくり差し",
+    "nuki": "抜き",
+    "megumare": "恵まれ",
+}
+_VENUE_KIMARITE_COLS = {
+    "nige": "venue_kimarite_nige",
+    "makuri": "venue_kimarite_makuri",
+    "sashi": "venue_kimarite_sashi",
+    "makuri_sashi": "venue_kimarite_makuri_sashi",
+    "nuki": "venue_kimarite_nuki",
+    "megumare": "venue_kimarite_megumare",
+}
+
+
+def _normalize_kimarite(value):
+    s = "" if value is None else str(value).strip()
+    s = s.replace("捲り差し", "まくり差し").replace("捲り", "まくり")
+    reverse = {v: k for k, v in _KIMARITE_JA.items()}
+    return reverse.get(s)
+
+
+def _normalize_racer_id(value):
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return ""
+    try:
+        return str(int(float(s)))
+    except Exception:
+        return s
+
+
+def _build_course_kimarite_stats(history):
+    """学習履歴から選手×艇番(想定コース)の決まり手分布を作る。"""
+    need = {"racer_id", "lane", "finish", "kimarite"}
+    if history is None or not need.issubset(history.columns):
+        return {}
+
+    h = history[list(need)].copy()
+    h["racer_id"] = h["racer_id"].map(_normalize_racer_id)
+    h["lane"] = pd.to_numeric(h["lane"], errors="coerce")
+    h["finish"] = pd.to_numeric(h["finish"], errors="coerce")
+    h["_kimarite"] = h["kimarite"].map(_normalize_kimarite)
+    h = h[
+        h["racer_id"].ne("")
+        & h["lane"].between(1, 6)
+    ].copy()
+
+    if len(h) == 0:
+        return {}
+
+    starts = h.groupby(["racer_id", "lane"], dropna=False).size()
+    wins = h[(h["finish"] == 1) & h["_kimarite"].notna()].copy()
+
+    win_counts = {}
+    if len(wins):
+        grouped = (
+            wins.groupby(["racer_id", "lane", "_kimarite"], dropna=False)
+            .size()
+        )
+        for (racer_id, lane, method), count in grouped.items():
+            key = (str(racer_id), int(lane))
+            win_counts.setdefault(key, {})[str(method)] = int(count)
+
+    out = {}
+    for (racer_id, lane), start_count in starts.items():
+        key = (str(racer_id), int(lane))
+        counts = win_counts.get(key, {})
+        method_counts = {
+            method: int(counts.get(method, 0))
+            for method in _KIMARITE_METHODS
+        }
+        wins_with_method = int(sum(method_counts.values()))
+        out[key] = {
+            "starts": int(start_count),
+            "wins": wins_with_method,
+            "counts": method_counts,
+        }
+
+    return out
+
+
+def _jensen_shannon_similarity(p, q):
+    """0〜1。1に近いほど2つの決まり手分布が似ている。"""
+    p = np.asarray(p, dtype=float)
+    q = np.asarray(q, dtype=float)
+
+    if (
+        len(p) == 0
+        or len(q) == 0
+        or not np.isfinite(p).all()
+        or not np.isfinite(q).all()
+        or p.sum() <= 0
+        or q.sum() <= 0
+    ):
+        return np.nan
+
+    p = p / p.sum()
+    q = q / q.sum()
+    m = (p + q) / 2.0
+
+    def _kl(a, b):
+        mask = a > 0
+        return float(np.sum(a[mask] * np.log(a[mask] / b[mask])))
+
+    js = 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
+    return float(np.clip(1.0 - js / np.log(2.0), 0.0, 1.0))
+
 
 def _pipeline():
     prep = ColumnTransformer(
@@ -88,6 +213,11 @@ def train(history):
 
     m.fit(history[BASE_NUM + BASE_CAT], y)
 
+    # 予想時に選手×想定コースの決まり手補正を使えるよう、
+    # 同じ学習CSVから集計したプロファイルをモデルに保持する。
+    # kimarite列がない従来CSVでは空dictとなり、既存挙動を変えない。
+    m._course_kimarite_stats = _build_course_kimarite_stats(history)
+
     return m
 
 
@@ -108,7 +238,7 @@ def _rank_score_higher_better(series):
     return -_rank_score_lower_better(series)
 
 
-def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_weight=0.16, weather_weight=0.10, venue_course_weight=0.12, class_weight=0.12, original_display_scale=1.0):
+def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_weight=0.16, weather_weight=0.10, venue_course_weight=0.12, class_weight=0.12, kimarite_weight=0.06, original_display_scale=1.0):
     x = race.copy()
 
     for c in BASE_NUM + BASE_CAT:
@@ -219,6 +349,116 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
 
             if z_course_st[i] >= 0.60:
                 reasons[i].append("コースST良好")
+
+    # -----------------------------
+    # 選手×コース別の決まり手適性による補正
+    # -----------------------------
+    # 選手本人の「その想定コースで勝ったときの決まり手構成」と、
+    # その会場・同コースで出やすい決まり手構成の相性を見る。
+    # 単純な勝利回数を加点すると内コースを二重評価しやすいため、
+    # 勝率そのものではなく分布の類似度だけを使う。
+    #
+    # 少数勝利で100%まくり等に偏るのを避けるため各決まり手に0.5勝の
+    # 擬似カウントを加える。さらに同コース走数12走で満額になる
+    # reliabilityを掛け、データが薄い選手は弱くしか効かない。
+    kimarite_stats = getattr(model, "_course_kimarite_stats", {}) or {}
+    venue_method_cols = set(_VENUE_KIMARITE_COLS.values())
+
+    if (
+        kimarite_weight != 0
+        and kimarite_stats
+        and {"racer_id", "lane"}.issubset(x.columns)
+        and venue_method_cols.issubset(x.columns)
+    ):
+        fit = pd.Series(np.nan, index=x.index, dtype=float)
+        reliability = pd.Series(0.0, index=x.index, dtype=float)
+        dominant_method = pd.Series("", index=x.index, dtype=str)
+
+        for idx, row in x.iterrows():
+            racer_id = _normalize_racer_id(row.get("racer_id"))
+            lane_num = pd.to_numeric(
+                pd.Series([row.get("lane")]),
+                errors="coerce",
+            ).iloc[0]
+
+            if not racer_id or pd.isna(lane_num):
+                continue
+
+            rec = kimarite_stats.get((racer_id, int(lane_num)))
+            if not rec or int(rec.get("wins", 0)) <= 0:
+                continue
+
+            counts = np.array(
+                [
+                    float(rec.get("counts", {}).get(method, 0))
+                    for method in _KIMARITE_METHODS
+                ],
+                dtype=float,
+            )
+            # 0.5ずつの擬似カウントで少数サンプルの極端化を抑える。
+            player_profile = counts + 0.5
+
+            venue_profile = np.array(
+                [
+                    pd.to_numeric(
+                        pd.Series([row.get(_VENUE_KIMARITE_COLS[method])]),
+                        errors="coerce",
+                    ).iloc[0]
+                    for method in _KIMARITE_METHODS
+                ],
+                dtype=float,
+            )
+            venue_profile = np.nan_to_num(
+                venue_profile,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+
+            sim = _jensen_shannon_similarity(
+                player_profile,
+                venue_profile,
+            )
+            if not np.isfinite(sim):
+                continue
+
+            fit.loc[idx] = sim
+            starts = max(0, int(rec.get("starts", 0)))
+            reliability.loc[idx] = min(starts / 12.0, 1.0)
+
+            if counts.sum() > 0:
+                best = int(np.argmax(counts))
+                dominant_method.loc[idx] = _KIMARITE_JA[
+                    _KIMARITE_METHODS[best]
+                ]
+
+        # 2艇だけで順位を付けると片方が満額加点/減点になりやすい。
+        # 3艇以上に有効データがあるときだけ補正する。
+        if fit.notna().sum() >= 3:
+            z_fit = _rank_score_higher_better(fit)
+            kimarite_score = (
+                z_fit
+                * reliability.to_numpy(dtype=float)
+            )
+            kimarite_score = np.clip(kimarite_score, -1.0, 1.0)
+            adjustment += float(kimarite_weight) * kimarite_score
+
+            for pos, (_, row) in enumerate(x.iterrows()):
+                rel = float(reliability.iloc[pos])
+                score = float(kimarite_score[pos])
+                if rel < 0.34:
+                    continue
+
+                method = str(dominant_method.iloc[pos] or "")
+                if score >= 0.45:
+                    if method:
+                        reasons[pos].append(
+                            f"コース決まり手適性({method})"
+                        )
+                    else:
+                        reasons[pos].append("コース決まり手適性")
+                elif score <= -0.45:
+                    reasons[pos].append("コース決まり手相性低")
 
     # -----------------------------
     # 級別（A1/A2/B1/B2）による補正
@@ -415,6 +655,7 @@ def research_prediction_variants(
         weather_weight=0.0,
         venue_course_weight=0.0,
         class_weight=0.0,
+        kimarite_weight=0.0,
         original_display_scale=0.0,
     )
 
@@ -457,6 +698,18 @@ def research_prediction_variants(
         },
     )
 
+    variants["＋決まり手"] = predict(
+        model, race,
+        **{
+            **common,
+            "current_meet_weight": 0.18,
+            "course_weight": 0.16,
+            "class_weight": 0.12,
+            "venue_course_weight": float(venue_course_weight),
+            "kimarite_weight": 0.06,
+        },
+    )
+
     variants["＋展示"] = predict(
         model, race,
         **{
@@ -465,6 +718,7 @@ def research_prediction_variants(
             "course_weight": 0.16,
             "class_weight": 0.12,
             "venue_course_weight": float(venue_course_weight),
+            "kimarite_weight": 0.06,
             "display_weight": float(display_weight),
             "original_display_scale": 1.0,
         },
@@ -478,6 +732,7 @@ def research_prediction_variants(
         weather_weight=float(weather_weight),
         venue_course_weight=float(venue_course_weight),
         class_weight=0.12,
+        kimarite_weight=0.06,
         original_display_scale=1.0,
     )
 
