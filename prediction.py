@@ -24,6 +24,9 @@ BASE_NUM = [
 ]
 BASE_CAT = ["venue"]
 
+# 検証データでロジック世代を区別するための固定ID。
+MODEL_VERSION = "position-v1-20260908"
+
 # オリジナル展示（直線・まわり足・1周）は順位ベースで評価するため、
 # 一部の艇にしか値が入っていないと、その艇だけが不当に高く評価される。
 # 有効な値がこの数に満たない列は評価対象外にする。
@@ -741,6 +744,7 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
     out["p_first"] = p
     out["p_second"] = p_second
     out["p_third"] = p_third
+    out["model_version"] = MODEL_VERSION
     out["adjustment"] = adjustment
 
     # 決まり手補正はlog強度で計算しているため、UIでは
