@@ -229,7 +229,13 @@ def _snapshot_payload(final, tickets, research_variants=None):
     final_rows = []
     for _, row in final.sort_values("lane").iterrows():
         item = {}
-        for c in ("lane", "racer_name", "p_first", "reason"):
+        for c in (
+            "lane", "racer_name", "p_first", "p_second", "p_third",
+            "model_version", "reason",
+            "kimarite_adjustment", "kimarite_effect_pct",
+            "kimarite_starts", "kimarite_wins", "kimarite_dominant",
+            "kimarite_available",
+        ):
             if c in row.index:
                 item[c] = _json_safe(row[c])
         final_rows.append(item)
@@ -253,7 +259,10 @@ def _snapshot_payload(final, tickets, research_variants=None):
             rows = []
             for _, row in variant_df.sort_values("lane").iterrows():
                 item = {}
-                for c in ("lane", "racer_name", "p_first", "reason"):
+                for c in (
+                    "lane", "racer_name", "p_first", "p_second", "p_third",
+                    "model_version", "reason",
+                ):
                     if c in row.index:
                         item[c] = _json_safe(row[c])
                 rows.append(item)
@@ -701,7 +710,13 @@ def save_race_result(
     # 6艇全員の予測確率を保存しておくと、後から「AI予想全体 vs 実際の結果」
     # を1レース単位で振り返れる。final には lane, racer_name, p_first, reason
     # が含まれている想定。
-    lane_keep_cols = ["lane", "racer_name", "p_first", "reason"]
+    lane_keep_cols = [
+        "lane", "racer_name", "p_first", "p_second", "p_third",
+        "model_version", "reason",
+        "kimarite_adjustment", "kimarite_effect_pct",
+        "kimarite_starts", "kimarite_wins", "kimarite_dominant",
+        "kimarite_available",
+    ]
     lane_payload = []
 
     for _, row in final.sort_values("lane").iterrows():
@@ -725,7 +740,10 @@ def save_race_result(
             rows = []
             for _, vrow in variant_df.sort_values("lane").iterrows():
                 item = {}
-                for c in ("lane", "racer_name", "p_first", "reason"):
+                for c in (
+                    "lane", "racer_name", "p_first", "p_second", "p_third",
+                    "model_version", "reason",
+                ):
                     if c in vrow.index:
                         item[c] = _json_safe(vrow[c])
                 rows.append(item)
