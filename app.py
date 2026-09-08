@@ -2290,10 +2290,42 @@ with tab1:
                 lane = int(row["lane"])
                 nm = safe_name(row.get("racer_name", ""))
 
+                # 決まり手補正の内訳を各艇カードに表示する。
+                km_available = bool(row.get("kimarite_available", False))
+                km_effect = pd.to_numeric(
+                    pd.Series([row.get("kimarite_effect_pct")]),
+                    errors="coerce",
+                ).iloc[0]
+                km_starts = pd.to_numeric(
+                    pd.Series([row.get("kimarite_starts")]),
+                    errors="coerce",
+                ).iloc[0]
+                km_wins = pd.to_numeric(
+                    pd.Series([row.get("kimarite_wins")]),
+                    errors="coerce",
+                ).iloc[0]
+                km_dom = safe_name(row.get("kimarite_dominant", ""))
+
+                if km_available and pd.notna(km_effect):
+                    km_parts = [f"決まり手補正 {float(km_effect):+.1f}%"]
+                    if km_dom:
+                        km_parts.append(f"得意 {km_dom}")
+                    if pd.notna(km_starts):
+                        starts_txt = f"{int(km_starts)}走"
+                        if pd.notna(km_wins):
+                            starts_txt += f"（{int(km_wins)}勝）"
+                        km_parts.append(f"コース実績 {starts_txt}")
+                    km_html = " / ".join(km_parts)
+                elif pd.notna(km_starts) and int(km_starts or 0) > 0:
+                    km_html = f"決まり手データ不足 / コース実績 {int(km_starts)}走"
+                else:
+                    km_html = "決まり手データ不足"
+
                 st.markdown(
                     f"""<div class="ticket"><b>{lane}号艇 {nm}</b><br>
 1着 <b>{row['p_first_after']*100:.1f}%</b>
 <span class="small">展示前 {row['p_first_before']*100:.1f}% / {row['変化']*100:+.1f}pt</span><br>
+<span class="small">🎯 {km_html}</span><br>
 <span class="small">{row['reason']}</span></div>""",
                     unsafe_allow_html=True
                 )
