@@ -2068,7 +2068,7 @@ with tab1:
             # -------------------------------------------------
             _rule_hist = load_odds_history(d.strftime("%Y%m%d"), jcd, rno)
             _rule_status = _current_research_rule_status(final, tickets, _rule_hist)
-            with st.expander("🧪 研究ルール判定", expanded=True):
+            with st.expander("🧪 研究ルール判定（補助研究）", expanded=False):
                 _a_mark = "✅ 該当" if _rule_status["A"] else "❌ 非該当"
                 _b_mark = "✅ 暫定該当" if _rule_status["B"] else "❌ 暫定非該当"
                 _c_mark = "✅ 暫定該当" if _rule_status["C"] else "❌ 暫定非該当"
@@ -2190,6 +2190,16 @@ with tab1:
                     key=f"lock_prediction_{ctx}",
                 ):
                     try:
+                        # 当日レースは締切後の固定を禁止する。
+                        # 結果や直前確定情報を見た後の予想が検証データへ混ざるのを防ぐ。
+                        if snapshot_kind == "same_day" and d == _today_jst():
+                            _lock_hhmm = deadlines.get(rno) if deadlines else None
+                            _lock_mins = _deadline_minutes_left(d, _lock_hhmm) if _lock_hhmm else None
+                            if _lock_mins is not None and _lock_mins <= 0:
+                                raise ValueError(
+                                    "締切時刻を過ぎているため、本番検証用の予想は固定できません。"
+                                )
+
                         snap = save_prediction_snapshot(
                             race_key=ctx,
                             race_date=d.isoformat(),
@@ -2575,6 +2585,8 @@ with tab1:
                         payout=int(payout_input),
                         research_variants=st.session_state["result"].get("research_variants", {}),
                         prefer_snapshot=True,
+                        snapshot=snapshot_for_result,
+                        require_snapshot=True,
                         collector_name=COLLECTOR_NAME,
                     )
                     hit_text = "的中" if rec["hit_any_ticket"] else "不的中"
