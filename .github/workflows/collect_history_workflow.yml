@@ -5,10 +5,16 @@ name: Collect History
 # 現在の学習データ sample_history.csv には出走表の5項目しか入っておらず、
 # 展示データをモデルが一度も学習していない。それを解消するための収集。
 #
-# 手動実行のみ。1回あたり5時間で打ち切り、集めた分をリポジトリへ
+# 手動実行に加えて、毎日00:30 JSTに前日分を自動収集する。
+# 手動実行は1回あたり指定時間で打ち切り、集めた分をリポジトリへ
 # コミットする。同じ期間を指定して再実行すれば続きから再開する。
 
 on:
+  # 毎日、日本時間の深夜に「前日分」を自動収集する。
+  # GitHub ActionsのcronはUTC基準なので、15:30 UTC = 00:30 JST。
+  schedule:
+    - cron: "30 15 * * *"
+
   workflow_dispatch:
     inputs:
       start:
@@ -51,13 +57,30 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml pandas numpy
 
+      - name: Resolve collection range
+        id: range
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # UTCのrunner上でもJSTの「昨日」を確実に作る。
+            TARGET_DATE=$(TZ=Asia/Tokyo date -d "yesterday" +%Y%m%d)
+            echo "start=$TARGET_DATE" >> "$GITHUB_OUTPUT"
+            echo "end=$TARGET_DATE" >> "$GITHUB_OUTPUT"
+            echo "max_hours=3" >> "$GITHUB_OUTPUT"
+            echo "自動収集対象: $TARGET_DATE"
+          else
+            echo "start=${{ inputs.start }}" >> "$GITHUB_OUTPUT"
+            echo "end=${{ inputs.end }}" >> "$GITHUB_OUTPUT"
+            echo "max_hours=${{ inputs.max_hours }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Collect
         run: |
           python collect_history.py \
-            --start "${{ inputs.start }}" \
-            --end "${{ inputs.end }}" \
+            --start "${{ steps.range.outputs.start }}" \
+            --end "${{ steps.range.outputs.end }}" \
             --out history_full.csv \
-            --max-hours "${{ inputs.max_hours }}"
+            --max-hours "${{ steps.range.outputs.max_hours }}"
 
       - name: Show result
         run: |
