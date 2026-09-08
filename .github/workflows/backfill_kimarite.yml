@@ -1,0 +1,64 @@
+name: Backfill Kimarite
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_races:
+        description: "今回処理する最大レース数（0=全件）"
+        required: true
+        default: "0"
+      workers:
+        description: "同時取得数（1〜6）"
+        required: true
+        default: "4"
+
+concurrency:
+  group: backfill-kimarite
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas numpy
+
+      - name: Backfill kimarite
+        run: |
+          python backfill_kimarite.py \
+            --path history_full.csv \
+            --workers "${{ inputs.workers }}" \
+            --max-races "${{ inputs.max_races }}"
+
+      - name: Show coverage
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          df = pd.read_csv("history_full.csv")
+          total = df["race_key"].nunique()
+          done = df[df["kimarite"].notna() & df["kimarite"].astype(str).str.strip().ne("")]["race_key"].nunique()
+          print(f"決まり手取得済み: {done}/{total}R")
+          PY
+
+      - name: Commit backfilled history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add history_full.csv
+          git diff --staged --quiet || git commit -m "backfill kimarite history [skip ci]"
+          git pull --rebase
+          git push
