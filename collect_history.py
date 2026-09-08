@@ -189,6 +189,9 @@ def collect_race(hd, jcd, rno):
     df["race_key"] = f"{hd}_{str(jcd).zfill(2)}_{int(rno)}"
     df["trifecta"] = result["trifecta"]
     df["trifecta_payout_per_100"] = result["trifecta_payout_per_100"]
+    # 公式結果の決まり手。レース共通値として6艇行に保持し、
+    # prediction.py 側では finish==1 の勝者行だけを集計に使う。
+    df["kimarite"] = result.get("kimarite")
 
     drop = [c for c in df.columns if c.startswith("source_") or c.endswith("_bi")]
     return df.drop(columns=drop, errors="ignore")
