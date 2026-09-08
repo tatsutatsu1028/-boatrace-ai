@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import itertools
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -214,9 +216,25 @@ def train(history):
     m.fit(history[BASE_NUM + BASE_CAT], y)
 
     # 予想時に選手×想定コースの決まり手補正を使えるよう、
-    # 同じ学習CSVから集計したプロファイルをモデルに保持する。
-    # kimarite列がない従来CSVでは空dictとなり、既存挙動を変えない。
-    m._course_kimarite_stats = _build_course_kimarite_stats(history)
+    # まず学習CSV自身からプロファイルを作る。
+    kimarite_stats = _build_course_kimarite_stats(history)
+
+    # 既定の sample_history.csv には決まり手列がないため、
+    # 1着モデルの学習元は従来のまま変えず、決まり手プロファイルだけ
+    # 実レース収集データ history_full.csv から補完する。
+    if not kimarite_stats:
+        try:
+            hist_path = Path(__file__).parent / "history_full.csv"
+            if hist_path.exists():
+                kh = pd.read_csv(
+                    hist_path,
+                    usecols=["racer_id", "lane", "finish", "kimarite"],
+                )
+                kimarite_stats = _build_course_kimarite_stats(kh)
+        except Exception:
+            kimarite_stats = {}
+
+    m._course_kimarite_stats = kimarite_stats
 
     return m
 
