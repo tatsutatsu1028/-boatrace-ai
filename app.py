@@ -2321,11 +2321,24 @@ with tab1:
                 else:
                     km_html = "決まり手データ不足"
 
+                p2 = pd.to_numeric(
+                    pd.Series([row.get("p_second")]), errors="coerce"
+                ).iloc[0]
+                p3 = pd.to_numeric(
+                    pd.Series([row.get("p_third")]), errors="coerce"
+                ).iloc[0]
+                place_html = ""
+                if pd.notna(p2) and pd.notna(p3):
+                    place_html = (
+                        f'<span class="small">2着 <b>{float(p2)*100:.1f}%</b> / '
+                        f'3着 <b>{float(p3)*100:.1f}%</b></span><br>'
+                    )
+
                 st.markdown(
                     f"""<div class="ticket"><b>{lane}号艇 {nm}</b><br>
 1着 <b>{row['p_first_after']*100:.1f}%</b>
 <span class="small">展示前 {row['p_first_before']*100:.1f}% / {row['変化']*100:+.1f}pt</span><br>
-<span class="small">🎯 {km_html}</span><br>
+{place_html}<span class="small">🎯 {km_html}</span><br>
 <span class="small">{row['reason']}</span></div>""",
                     unsafe_allow_html=True
                 )
