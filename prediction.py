@@ -269,6 +269,14 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
     adjustment = np.zeros(len(x))
     reasons = [[] for _ in range(len(x))]
 
+    # 表示用：選手×コース別の決まり手補正の内訳。
+    # 補正が使えない艇も列自体は返し、UI側で「データ不足」と判定できるようにする。
+    kimarite_adjustment = np.zeros(len(x), dtype=float)
+    kimarite_starts = np.zeros(len(x), dtype=int)
+    kimarite_wins = np.zeros(len(x), dtype=int)
+    kimarite_dominant = np.array([""] * len(x), dtype=object)
+    kimarite_available = np.zeros(len(x), dtype=bool)
+
     # -----------------------------
     # 今節成績による補正
     # -----------------------------
@@ -403,7 +411,16 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
                 continue
 
             rec = kimarite_stats.get((racer_id, int(lane_num)))
-            if not rec or int(rec.get("wins", 0)) <= 0:
+            if not rec:
+                continue
+
+            pos = x.index.get_loc(idx)
+            starts = max(0, int(rec.get("starts", 0)))
+            wins_count = max(0, int(rec.get("wins", 0)))
+            kimarite_starts[pos] = starts
+            kimarite_wins[pos] = wins_count
+
+            if wins_count <= 0:
                 continue
 
             counts = np.array(
@@ -441,14 +458,14 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
                 continue
 
             fit.loc[idx] = sim
-            starts = max(0, int(rec.get("starts", 0)))
             reliability.loc[idx] = min(starts / 12.0, 1.0)
+            kimarite_available[pos] = True
 
             if counts.sum() > 0:
                 best = int(np.argmax(counts))
-                dominant_method.loc[idx] = _KIMARITE_JA[
-                    _KIMARITE_METHODS[best]
-                ]
+                dominant = _KIMARITE_JA[_KIMARITE_METHODS[best]]
+                dominant_method.loc[idx] = dominant
+                kimarite_dominant[pos] = dominant
 
         # 2艇だけで順位を付けると片方が満額加点/減点になりやすい。
         # 3艇以上に有効データがあるときだけ補正する。
@@ -459,7 +476,8 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
                 * reliability.to_numpy(dtype=float)
             )
             kimarite_score = np.clip(kimarite_score, -1.0, 1.0)
-            adjustment += float(kimarite_weight) * kimarite_score
+            kimarite_adjustment = float(kimarite_weight) * kimarite_score
+            adjustment += kimarite_adjustment
 
             for pos, (_, row) in enumerate(x.iterrows()):
                 rel = float(reliability.iloc[pos])
@@ -644,6 +662,16 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
 
     out["p_first"] = p
     out["adjustment"] = adjustment
+
+    # 決まり手補正はlog強度で計算しているため、UIでは
+    # exp(log補正)-1 を「強さの増減率」として表示する。
+    out["kimarite_adjustment"] = kimarite_adjustment
+    out["kimarite_effect_pct"] = (np.exp(kimarite_adjustment) - 1.0) * 100.0
+    out["kimarite_starts"] = kimarite_starts
+    out["kimarite_wins"] = kimarite_wins
+    out["kimarite_dominant"] = kimarite_dominant
+    out["kimarite_available"] = kimarite_available
+
     out["reason"] = [
         " / ".join(r) if r else "基礎データ中心"
         for r in reasons
