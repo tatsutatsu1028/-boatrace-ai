@@ -1502,6 +1502,25 @@ with tab4:
 
 
 
+def _meeting_time_badge(deadlines):
+    """その日の12R締切時刻から、朝・昼・夜開催を簡易判定する。"""
+    if not deadlines:
+        return ""
+    hhmm = str(deadlines.get(12, "") or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", hhmm)
+    if not m:
+        return ""
+    mins = int(m.group(1)) * 60 + int(m.group(2))
+
+    # モーニング系は最終Rが早い。通常デイは夕方まで、
+    # ナイター/ミッドナイト系は夕方以降まで開催する。
+    if mins < 15 * 60:
+        return "🌅朝"
+    if mins < 18 * 60 + 30:
+        return "☀️昼"
+    return "🌙夜"
+
+
 with tab1:
     d = st.date_input("日付", value=_today_jst())
 
@@ -1519,10 +1538,34 @@ with tab1:
         schedule_by_jcd = {
             str(row["jcd"]): row for row in schedule.to_dict("records")
         }
+
+        # 開催中の会場だけ、その日の12R締切から朝/昼/夜を1回判定。
+        # 同じアプリセッションでは再取得しない。
+        _meeting_badges_key = f"meeting_badges_{d.strftime('%Y%m%d')}"
+        if _meeting_badges_key not in st.session_state:
+            _meeting_badges = {}
+            for _code, _info in schedule_by_jcd.items():
+                _holding = bool(_info.get("holding"))
+                _status = str(_info.get("status", "") or "").strip()
+                if not _holding or _status in {"開催終了", "中止"}:
+                    continue
+                try:
+                    _dls = cached_fetch_deadlines(
+                        d.strftime("%Y%m%d"), _code
+                    )
+                    _badge = _meeting_time_badge(_dls)
+                    if _badge:
+                        _meeting_badges[_code] = _badge
+                except Exception:
+                    pass
+            st.session_state[_meeting_badges_key] = _meeting_badges
+
+        meeting_badges = st.session_state.get(_meeting_badges_key, {})
     except Exception as e:
         st.caption("本日の開催状況を取得できませんでした（会場は手動で選べます）。")
         st.code(str(e))
         schedule_by_jcd = {}
+        meeting_badges = {}
 
     venue_codes = list(VENUES.keys())
     cols_per_row = 4
@@ -1549,7 +1592,10 @@ with tab1:
                 marker = "🟢"
             else:
                 marker = "▫️"
+            _time_badge = meeting_badges.get(code, "")
             label = f"{marker} {VENUES[code]}"
+            if _time_badge and active_holding:
+                label += f" {_time_badge}"
 
             with col:
                 if st.button(
@@ -1560,6 +1606,8 @@ with tab1:
                 ):
                     st.session_state["selected_jcd"] = code
                     st.rerun()
+
+    st.caption("🌅朝＝早朝〜昼過ぎまで / ☀️昼＝通常デイ開催 / 🌙夜＝ナイター系")
 
     jcd = st.session_state["selected_jcd"]
     st.info(f"選択中の会場：{jcd} {VENUES[jcd]}")
