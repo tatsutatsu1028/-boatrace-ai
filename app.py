@@ -1537,12 +1537,18 @@ with tab1:
             info = schedule_by_jcd.get(code, {})
             holding = bool(info.get("holding"))
             status = str(info.get("status", "") or "").strip()
-            active_holding = holding and status != "開催終了"
+            is_cancelled = status == "中止"
+            active_holding = holding and status not in {"開催終了", "中止"}
             is_selected = st.session_state["selected_jcd"] == code
 
-            # 🟢は「当日まだ開催中」の会場だけ。
-            # 公式一覧が最終R発売終了/開催終了になったら自動で消す。
-            marker = "🟢" if active_holding else "▫️"
+            # 会場状態をアイコンで区別する。
+            # 🟢 開催中 / ⛔ 中止 / ▫️ 非開催・開催終了
+            if is_cancelled:
+                marker = "⛔"
+            elif active_holding:
+                marker = "🟢"
+            else:
+                marker = "▫️"
             label = f"{marker} {VENUES[code]}"
 
             with col:
@@ -1557,6 +1563,14 @@ with tab1:
 
     jcd = st.session_state["selected_jcd"]
     st.info(f"選択中の会場：{jcd} {VENUES[jcd]}")
+
+    _selected_status = str(
+        schedule_by_jcd.get(jcd, {}).get("status", "") or ""
+    ).strip()
+    if _selected_status == "中止":
+        st.error(
+            f"⛔ {VENUES[jcd]}は本日の開催が中止になっています。"
+        )
 
     # 会場を選んだら、その日の1R〜12R締切予定時刻を一度取得して固定。
     # 締切15分以内のレースだけ「時刻」を赤系で強調する。
