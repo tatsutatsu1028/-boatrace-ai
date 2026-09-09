@@ -1563,11 +1563,16 @@ with tab1:
             str(row["jcd"]): row for row in schedule.to_dict("records")
         }
 
-        # 開催中の会場だけ、その日の12R締切から朝/昼/夜を1回判定。
-        # 同じアプリセッションでは再取得しない。
+        # 開催中の会場だけ、その日の締切一覧を1回取得して、
+        # 朝/昼/夜表示と「締切15分以内の次レース」判定の両方に使う。
         _meeting_badges_key = f"meeting_badges_{d.strftime('%Y%m%d')}"
-        if _meeting_badges_key not in st.session_state:
+        _meeting_deadlines_key = f"meeting_deadlines_{d.strftime('%Y%m%d')}"
+        if (
+            _meeting_badges_key not in st.session_state
+            or _meeting_deadlines_key not in st.session_state
+        ):
             _meeting_badges = {}
+            _meeting_deadlines = {}
             _active_codes = []
             for _code, _info in schedule_by_jcd.items():
                 _holding = bool(_info.get("holding"))
@@ -1575,8 +1580,7 @@ with tab1:
                 if _holding and _status not in {"開催終了", "中止"}:
                     _active_codes.append(_code)
 
-            # 朝/昼/夜判定に必要な12R締切は、会場ごとに独立しているので同時取得する。
-            # 従来の逐次取得だと開催会場数ぶん待ち時間が足し算になっていた。
+            # 会場ごとの締切取得は独立しているため並列取得。
             if _active_codes:
                 with ThreadPoolExecutor(
                     max_workers=min(8, len(_active_codes))
@@ -1592,20 +1596,41 @@ with tab1:
                     for _future in as_completed(_future_codes):
                         _code = _future_codes[_future]
                         try:
-                            _badge = _meeting_time_badge(_future.result())
+                            _dls = _future.result()
+                            _meeting_deadlines[_code] = _dls
+                            _badge = _meeting_time_badge(_dls)
                             if _badge:
                                 _meeting_badges[_code] = _badge
                         except Exception:
                             pass
 
             st.session_state[_meeting_badges_key] = _meeting_badges
+            st.session_state[_meeting_deadlines_key] = _meeting_deadlines
 
         meeting_badges = st.session_state.get(_meeting_badges_key, {})
+        meeting_deadlines = st.session_state.get(_meeting_deadlines_key, {})
     except Exception as e:
         st.caption("本日の開催状況を取得できませんでした（会場は手動で選べます）。")
         st.code(str(e))
         schedule_by_jcd = {}
         meeting_badges = {}
+        meeting_deadlines = {}
+
+    # 会場ごとに「次の未締切レースが15分以内か」を判定。
+    # 該当会場は赤表示し、タップ時にそのRの公式データ取得まで進める。
+    urgent_venues = {}
+    for _code, _dls in meeting_deadlines.items():
+        _candidates = []
+        for _rr, _hhmm in (_dls or {}).items():
+            _mins = _deadline_minutes_left(d, _hhmm)
+            if _mins is not None and 0 <= _mins <= 15:
+                _candidates.append((float(_mins), int(_rr)))
+        if _candidates:
+            _mins, _rr = min(_candidates)
+            urgent_venues[_code] = {
+                "race_no": int(_rr),
+                "minutes": float(_mins),
+            }
 
     venue_codes = list(VENUES.keys())
     cols_per_row = 4
@@ -1637,6 +1662,22 @@ with tab1:
         unsafe_allow_html=True,
     )
 
+    if urgent_venues:
+        _urgent_css = ["<style>"]
+        for _code in urgent_venues:
+            _urgent_css.append(
+                f".st-key-venue_btn_{_code} button "
+                "{background:#d32f2f !important;"
+                "border-color:#d32f2f !important;"
+                "color:white !important;}"
+            )
+            _urgent_css.append(
+                f".st-key-venue_btn_{_code} button p "
+                "{color:white !important;font-weight:900 !important;}"
+            )
+        _urgent_css.append("</style>")
+        st.markdown("".join(_urgent_css), unsafe_allow_html=True)
+
     for i in range(0, len(venue_codes), cols_per_row):
         row_codes = venue_codes[i:i + cols_per_row]
         cols = venue_grid.columns(len(row_codes))
@@ -1667,9 +1708,13 @@ with tab1:
                 elif "夜" in _time_badge:
                     _time_icon = "🌙"
 
-            # スマホ4列でも会場名が切れないよう、時間帯は2行目のアイコンだけにする。
+            # スマホ4列でも会場名が切れないよう、通常は時間帯を2行目に表示。
+            # 締切15分以内なら2行目を対象R表示に切り替える。
+            _urgent = urgent_venues.get(code)
             label = f"{marker} {VENUES[code]}"
-            if _time_icon:
+            if _urgent and active_holding:
+                label += f"\n🔥{int(_urgent['race_no'])}R"
+            elif _time_icon:
                 label += f"\n{_time_icon}"
 
             with col:
@@ -1680,9 +1725,20 @@ with tab1:
                     type="primary" if is_selected else "secondary",
                 ):
                     st.session_state["selected_jcd"] = code
+
+                    # 赤い会場は、次の締切15分以内Rを自動選択して
+                    # 既存のRカードと同じ公式データ取得フローへ流す。
+                    if _urgent and active_holding:
+                        _urgent_rno = int(_urgent["race_no"])
+                        st.session_state["selected_rno"] = _urgent_rno
+                        st.session_state["_pending_race_fetch"] = _urgent_rno
+
                     st.rerun()
 
-    st.caption("🌅朝＝早朝〜昼過ぎまで / ☀️昼＝通常デイ開催 / 🌙夜＝ナイター系")
+    st.caption(
+        "🌅朝＝早朝〜昼過ぎまで / ☀️昼＝通常デイ開催 / 🌙夜＝ナイター系 / "
+        "赤い会場＝次レース締切15分以内（タップでそのRを取得）"
+    )
 
     jcd = st.session_state["selected_jcd"]
     st.info(f"選択中の会場：{jcd} {VENUES[jcd]}")
