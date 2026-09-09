@@ -690,12 +690,12 @@ def cached_fetch_race(date_str, jcd, rno):
 def cached_fetch_odds(date_str, jcd, rno):
     return fetch_odds3t(date_str, jcd, rno)
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_fetch_schedule(date_str):
     """
-    開催会場一覧は日付単位で固定する。
-    date_str がキャッシュキーになるため、日本時間の日付が変わると
-    新しい日付の開催情報を取得する。同じ日付では最大24時間再利用する。
+    開催会場一覧は短時間だけキャッシュする。
+    最終R発売終了後に会場の🟢を速やかに消せるよう、
+    開催状態（発売中/開催終了）を約1分ごとに更新する。
     """
     return fetch_today_schedule(date_str)
 
@@ -728,7 +728,7 @@ def _deadline_html(rno, hhmm, d):
     0〜30分以内の締切だけ時刻を赤系で強調する。
     """
     mins = _deadline_minutes_left(d, hhmm)
-    if mins is not None and 0 <= mins <= 30:
+    if mins is not None and 0 <= mins <= 15:
         time_html = (
             f'<span style="color:#e53935;font-weight:800">{hhmm}</span>'
         )
@@ -1531,11 +1531,13 @@ with tab1:
         for col, code in zip(cols, row_codes):
             info = schedule_by_jcd.get(code, {})
             holding = bool(info.get("holding"))
+            status = str(info.get("status", "") or "").strip()
+            active_holding = holding and status != "開催終了"
             is_selected = st.session_state["selected_jcd"] == code
 
-            # 開催有無はアイコンだけで判別。開催日目・開催中・休み等の
-            # 補助テキストはスマホ画面をすっきりさせるため表示しない。
-            marker = "🟢" if holding else "▫️"
+            # 🟢は「当日まだ開催中」の会場だけ。
+            # 公式一覧が最終R発売終了/開催終了になったら自動で消す。
+            marker = "🟢" if active_holding else "▫️"
             label = f"{marker} {VENUES[code]}"
 
             with col:
@@ -1552,7 +1554,7 @@ with tab1:
     st.info(f"選択中の会場：{jcd} {VENUES[jcd]}")
 
     # 会場を選んだら、その日の1R〜12R締切予定時刻を一度取得して固定。
-    # 締切30分以内のレースだけ「時刻」を赤系で強調する。
+    # 締切15分以内のレースだけ「時刻」を赤系で強調する。
     try:
         deadlines = cached_fetch_deadlines(d.strftime("%Y%m%d"), jcd)
     except Exception:
@@ -1566,14 +1568,14 @@ with tab1:
     st.markdown("#### ⏰ レース・締切予定時刻")
     st.caption("Rと締切時刻のカードをタップすると、そのレースの公式データを取得します。")
 
-    # 締切30分以内はカード文字を赤で強調。
+    # 締切15分以内はカード文字を赤で強調。
     # Streamlitのkey付きcontainerは st-key-<key> のCSSクラスになるため、
     # 対象Rだけ安全に色を変えられる。
     near_deadline = []
     for rr in range(1, 13):
         hhmm = deadlines.get(rr, "--:--") if deadlines else "--:--"
         mins = _deadline_minutes_left(d, hhmm)
-        if mins is not None and 0 <= mins <= 30:
+        if mins is not None and 0 <= mins <= 15:
             near_deadline.append(rr)
 
     if near_deadline:
@@ -1642,12 +1644,12 @@ with tab1:
 
     current_selected = int(st.session_state.get("selected_rno", 12))
 
-    # 締切30分以内のRだけ時刻文字を赤くする。
+    # 締切15分以内のRだけ時刻文字を赤くする。
     near_deadline = []
     for rr in range(1, 13):
         hhmm = deadlines.get(rr, "--:--") if deadlines else "--:--"
         mins = _deadline_minutes_left(d, hhmm)
-        if mins is not None and 0 <= mins <= 30:
+        if mins is not None and 0 <= mins <= 15:
             near_deadline.append(rr)
 
     if near_deadline:
@@ -1686,7 +1688,7 @@ with tab1:
     if not deadlines:
         st.caption("締切予定時刻は取得できませんでしたが、Rカードから公式データ取得はできます。")
     else:
-        st.caption("締切30分以内のレースは赤で強調表示します。")
+        st.caption("締切15分以内のレースは赤で強調表示します。")
 
     rno = int(st.session_state.get("selected_rno", 12))
     ctx = race_key(d, jcd, rno)
