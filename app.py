@@ -1919,11 +1919,11 @@ with tab1:
             })
         if orig[["original_straight","original_turn","original_lap"]].apply(pd.to_numeric, errors="coerce").notna().any().any():
             if _orig_source:
-                st.success(f"オリジナル展示を自動取得済み（{_orig_source}）。AI補正に使用します。")
+                st.success(f"オリジナル展示を自動取得済み（{_orig_source}）。参考表示のみで、AI予想には反映しません。")
             else:
-                st.success("オリジナル展示をAI補正に使用します。")
+                st.success("オリジナル展示は参考表示のみで、AI予想には反映しません。")
         else:
-            st.info("オリジナル展示：未取得・未入力。通常展示・基礎データ中心で予想します。")
+            st.info("オリジナル展示：未取得・未入力。AI予想には影響しません。")
 
         work = edited.merge(orig, on="lane", how="left")
         work["date"] = d.isoformat()
@@ -1981,9 +1981,9 @@ with tab1:
                 with st.spinner("AI解析中…"):
                     model = train(history)
                     pre = work.copy()
-                    # 比較用の「展示反映前」は展示系だけをOFFにする。
-                    # 天候・場特性・今節・コース・級別・決まり手は最終予想と同条件にして、
-                    # 差分が純粋に展示情報の影響になるようにする。
+                    # 比較用の「展示反映前」は通常展示タイムだけをOFFにする。
+                    # オリジナル展示（直線・まわり足・1周）は本番予想に使わない。
+                    # 天候・場特性・今節・コース・級別・決まり手は最終予想と同条件にする。
                     pre["exhibition_time"] = np.nan
                     pre["original_straight"] = np.nan
                     pre["original_turn"] = np.nan
@@ -2003,6 +2003,7 @@ with tab1:
                         display_weight=display_weight,
                         weather_weight=weather_weight,
                         venue_course_weight=venue_course_weight,
+                        original_display_scale=0.0,
                     )
 
                     # 研究用の比較は別計算。final（本番予想）は一切変更しない。
