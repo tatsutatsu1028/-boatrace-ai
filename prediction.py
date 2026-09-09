@@ -288,7 +288,7 @@ def _rank_score_higher_better(series):
     return -_rank_score_lower_better(series)
 
 
-def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_weight=0.16, weather_weight=0.10, venue_course_weight=0.12, class_weight=0.12, kimarite_weight=0.06, original_display_scale=1.0):
+def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_weight=0.16, weather_weight=0.10, venue_course_weight=0.12, class_weight=0.12, kimarite_weight=0.06, original_display_scale=0.0):
     x = race.copy()
 
     for c in BASE_NUM + BASE_CAT:
@@ -850,7 +850,7 @@ def research_prediction_variants(
             "venue_course_weight": float(venue_course_weight),
             "kimarite_weight": 0.06,
             "display_weight": float(display_weight),
-            "original_display_scale": 1.0,
+            "original_display_scale": 0.0,
         },
     )
 
@@ -863,7 +863,7 @@ def research_prediction_variants(
         venue_course_weight=float(venue_course_weight),
         class_weight=0.12,
         kimarite_weight=0.06,
-        original_display_scale=1.0,
+        original_display_scale=0.0,
     )
 
     return variants
