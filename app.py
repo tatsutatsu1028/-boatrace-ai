@@ -1572,6 +1572,31 @@ with tab1:
 
     venue_grid = st.container(key="venue_grid")
 
+    st.markdown(
+        """
+        <style>
+        .st-key-venue_grid button{
+            min-height:58px !important;
+            padding:4px 2px !important;
+        }
+        .st-key-venue_grid button p{
+            white-space:pre-line !important;
+            overflow:visible !important;
+            text-overflow:clip !important;
+            line-height:1.05 !important;
+            font-size:14px !important;
+            text-align:center !important;
+        }
+        @media (max-width:480px){
+            .st-key-venue_grid button p{
+                font-size:13px !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     for i in range(0, len(venue_codes), cols_per_row):
         row_codes = venue_codes[i:i + cols_per_row]
         cols = venue_grid.columns(len(row_codes))
@@ -1593,9 +1618,19 @@ with tab1:
             else:
                 marker = "▫️"
             _time_badge = meeting_badges.get(code, "")
-            label = f"{marker} {VENUES[code]}"
+            _time_icon = ""
             if _time_badge and active_holding:
-                label += f" {_time_badge}"
+                if "朝" in _time_badge:
+                    _time_icon = "🌅"
+                elif "昼" in _time_badge:
+                    _time_icon = "☀️"
+                elif "夜" in _time_badge:
+                    _time_icon = "🌙"
+
+            # スマホ4列でも会場名が切れないよう、時間帯は2行目のアイコンだけにする。
+            label = f"{marker} {VENUES[code]}"
+            if _time_icon:
+                label += f"\n{_time_icon}"
 
             with col:
                 if st.button(
