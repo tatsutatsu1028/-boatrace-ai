@@ -1616,9 +1616,10 @@ with tab1:
         meeting_badges = {}
         meeting_deadlines = {}
 
-    # 会場ごとの赤判定は「締切一覧の中で近いR」ではなく、
-    # 公式開催一覧が現在の次Rとして案内しているレースだけを見る。
-    # これにより、まだ発売開始前の会場が赤くなるのを防ぐ。
+    # 赤判定は、開催中の会場について締切一覧から
+    # 「今より後で最も近いR」を直接求める。
+    # 公式開催一覧の next_race_no 更新が遅れても15分前を拾える一方、
+    # 発売開始前・中止・開催終了の会場は対象外にする。
     urgent_venues = {}
     for _code, _info in schedule_by_jcd.items():
         _holding = bool(_info.get("holding"))
@@ -1630,21 +1631,20 @@ with tab1:
         ):
             continue
 
-        try:
-            _next_rno = int(_info.get("next_race_no"))
-        except Exception:
-            _next_rno = None
+        _dls = meeting_deadlines.get(_code, {}) or {}
+        _future = []
 
-        _next_time = str(
-            _info.get("next_race_time", "") or ""
-        ).strip()
+        for _rr, _hhmm in _dls.items():
+            _mins = _deadline_minutes_left(d, _hhmm)
+            if _mins is not None and _mins >= 0:
+                _future.append((float(_mins), int(_rr)))
 
-        if _next_rno is None or not _next_time:
+        if not _future:
             continue
 
-        _mins = _deadline_minutes_left(d, _next_time)
+        _mins, _next_rno = min(_future)
 
-        if _mins is not None and 0 <= _mins <= 15:
+        if _mins <= 15:
             urgent_venues[_code] = {
                 "race_no": int(_next_rno),
                 "minutes": float(_mins),
