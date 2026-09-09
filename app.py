@@ -1981,13 +1981,29 @@ with tab1:
                 with st.spinner("AI解析中…"):
                     model = train(history)
                     pre = work.copy()
+                    # 比較用の「展示反映前」は展示系だけをOFFにする。
+                    # 天候・場特性・今節・コース・級別・決まり手は最終予想と同条件にして、
+                    # 差分が純粋に展示情報の影響になるようにする。
                     pre["exhibition_time"] = np.nan
                     pre["original_straight"] = np.nan
                     pre["original_turn"] = np.nan
                     pre["original_lap"] = np.nan
                     pre["exhibition_st"] = np.nan
-                    before = predict(model, pre, display_weight=0, weather_weight=0, venue_course_weight=0)
-                    final = predict(model, work, display_weight=display_weight, weather_weight=weather_weight, venue_course_weight=venue_course_weight)
+                    before = predict(
+                        model,
+                        pre,
+                        display_weight=0,
+                        weather_weight=weather_weight,
+                        venue_course_weight=venue_course_weight,
+                        original_display_scale=0.0,
+                    )
+                    final = predict(
+                        model,
+                        work,
+                        display_weight=display_weight,
+                        weather_weight=weather_weight,
+                        venue_course_weight=venue_course_weight,
+                    )
 
                     # 研究用の比較は別計算。final（本番予想）は一切変更しない。
                     research_variants = research_prediction_variants(
@@ -2347,7 +2363,7 @@ with tab1:
                 st.markdown(
                     f"""<div class="ticket"><b>{lane}号艇 {nm}</b><br>
 1着 <b>{row['p_first_after']*100:.1f}%</b>
-<span class="small">展示前 {row['p_first_before']*100:.1f}% / {row['変化']*100:+.1f}pt</span><br>
+<span class="small">展示反映前 {row['p_first_before']*100:.1f}% / 展示効果 {row['変化']*100:+.1f}pt</span><br>
 {place_html}<span class="small">🎯 {km_html}</span><br>
 <span class="small">{row['reason']}</span></div>""",
                     unsafe_allow_html=True
