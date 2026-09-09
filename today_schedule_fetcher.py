@@ -54,7 +54,12 @@ def _parse_venue_block(text):
     next_race_no = None
     next_race_time = ""
 
-    if re.search(r"最終R発売終了|本日は非開催|開催終了", text):
+    # 中止は開催終了より優先して判定する。
+    # 公式一覧では「中止」「開催中止」「レース中止」等の表記揺れがあり得るため、
+    # 「中止」を含めば専用状態として扱う。
+    if "中止" in text:
+        status = "中止"
+    elif re.search(r"最終R発売終了|本日は非開催|開催終了|打切り|打ち切り", text):
         status = "開催終了"
     else:
         m2 = re.search(r"(\d{1,2})R\s*(\d{1,2}:\d{2})", text)
@@ -160,7 +165,7 @@ def fetch_today_schedule(date_yyyymmdd):
 
             has_day = re.search(r"初日|最終日|\d{1,2}日目", text)
             has_status = re.search(
-                r"最終R発売終了|本日は非開催|開催終了|発売開始前|\d{1,2}R\s*\d{1,2}:\d{2}",
+                r"中止|最終R発売終了|本日は非開催|開催終了|打切り|打ち切り|発売開始前|\d{1,2}R\s*\d{1,2}:\d{2}",
                 text,
             )
 
