@@ -4,6 +4,7 @@ import time
 import re
 import base64
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import extra_streamlit_components as stx
@@ -689,6 +690,29 @@ def cached_fetch_race(date_str, jcd, rno):
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_fetch_odds(date_str, jcd, rno):
     return fetch_odds3t(date_str, jcd, rno)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_fetch_race_bundle(date_str, jcd, rno, include_odds=True):
+    """
+    レース本体と3連単オッズは相互依存しないため同時取得する。
+    返す内容は従来の cached_fetch_race / cached_fetch_odds と同じ。
+    """
+    if not include_odds:
+        return fetch_official_race(date_str, jcd, rno), None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        race_future = executor.submit(
+            fetch_official_race, date_str, jcd, rno
+        )
+        odds_future = executor.submit(
+            fetch_odds3t, date_str, jcd, rno
+        )
+        race = race_future.result()
+        odds = odds_future.result()
+
+    return race, odds
+
 
 def fetch_schedule_once(date_str):
     """
@@ -1544,20 +1568,36 @@ with tab1:
         _meeting_badges_key = f"meeting_badges_{d.strftime('%Y%m%d')}"
         if _meeting_badges_key not in st.session_state:
             _meeting_badges = {}
+            _active_codes = []
             for _code, _info in schedule_by_jcd.items():
                 _holding = bool(_info.get("holding"))
                 _status = str(_info.get("status", "") or "").strip()
-                if not _holding or _status in {"開催終了", "中止"}:
-                    continue
-                try:
-                    _dls = cached_fetch_deadlines(
-                        d.strftime("%Y%m%d"), _code
-                    )
-                    _badge = _meeting_time_badge(_dls)
-                    if _badge:
-                        _meeting_badges[_code] = _badge
-                except Exception:
-                    pass
+                if _holding and _status not in {"開催終了", "中止"}:
+                    _active_codes.append(_code)
+
+            # 朝/昼/夜判定に必要な12R締切は、会場ごとに独立しているので同時取得する。
+            # 従来の逐次取得だと開催会場数ぶん待ち時間が足し算になっていた。
+            if _active_codes:
+                with ThreadPoolExecutor(
+                    max_workers=min(8, len(_active_codes))
+                ) as _ex:
+                    _future_codes = {
+                        _ex.submit(
+                            cached_fetch_deadlines,
+                            d.strftime("%Y%m%d"),
+                            _code,
+                        ): _code
+                        for _code in _active_codes
+                    }
+                    for _future in as_completed(_future_codes):
+                        _code = _future_codes[_future]
+                        try:
+                            _badge = _meeting_time_badge(_future.result())
+                            if _badge:
+                                _meeting_badges[_code] = _badge
+                        except Exception:
+                            pass
+
             st.session_state[_meeting_badges_key] = _meeting_badges
 
         meeting_badges = st.session_state.get(_meeting_badges_key, {})
@@ -1802,10 +1842,16 @@ with tab1:
         try:
             with st.spinner(f"{VENUES[jcd]} {rno}R の公式ページを読み込み中…"):
                 # Rカードを明示的にタップした時は最新データを取得する。
+                # レース本体と3連単オッズは同時取得して待ち時間を短縮する。
                 cached_fetch_race.clear()
                 cached_fetch_odds.clear()
-                race = cached_fetch_race(d.strftime("%Y%m%d"), jcd, rno)
-                odds = cached_fetch_odds(d.strftime("%Y%m%d"), jcd, rno) if auto_odds else None
+                cached_fetch_race_bundle.clear()
+                race, odds = cached_fetch_race_bundle(
+                    d.strftime("%Y%m%d"),
+                    jcd,
+                    rno,
+                    include_odds=bool(auto_odds),
+                )
             st.session_state["race"] = race
             st.session_state["odds"] = odds
             st.session_state["race_context"] = ctx
