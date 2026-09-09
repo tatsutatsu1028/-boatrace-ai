@@ -231,6 +231,8 @@ def _snapshot_payload(final, tickets, research_variants=None):
         item = {}
         for c in (
             "lane", "racer_name", "p_first", "p_second", "p_third",
+            "p_second_given_1", "p_second_given_2", "p_second_given_3",
+            "p_second_given_4", "p_second_given_5", "p_second_given_6",
             "model_version", "reason",
             "kimarite_adjustment", "kimarite_effect_pct",
             "kimarite_starts", "kimarite_wins", "kimarite_dominant",
@@ -712,6 +714,8 @@ def save_race_result(
     # が含まれている想定。
     lane_keep_cols = [
         "lane", "racer_name", "p_first", "p_second", "p_third",
+        "p_second_given_1", "p_second_given_2", "p_second_given_3",
+        "p_second_given_4", "p_second_given_5", "p_second_given_6",
         "model_version", "reason",
         "kimarite_adjustment", "kimarite_effect_pct",
         "kimarite_starts", "kimarite_wins", "kimarite_dominant",
