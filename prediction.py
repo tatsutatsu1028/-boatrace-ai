@@ -24,8 +24,13 @@ BASE_NUM = [
 ]
 BASE_CAT = ["venue"]
 
+# 2着v2では「候補艇」と「1着艇」の組み合わせをカテゴリとして直接学習する。
+# 1着モデルの特徴量・学習方法は一切変更しない。
+SECOND_NUM = [col for col in BASE_NUM if col != "lane"]
+SECOND_CAT = BASE_CAT + ["lane", "winner_lane"]
+
 # 検証データでロジック世代を区別するための固定ID。
-MODEL_VERSION = "position-v1-20260908"
+MODEL_VERSION = "position-v2-20260909"
 
 # オリジナル展示（直線・まわり足・1周）は順位ベースで評価するため、
 # 一部の艇にしか値が入っていないと、その艇だけが不当に高く評価される。
@@ -158,7 +163,10 @@ def _jensen_shannon_similarity(p, q):
     return float(np.clip(1.0 - js / np.log(2.0), 0.0, 1.0))
 
 
-def _pipeline():
+def _pipeline(num_cols=None, cat_cols=None):
+    num_cols = list(BASE_NUM if num_cols is None else num_cols)
+    cat_cols = list(BASE_CAT if cat_cols is None else cat_cols)
+
     prep = ColumnTransformer(
         [
             (
@@ -169,7 +177,7 @@ def _pipeline():
                         ("scale", StandardScaler()),
                     ]
                 ),
-                BASE_NUM,
+                num_cols,
             ),
             (
                 "cat",
@@ -185,7 +193,7 @@ def _pipeline():
                         ),
                     ]
                 ),
-                BASE_CAT,
+                cat_cols,
             ),
         ]
     )
@@ -219,24 +227,80 @@ def train(history):
     m.fit(history[BASE_NUM + BASE_CAT], y_first)
 
     # 2着・3着は実レースの history_full.csv を優先して専用学習する。
-    # 「1着は弱いが2着・3着には来る」外枠タイプを p_first の使い回しで
-    # 潰さないため。実履歴が読めない場合だけ呼び出し側 history にフォールバック。
+    # 2着v2はさらに、そのレースで実際に1着だった艇を winner_lane として
+    # 各候補艇へ付与し、P(2着艇 | 1着艇, レース特徴) を直接学習する。
+    # これにより「1号艇が勝つ時の5号艇2着」と
+    # 「4号艇が勝つ時の5号艇2着」を別の事象として扱える。
     position_history = history
+    conditional_second_ready = False
     try:
         hist_path = Path(__file__).parent / "history_full.csv"
         if hist_path.exists():
-            usecols = list(dict.fromkeys(BASE_NUM + BASE_CAT + ["finish"]))
+            usecols = list(
+                dict.fromkeys(
+                    BASE_NUM + BASE_CAT + ["finish", "race_key"]
+                )
+            )
             real_history = pd.read_csv(hist_path, usecols=usecols)
             if len(real_history) >= 100:
                 position_history = real_history
     except Exception:
         position_history = history
 
-    m_second = _pipeline()
-    y_second = (
-        pd.to_numeric(position_history["finish"], errors="coerce") == 2
-    ).astype(int)
-    m_second.fit(position_history[BASE_NUM + BASE_CAT], y_second)
+    # 1レースごとの実1着艇を全6艇の行へ付与する。
+    # race_key がないフォールバック学習データでは従来2着モデルを使う。
+    second_history = position_history.copy()
+    if "race_key" in second_history.columns:
+        try:
+            _finish_num = pd.to_numeric(
+                second_history["finish"], errors="coerce"
+            )
+            _winner_rows = second_history.loc[
+                _finish_num == 1, ["race_key", "lane"]
+            ].copy()
+            _winner_rows["winner_lane"] = pd.to_numeric(
+                _winner_rows["lane"], errors="coerce"
+            )
+            _winner_rows = (
+                _winner_rows[["race_key", "winner_lane"]]
+                .dropna()
+                .drop_duplicates("race_key", keep="first")
+            )
+            second_history = second_history.merge(
+                _winner_rows,
+                on="race_key",
+                how="left",
+            )
+            second_history = second_history[
+                pd.to_numeric(
+                    second_history["winner_lane"], errors="coerce"
+                ).between(1, 6)
+            ].copy()
+            conditional_second_ready = len(second_history) >= 100
+        except Exception:
+            conditional_second_ready = False
+
+    if conditional_second_ready:
+        m_second = _pipeline(
+            num_cols=SECOND_NUM,
+            cat_cols=SECOND_CAT,
+        )
+        y_second = (
+            pd.to_numeric(second_history["finish"], errors="coerce") == 2
+        ).astype(int)
+        m_second.fit(
+            second_history[SECOND_NUM + SECOND_CAT],
+            y_second,
+        )
+    else:
+        m_second = _pipeline()
+        y_second = (
+            pd.to_numeric(position_history["finish"], errors="coerce") == 2
+        ).astype(int)
+        m_second.fit(
+            position_history[BASE_NUM + BASE_CAT],
+            y_second,
+        )
 
     m_third = _pipeline()
     y_third = (
@@ -245,8 +309,10 @@ def train(history):
     m_third.fit(position_history[BASE_NUM + BASE_CAT], y_third)
 
     m._second_model = m_second
+    m._second_model_conditional = bool(conditional_second_ready)
     m._third_model = m_third
     m._position_model_rows = int(len(position_history))
+    m._second_model_rows = int(len(second_history))
 
     # 予想時に選手×想定コースの決まり手補正を使えるよう、
     # まず学習CSV自身からプロファイルを作る。
@@ -696,10 +762,82 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
     p_second = p.copy()
     p_third = p.copy()
 
+    # winner_laneごとの条件付き2着分布を保持する。
+    # key=仮定した1着艇、value=6艇分の2着条件付き確率。
+    p_second_given_winner = {}
+
     try:
         second_model = getattr(model, "_second_model", None)
-        if second_model is not None:
-            raw_second = second_model.predict_proba(x[BASE_NUM + BASE_CAT])[:, 1]
+        conditional_second = bool(
+            getattr(model, "_second_model_conditional", False)
+        )
+
+        if second_model is not None and conditional_second:
+            second_adj = np.zeros(len(x), dtype=float)
+
+            if "venue_course_2nd" in x.columns:
+                z_v2 = _rank_score_higher_better(x["venue_course_2nd"])
+                second_adj += 0.20 * np.clip(z_v2, -1.0, 1.0)
+
+            if "course_top3_rate" in x.columns:
+                z_c3 = _rank_score_higher_better(x["course_top3_rate"])
+                second_adj += 0.08 * np.clip(z_c3, -1.0, 1.0)
+
+            lane_num = pd.to_numeric(
+                x["lane"], errors="coerce"
+            ).to_numpy()
+
+            for winner_lane in range(1, 7):
+                x_second = x.copy()
+                x_second["winner_lane"] = winner_lane
+
+                raw_second = second_model.predict_proba(
+                    x_second[SECOND_NUM + SECOND_CAT]
+                )[:, 1]
+                raw_second = np.clip(raw_second, 1e-9, None)
+
+                second_strength = raw_second * np.exp(second_adj)
+
+                # 1着艇自身は2着になれないので、条件付き分布から除外。
+                second_strength = np.where(
+                    lane_num == winner_lane,
+                    0.0,
+                    second_strength,
+                )
+
+                if second_strength.sum() > 0:
+                    cond = second_strength / second_strength.sum()
+                else:
+                    cond = np.where(
+                        lane_num == winner_lane,
+                        0.0,
+                        1.0,
+                    )
+                    cond = cond / cond.sum()
+
+                p_second_given_winner[winner_lane] = cond
+
+            # UI表示のp_secondは、各1着シナリオの条件付き2着確率を
+            # p_firstで加重した周辺確率として返す。
+            p_second = np.zeros(len(x), dtype=float)
+            lane_to_pos = {
+                int(v): i
+                for i, v in enumerate(lane_num)
+                if np.isfinite(v)
+            }
+            for winner_lane, cond in p_second_given_winner.items():
+                pos = lane_to_pos.get(int(winner_lane))
+                winner_prob = float(p[pos]) if pos is not None else 0.0
+                p_second += winner_prob * cond
+
+            if p_second.sum() > 0:
+                p_second = p_second / p_second.sum()
+
+        elif second_model is not None:
+            # 実履歴にrace_keyが無い場合だけ旧2着モデルへフォールバック。
+            raw_second = second_model.predict_proba(
+                x[BASE_NUM + BASE_CAT]
+            )[:, 1]
             second_adj = np.zeros(len(x), dtype=float)
 
             if "venue_course_2nd" in x.columns:
@@ -713,8 +851,10 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
             second_strength = raw_second * np.exp(second_adj)
             if second_strength.sum() > 0:
                 p_second = second_strength / second_strength.sum()
+
     except Exception:
         p_second = p.copy()
+        p_second_given_winner = {}
 
     try:
         third_model = getattr(model, "_third_model", None)
@@ -744,6 +884,14 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
     out["p_first"] = p
     out["p_second"] = p_second
     out["p_third"] = p_third
+
+    # 3連単計算・将来検証用に、仮定した1着艇ごとの2着条件付き確率も保存。
+    # 例: p_second_given_4 は「4号艇が1着の場合」の各艇2着確率。
+    for winner_lane in range(1, 7):
+        cond = p_second_given_winner.get(winner_lane)
+        if cond is not None:
+            out[f"p_second_given_{winner_lane}"] = cond
+
     out["model_version"] = MODEL_VERSION
     out["adjustment"] = adjustment
 
@@ -960,7 +1108,7 @@ COURSE_2ND_PROB = {
 }
 # 2着確率に占める実績分布(COURSE_2ND_PROB)のブレンド比率。
 # 0なら従来通り実力(p_first)のみ、1なら実績分布のみに依存する。
-COURSE_2ND_WEIGHT = 0.2
+COURSE_2ND_WEIGHT = 0.05
 
 # 3着の実績分布（残り4艇を若い番号順に並べたときの順位別出現率）。
 # 実レース14,092件（sample_history.csv、1〜3着が揃うレース）から集計。
@@ -999,8 +1147,9 @@ def trifecta(
     平均予測確率(14.3%→10.8%)が実際の的中率(10.8%)とほぼ一致した。
     どの買い目を選ぶか自体は変わらず、確率の較正だけが改善する。
 
-    2着・3着については、p_firstの使い回しではなく finish==2 / finish==3
-    を直接学習した専用モデルを使用する。場の venue_course_2nd /
+    2着・3着については、p_firstの使い回しではなく専用モデルを使用する。
+    2着v2は winner_lane（仮定した1着艇）を条件に加え、
+    P(2着艇 | 1着艇, レース特徴) を直接学習する。場の venue_course_2nd /
     venue_course_3rd も各着順に直接反映する。COURSE_2ND_PROB等の
     コース分布は、勝者との条件付き関係を補う弱い事前分布としてだけ残す。
     検証57レースの分析で、1号艇が1着のレースの48%で2号艇が2着に
@@ -1019,8 +1168,9 @@ def trifecta(
             first["p_first"].astype(float),
         )
     )
-    # 専用2着・3着モデルがある新データはそちらを使い、
-    # 旧保存データ等で列がない場合だけp_firstへフォールバックする。
+    # p_secondはUI用の周辺確率。
+    # position-v2では、3連単の各1着シナリオごとに
+    # p_second_given_<winner> を優先して使う。
     s2 = dict(
         zip(
             first["lane"].astype(int),
@@ -1045,11 +1195,28 @@ def trifecta(
     for a, b, c in itertools.permutations(range(1, 7), 3):
         pa = s[a] / sum(s.values())
 
+        conditional_col = f"p_second_given_{a}"
+        if conditional_col in first.columns:
+            s2_for_a = dict(
+                zip(
+                    first["lane"].astype(int),
+                    pd.to_numeric(
+                        first[conditional_col],
+                        errors="coerce",
+                    ).fillna(0.0).astype(float),
+                )
+            )
+        else:
+            s2_for_a = s2
+
         denom_b = sum(
-            (max(v, 1e-12) ** gamma_b) for k, v in s2.items()
+            (max(v, 1e-12) ** gamma_b)
+            for k, v in s2_for_a.items()
             if k != a
         )
-        pb_ability = (max(s2[b], 1e-12) ** gamma_b) / denom_b
+        pb_ability = (
+            max(s2_for_a[b], 1e-12) ** gamma_b
+        ) / denom_b
         pb_course = COURSE_2ND_PROB.get(a, {}).get(b)
         if pb_course is not None and course_weight > 0:
             pb = (1 - course_weight) * pb_ability + course_weight * pb_course
