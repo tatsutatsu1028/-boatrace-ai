@@ -690,12 +690,11 @@ def cached_fetch_race(date_str, jcd, rno):
 def cached_fetch_odds(date_str, jcd, rno):
     return fetch_odds3t(date_str, jcd, rno)
 
-@st.cache_data(ttl=60, show_spinner=False)
-def cached_fetch_schedule(date_str):
+def fetch_schedule_once(date_str):
     """
-    開催会場一覧は短時間だけキャッシュする。
-    最終R発売終了後に会場の🟢を速やかに消せるよう、
-    開催状態（発売中/開催終了）を約1分ごとに更新する。
+    開催会場一覧はアプリを開いたセッション内で1回だけ取得する。
+    開いた時点で最終R発売終了/開催終了なら🟢を付けない。
+    その後は自動更新せず、次にアプリを開き直した時に再判定する。
     """
     return fetch_today_schedule(date_str)
 
@@ -1510,7 +1509,13 @@ with tab1:
 
     st.markdown("### 🏟️ 会場を選択")
     try:
-        schedule = cached_fetch_schedule(d.strftime("%Y%m%d"))
+        _schedule_key = f"schedule_once_{d.strftime('%Y%m%d')}"
+        if _schedule_key not in st.session_state:
+            st.session_state[_schedule_key] = fetch_schedule_once(
+                d.strftime("%Y%m%d")
+            )
+
+        schedule = st.session_state[_schedule_key]
         schedule_by_jcd = {
             str(row["jcd"]): row for row in schedule.to_dict("records")
         }
