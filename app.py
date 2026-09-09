@@ -1884,37 +1884,8 @@ with tab1:
             if c != "lane":
                 edited[c] = expo[c].to_numpy()
 
-        st.markdown("### ③ オリジナル展示")
-        st.caption("直線・まわり足・1周タイム等を独自公開している場だけ入力。データがない場は空欄のままでOKです。")
-
+        # オリジナル展示はAI予想に使わないため、常時表示せず参考欄へ格納する。
         _orig_auto_cols = ["original_straight", "original_turn", "original_lap"]
-
-        if OCR_AVAILABLE:
-            with st.expander("📷 画像から自動入力（オリジナル展示のスクリーンショット）", expanded=False):
-                st.caption(
-                    "オリジナル展示のページのスクリーンショットをアップロードすると、"
-                    "一周・まわり足・直線のタイムを自動で読み取って下の表に仮入力します。"
-                    "OCR（文字認識）による読み取りのため誤りが混ざることがあります。"
-                    "反映後は必ず下の表で数値を確認・修正してください。"
-                )
-                ocr_file = st.file_uploader(
-                    "画像を選択", type=["png", "jpg", "jpeg"], key=f"orig_upload_{ctx}",
-                )
-                if ocr_file is not None and st.button("この画像から読み取る", key=f"orig_ocr_btn_{ctx}"):
-                    with st.spinner("画像を解析中…"):
-                        ocr_df = extract_original_exhibition(ocr_file.getvalue())
-                    if ocr_df is None or ocr_df.empty:
-                        st.warning(
-                            "表を読み取れませんでした。表全体がはっきり写っている画像か、"
-                            "拡大・トリミングして再度お試しください。"
-                        )
-                    else:
-                        st.session_state[f"orig_ocr_data_{ctx}"] = ocr_df
-                        st.session_state[f"orig_ver_{ctx}"] = (
-                            st.session_state.get(f"orig_ver_{ctx}", 0) + 1
-                        )
-                        st.success("読み取りました。下の表に仮入力しています。数値を確認してください。")
-                        st.rerun()
 
         orig = pd.DataFrame({"lane": range(1, 7)})
         for c in _orig_auto_cols:
@@ -1929,22 +1900,75 @@ with tab1:
             and race["original_exhibition_source"].astype(str).str.strip().any()
         ) else ""
 
-        _orig_ver = st.session_state.get(f"orig_ver_{ctx}", 0)
-        orig = st.data_editor(
-            orig, use_container_width=True, hide_index=True, num_rows="fixed", key=f"orig_{ctx}_{_orig_ver}",
-            column_config={
-                "lane":st.column_config.NumberColumn("艇", disabled=True, format="%d"),
-                "original_straight":st.column_config.NumberColumn("直線", format="%.2f"),
-                "original_turn":st.column_config.NumberColumn("まわり足", format="%.2f"),
-                "original_lap":st.column_config.NumberColumn("1周", format="%.2f"),
-            })
-        if orig[["original_straight","original_turn","original_lap"]].apply(pd.to_numeric, errors="coerce").notna().any().any():
-            if _orig_source:
-                st.success(f"オリジナル展示を自動取得済み（{_orig_source}）。参考表示のみで、AI予想には反映しません。")
+        _orig_has_data = (
+            orig[_orig_auto_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .notna()
+            .any()
+            .any()
+        )
+        _orig_label = (
+            "📎 参考：オリジナル展示（取得済み）"
+            if _orig_has_data
+            else "📎 参考：オリジナル展示"
+        )
+
+        with st.expander(_orig_label, expanded=False):
+            st.caption(
+                "直線・まわり足・1周タイムの参考欄です。"
+                "現在はAI予想・買い目・確率には反映しません。"
+            )
+
+            if OCR_AVAILABLE:
+                st.caption("画像から読み取る場合は、オリジナル展示のスクリーンショットを選択してください。")
+                ocr_file = st.file_uploader(
+                    "画像を選択",
+                    type=["png", "jpg", "jpeg"],
+                    key=f"orig_upload_{ctx}",
+                )
+                if ocr_file is not None and st.button(
+                    "この画像から読み取る",
+                    key=f"orig_ocr_btn_{ctx}",
+                ):
+                    with st.spinner("画像を解析中…"):
+                        ocr_df = extract_original_exhibition(ocr_file.getvalue())
+                    if ocr_df is None or ocr_df.empty:
+                        st.warning(
+                            "表を読み取れませんでした。表全体がはっきり写っている画像か、"
+                            "拡大・トリミングして再度お試しください。"
+                        )
+                    else:
+                        st.session_state[f"orig_ocr_data_{ctx}"] = ocr_df
+                        st.session_state[f"orig_ver_{ctx}"] = (
+                            st.session_state.get(f"orig_ver_{ctx}", 0) + 1
+                        )
+                        st.success("読み取りました。数値を確認してください。")
+                        st.rerun()
+
+            _orig_ver = st.session_state.get(f"orig_ver_{ctx}", 0)
+            orig = st.data_editor(
+                orig,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                key=f"orig_{ctx}_{_orig_ver}",
+                column_config={
+                    "lane": st.column_config.NumberColumn("艇", disabled=True, format="%d"),
+                    "original_straight": st.column_config.NumberColumn("直線", format="%.2f"),
+                    "original_turn": st.column_config.NumberColumn("まわり足", format="%.2f"),
+                    "original_lap": st.column_config.NumberColumn("1周", format="%.2f"),
+                },
+            )
+
+            if orig[_orig_auto_cols].apply(
+                pd.to_numeric, errors="coerce"
+            ).notna().any().any():
+                if _orig_source:
+                    st.caption(f"自動取得元：{_orig_source} / 参考表示のみ")
+                else:
+                    st.caption("参考表示のみ")
             else:
-                st.success("オリジナル展示は参考表示のみで、AI予想には反映しません。")
-        else:
-            st.info("オリジナル展示：未取得・未入力。AI予想には影響しません。")
+                st.caption("オリジナル展示データはありません。")
 
         work = edited.merge(orig, on="lane", how="left")
         work["date"] = d.isoformat()
