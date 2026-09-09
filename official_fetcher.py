@@ -590,12 +590,9 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
     """
     公式データ高速取得版。
 
-    racelistだけ先に取得し、その後は独立して取得できる
-    今節成績・コース適性・直前情報を並列取得する。
-
-    選手コメント機能（ピットレポート・場コメント自動取得）は
-    著作権上の懸念（他サイトのコメント文をそのまま複製・表示する
-    ことになるため）から廃止した。
+    racelist・今節成績・直前情報・場特性を先に並列取得し、
+    racelist完了後すぐに選手コース適性を追加取得する。
+    取得項目・失敗時フォールバック・最終DataFrame構造は従来どおり。
     """
     _t_total = time.perf_counter()
 
@@ -607,28 +604,6 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
         flush=True,
     )
 
-    # racer_id / racer_name が後続処理で必要なため、
-    # racelistだけは最初に取得する。
-    try:
-        _t = time.perf_counter()
-        base = fetch_racelist(
-            date_yyyymmdd,
-            jcd,
-            rno,
-        )
-        print(
-            f"[FETCH_TIME] racelist: "
-            f"{time.perf_counter() - _t:.2f}s",
-            flush=True,
-        )
-    except Exception as e:
-        raise RuntimeError(
-            f"racelist取得失敗: {type(e).__name__}: {e}"
-        ) from e
-
-    # ここからは相互依存がほぼないので同時取得。
-    started = time.perf_counter()
-
     def _timed(label, func, *args):
         t0 = time.perf_counter()
         result = func(*args)
@@ -639,42 +614,59 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
         )
         return result
 
+    # racelist待ちの間にも、依存しない今節・直前情報・場特性を同時取得する。
+    started = time.perf_counter()
+
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            "current_meet": executor.submit(
-                _timed,
-                "current_meet",
-                fetch_current_meet,
-                date_yyyymmdd,
-                jcd,
-                rno,
-            ),
-            "course_stats": executor.submit(
-                _timed,
-                "course_stats",
-                fetch_course_stats_for_race,
-                base.copy(),
-            ),
-            "beforeinfo": executor.submit(
-                _timed,
-                "beforeinfo",
-                fetch_beforeinfo,
-                date_yyyymmdd,
-                jcd,
-                rno,
-            ),
-            "venue_course_profile": executor.submit(
-                _timed,
-                "venue_course_profile",
-                fetch_venue_course_profile,
-                jcd,
-            ),
-        }
+        racelist_future = executor.submit(
+            _timed,
+            "racelist",
+            fetch_racelist,
+            date_yyyymmdd,
+            jcd,
+            rno,
+        )
+        meet_future = executor.submit(
+            _timed,
+            "current_meet",
+            fetch_current_meet,
+            date_yyyymmdd,
+            jcd,
+            rno,
+        )
+        before_future = executor.submit(
+            _timed,
+            "beforeinfo",
+            fetch_beforeinfo,
+            date_yyyymmdd,
+            jcd,
+            rno,
+        )
+        venue_future = executor.submit(
+            _timed,
+            "venue_course_profile",
+            fetch_venue_course_profile,
+            jcd,
+        )
+
+        # racer_id / racer_name が必要なので、コース適性だけracelist後に開始。
+        try:
+            base = racelist_future.result()
+        except Exception as e:
+            raise RuntimeError(
+                f"racelist取得失敗: {type(e).__name__}: {e}"
+            ) from e
+
+        course_future = executor.submit(
+            _timed,
+            "course_stats",
+            fetch_course_stats_for_race,
+            base.copy(),
+        )
 
         # 今節成績
         try:
-            meet = futures["current_meet"].result()
-
+            meet = meet_future.result()
             base = base.merge(
                 meet,
                 on="lane",
@@ -694,7 +686,6 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
                 ].to_dict("records"),
                 flush=True,
             )
-
         except Exception as e:
             print(
                 "[CURRENT_MEET ERROR]",
@@ -702,7 +693,6 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
                 str(e),
                 flush=True,
             )
-
             base["current_meet_avg_finish"] = np.nan
             base["current_meet_top2_rate"] = np.nan
             base["current_meet_avg_st"] = np.nan
@@ -710,8 +700,7 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
 
         # コース適性
         try:
-            course_stats = futures["course_stats"].result()
-
+            course_stats = course_future.result()
             base = base.merge(
                 course_stats,
                 on="lane",
@@ -731,7 +720,6 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
                 ].to_dict("records"),
                 flush=True,
             )
-
         except Exception as e:
             print(
                 "[COURSE_STATS ERROR]",
@@ -739,23 +727,19 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
                 str(e),
                 flush=True,
             )
-
             base["course_top3_rate"] = np.nan
             base["course_avg_st"] = np.nan
             base["course_start_rank"] = np.nan
 
-        # beforeinfo は主要データなので、従来どおり失敗時は全体エラーにする。
+        # beforeinfo は主要データなので、失敗時は従来どおり全体エラー。
         try:
-            before = futures["beforeinfo"].result()
+            before = before_future.result()
         except Exception as e:
             raise RuntimeError(
                 f"beforeinfo取得失敗: {type(e).__name__}: {e}"
             ) from e
 
-        # オリジナル展示（直線・まわり足・1周）は自動取得を廃止した
-        # （公式・非公式サイトのいずれにも安定した取得元がなく、
-        # 唯一見つかったソースはロボット自動アクセスを禁止していたため）。
-        # app.py側の手入力欄で埋めてもらう前提で、常に空のまま返す。
+        # オリジナル展示は参考表示のみ。自動取得は行わない。
         original_exhibition = pd.DataFrame({
             "lane": range(1, 7),
             "original_straight": [None] * 6,
@@ -765,10 +749,12 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
             "original_exhibition_url": [""] * 6,
         })
 
-        # 場全体のコース特性（逃げ率・決まり手）も失敗しても続行
+        # 場全体のコース特性は失敗しても続行。
         try:
-            venue_course_profile = futures["venue_course_profile"].result()
-            venue_course_profile = venue_course_profile.rename(columns={"course": "lane"})
+            venue_course_profile = venue_future.result()
+            venue_course_profile = venue_course_profile.rename(
+                columns={"course": "lane"}
+            )
             print(
                 "[OFFICIAL_FETCHER] venue course profile done:",
                 "rows=", len(venue_course_profile),
@@ -828,9 +814,7 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
 
         if "racer_name_beforeinfo" in out.columns:
             if "racer_name" not in out.columns:
-                out["racer_name"] = (
-                    out["racer_name_beforeinfo"]
-                )
+                out["racer_name"] = out["racer_name_beforeinfo"]
             else:
                 miss = (
                     out["racer_name"].isna()
@@ -841,18 +825,12 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
                         == ""
                     )
                 )
-
-                out.loc[
-                    miss,
-                    "racer_name",
-                ] = out.loc[
+                out.loc[miss, "racer_name"] = out.loc[
                     miss,
                     "racer_name_beforeinfo",
                 ]
 
-        out["venue"] = VENUES[
-            str(jcd).zfill(2)
-        ]
+        out["venue"] = VENUES[str(jcd).zfill(2)]
         out["race_no"] = int(rno)
         out["date"] = pd.to_datetime(
             date_yyyymmdd
