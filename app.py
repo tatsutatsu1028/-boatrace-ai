@@ -2879,12 +2879,12 @@ with tab1:
 
 
     # -------------------------------------------------
-    # 画面最上部からのプルダウンで会場一覧を再取得
+    # 下方向への長いプル操作で会場一覧を再取得
     # -------------------------------------------------
-    # スマホでページ最上部にいる状態から、さらに下へ引っ張った時だけ
+    # スマホで下方向へ引っ張る操作を3秒以上続けた場合だけ、
     # 開催会場・開催状態・締切15分以内判定を公式から取り直す。
-    # 選択中会場・予想結果は維持する。
-    def _refresh_venues_from_pull():
+    # ページ最上部である必要はない。選択中会場・予想結果は維持する。
+    def _refresh_venues_from_long_pull():
         _date_key = d.strftime("%Y%m%d")
         for _key in (
             f"schedule_once_{_date_key}",
@@ -2896,18 +2896,18 @@ with tab1:
     st.markdown(
         """
         <style>
-        .st-key-pull_venue_refresh_trigger{
+        .st-key-long_pull_venue_refresh_trigger{
             display:none !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-    with st.container(key="pull_venue_refresh_trigger"):
+    with st.container(key="long_pull_venue_refresh_trigger"):
         st.button(
             "会場一覧を更新",
-            key="pull_venue_refresh_button",
-            on_click=_refresh_venues_from_pull,
+            key="long_pull_venue_refresh_button",
+            on_click=_refresh_venues_from_long_pull,
         )
 
     components.html(
@@ -2915,61 +2915,94 @@ with tab1:
         <script>
         (() => {
           const p = window.parent;
-          if (!p || p.__boatAiPullVenueRefreshInstalled) return;
-          p.__boatAiPullVenueRefreshInstalled = true;
+          if (!p || p.__boatAiLongPullVenueRefreshInstalled) return;
+          p.__boatAiLongPullVenueRefreshInstalled = true;
 
           let startY = null;
-          let pulling = false;
+          let lastY = null;
+          let startedAt = 0;
+          let timer = null;
+          let active = false;
           let fired = false;
-          const threshold = 72;
 
-          const atTop = () => {
-            const doc = p.document.documentElement;
-            const body = p.document.body;
-            return (p.scrollY || doc.scrollTop || body.scrollTop || 0) <= 2;
-          };
+          const holdMs = 3000;
+          const minPullPx = 48;
+          const maxUpwardTolerancePx = 12;
 
           const findButton = () => p.document.querySelector(
-            ".st-key-pull_venue_refresh_trigger button"
+            ".st-key-long_pull_venue_refresh_trigger button"
           );
 
+          const clearState = () => {
+            if (timer) {
+              p.clearTimeout(timer);
+              timer = null;
+            }
+            startY = null;
+            lastY = null;
+            startedAt = 0;
+            active = false;
+            fired = false;
+          };
+
+          const armTimer = () => {
+            if (timer) p.clearTimeout(timer);
+            timer = p.setTimeout(() => {
+              if (!active || fired || startY === null || lastY === null) return;
+              const dy = lastY - startY;
+              if (dy < minPullPx) return;
+
+              const btn = findButton();
+              if (!btn) return;
+
+              fired = true;
+              active = false;
+              btn.click();
+            }, holdMs);
+          };
+
           p.document.addEventListener("touchstart", (e) => {
-            if (!atTop() || !e.touches || e.touches.length !== 1) {
-              startY = null;
-              pulling = false;
-              fired = false;
+            if (!e.touches || e.touches.length !== 1) {
+              clearState();
               return;
             }
             startY = e.touches[0].clientY;
-            pulling = true;
+            lastY = startY;
+            startedAt = Date.now();
+            active = true;
             fired = false;
+            armTimer();
           }, {passive:true});
 
           p.document.addEventListener("touchmove", (e) => {
-            if (!pulling || fired || startY === null || !atTop()) return;
-            if (!e.touches || e.touches.length !== 1) return;
+            if (!active || fired || startY === null) return;
+            if (!e.touches || e.touches.length !== 1) {
+              clearState();
+              return;
+            }
 
-            const dy = e.touches[0].clientY - startY;
-            if (dy >= threshold) {
-              const btn = findButton();
-              if (!btn) return;
-              fired = true;
-              pulling = false;
-              btn.click();
+            const y = e.touches[0].clientY;
+            const dyFromStart = y - startY;
+            const stepDy = y - (lastY ?? y);
+            lastY = y;
+
+            // 上方向へ戻したり、下方向への引っ張りが弱い状態に戻ったら解除。
+            if (
+              dyFromStart < -maxUpwardTolerancePx ||
+              (Date.now() - startedAt > 250 && dyFromStart < 8)
+            ) {
+              clearState();
+              return;
+            }
+
+            // 下方向へ引っ張っている間だけ3秒タイマーを維持。
+            if (dyFromStart >= 8 || stepDy > 0) {
+              if (!timer) armTimer();
             }
           }, {passive:true});
 
-          p.document.addEventListener("touchend", () => {
-            startY = null;
-            pulling = false;
-            fired = false;
-          }, {passive:true});
-
-          p.document.addEventListener("touchcancel", () => {
-            startY = null;
-            pulling = false;
-            fired = false;
-          }, {passive:true});
+          p.document.addEventListener("touchend", clearState, {passive:true});
+          p.document.addEventListener("touchcancel", clearState, {passive:true});
         })();
         </script>
         """,
