@@ -1,17 +1,103 @@
 from pathlib import Path
 
+import requests
 import streamlit as st
 
-# 本体は app_core.py。ここでは表示だけを追加してから本体を実行する。
+# 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
 # 予想ロジック・買い目・確率計算には触れない。
 if not hasattr(st, "_boat_ai_original_subheader"):
     st._boat_ai_original_subheader = st.subheader
+
+
+def _supabase_settings_config():
+    try:
+        cfg = st.secrets.get("supabase", {})
+        url = str(cfg.get("url", "") or "").strip().rstrip("/")
+        key = str(cfg.get("key", "") or "").strip()
+        return url, key
+    except Exception:
+        return "", ""
+
+
+def _load_random_auto_settings():
+    url, key = _supabase_settings_config()
+    if not url or not key:
+        return False, 3
+    try:
+        r = requests.get(
+            f"{url}/rest/v1/app_settings?id=eq.1&select=random_auto_enabled,random_auto_daily_count",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+        if rows:
+            row = rows[0]
+            return bool(row.get("random_auto_enabled", False)), int(row.get("random_auto_daily_count", 3) or 3)
+    except Exception:
+        pass
+    return False, 3
+
+
+def _save_random_auto_settings(enabled, daily_count):
+    url, key = _supabase_settings_config()
+    if not url or not key:
+        raise RuntimeError("Supabase設定が見つかりません。")
+    r = requests.patch(
+        f"{url}/rest/v1/app_settings?id=eq.1",
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+        json={
+            "random_auto_enabled": bool(enabled),
+            "random_auto_daily_count": int(daily_count),
+        },
+        timeout=10,
+    )
+    r.raise_for_status()
+
+
+def _render_random_auto_settings():
+    enabled, daily_count = _load_random_auto_settings()
+    st.markdown("#### 🎲 ランダム自動固定")
+    st.caption("締切前の開催レースからランダムに選び、予想→固定だけを自動で行います。舟券購入はしません。")
+
+    is_owner = st.session_state.get("auth_role") == "admin"
+    if not is_owner:
+        st.info(f"現在：{'ON' if enabled else 'OFF'} / 1日 {daily_count}R（変更はオーナーのみ）")
+        return
+
+    new_enabled = st.toggle(
+        "ランダム自動固定をONにする",
+        value=enabled,
+        key="random_auto_enabled_owner",
+    )
+    new_count = st.selectbox(
+        "1日の自動固定数",
+        options=[1, 2, 3, 4, 5, 6, 8, 10],
+        index=[1, 2, 3, 4, 5, 6, 8, 10].index(daily_count) if daily_count in [1, 2, 3, 4, 5, 6, 8, 10] else 2,
+        key="random_auto_daily_count_owner",
+        disabled=not new_enabled,
+    )
+
+    if new_enabled != enabled or int(new_count) != int(daily_count):
+        try:
+            _save_random_auto_settings(new_enabled, new_count)
+            st.success(f"ランダム自動固定を{'ON' if new_enabled else 'OFF'}にしました。")
+        except Exception as e:
+            st.error(f"自動固定設定を保存できませんでした: {e}")
 
 
 def _boat_ai_subheader(body, *args, **kwargs):
     rendered = st._boat_ai_original_subheader(body, *args, **kwargs)
 
     try:
+        if isinstance(body, str) and body == "買い目設定":
+            _render_random_auto_settings()
+
         if isinstance(body, str) and body.endswith("AI最終予想"):
             current = st.session_state.get("result") or {}
             final = current.get("final")
