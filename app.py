@@ -7,8 +7,6 @@ import streamlit as st
 # 予想ロジック・買い目・確率計算には触れない。
 if not hasattr(st, "_boat_ai_original_subheader"):
     st._boat_ai_original_subheader = st.subheader
-if not hasattr(st, "_boat_ai_original_tabs"):
-    st._boat_ai_original_tabs = st.tabs
 
 
 def _supabase_settings_config():
@@ -93,42 +91,6 @@ def _render_random_auto_settings():
             st.error(f"自動固定設定を保存できませんでした: {e}")
 
 
-def _boat_ai_tabs(labels, *args, **kwargs):
-    rendered = st._boat_ai_original_tabs(labels, *args, **kwargs)
-
-    # スタッフにはメインナビの「設定」「検証」タブ自体を表示しない。
-    # components.html のiframe越しJSは環境によって親DOMへ反映されないため、
-    # Streamlit本体へ直接CSSを注入してメインタブの3・4番目を隠す。
-    try:
-        label_texts = [str(x) for x in labels]
-        is_main_tabs = (
-            "🎯 予想" in label_texts
-            and "🧠 学習データ" in label_texts
-            and "⚙️ 設定" in label_texts
-            and "📊 検証" in label_texts
-        )
-        is_owner = st.session_state.get("auth_role") == "admin"
-        if is_main_tabs and not is_owner:
-            st.markdown(
-                """
-                <style>
-                /* ページ内で最初に作られるstTabsがメインナビ。スタッフは3・4番目を非表示。 */
-                div[data-testid="stTabs"]:first-of-type
-                div[data-baseweb="tab-list"] > button:nth-child(3),
-                div[data-testid="stTabs"]:first-of-type
-                div[data-baseweb="tab-list"] > button:nth-child(4) {
-                    display: none !important;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
-    except Exception:
-        pass
-
-    return rendered
-
-
 def _boat_ai_subheader(body, *args, **kwargs):
     rendered = st._boat_ai_original_subheader(body, *args, **kwargs)
 
@@ -169,7 +131,6 @@ def _boat_ai_subheader(body, *args, **kwargs):
     return rendered
 
 
-st.tabs = _boat_ai_tabs
 st.subheader = _boat_ai_subheader
 
 _core = Path(__file__).with_name("app_core.py")
