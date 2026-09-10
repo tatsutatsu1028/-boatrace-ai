@@ -2,7 +2,6 @@ from pathlib import Path
 
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
 # 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
 # 予想ロジック・買い目・確率計算には触れない。
@@ -98,7 +97,8 @@ def _boat_ai_tabs(labels, *args, **kwargs):
     rendered = st._boat_ai_original_tabs(labels, *args, **kwargs)
 
     # スタッフにはメインナビの「設定」「検証」タブ自体を表示しない。
-    # app_core.py 側の権限制御はそのまま残し、UIだけ役割に合わせて簡潔にする。
+    # components.html のiframe越しJSは環境によって親DOMへ反映されないため、
+    # Streamlit本体へ直接CSSを注入してメインタブの3・4番目を隠す。
     try:
         label_texts = [str(x) for x in labels]
         is_main_tabs = (
@@ -109,33 +109,19 @@ def _boat_ai_tabs(labels, *args, **kwargs):
         )
         is_owner = st.session_state.get("auth_role") == "admin"
         if is_main_tabs and not is_owner:
-            components.html(
+            st.markdown(
                 """
-                <script>
-                (() => {
-                  const hiddenLabels = new Set(['⚙️ 設定', '📊 検証']);
-                  const hideOwnerTabs = () => {
-                    const doc = window.parent.document;
-                    doc.querySelectorAll('[data-baseweb="tab"]').forEach((tab) => {
-                      const text = (tab.textContent || '').trim();
-                      if (hiddenLabels.has(text)) {
-                        tab.style.display = 'none';
-                        tab.setAttribute('aria-hidden', 'true');
-                        tab.tabIndex = -1;
-                      }
-                    });
-                  };
-                  hideOwnerTabs();
-                  setTimeout(hideOwnerTabs, 100);
-                  setTimeout(hideOwnerTabs, 500);
-                  const observer = new MutationObserver(hideOwnerTabs);
-                  observer.observe(window.parent.document.body, {childList: true, subtree: true});
-                  setTimeout(() => observer.disconnect(), 5000);
-                })();
-                </script>
+                <style>
+                /* ページ内で最初に作られるstTabsがメインナビ。スタッフは3・4番目を非表示。 */
+                div[data-testid="stTabs"]:first-of-type
+                div[data-baseweb="tab-list"] > button:nth-child(3),
+                div[data-testid="stTabs"]:first-of-type
+                div[data-baseweb="tab-list"] > button:nth-child(4) {
+                    display: none !important;
+                }
+                </style>
                 """,
-                height=0,
-                width=0,
+                unsafe_allow_html=True,
             )
     except Exception:
         pass
