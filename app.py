@@ -2,11 +2,14 @@ from pathlib import Path
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
 # 予想ロジック・買い目・確率計算には触れない。
 if not hasattr(st, "_boat_ai_original_subheader"):
     st._boat_ai_original_subheader = st.subheader
+if not hasattr(st, "_boat_ai_original_tabs"):
+    st._boat_ai_original_tabs = st.tabs
 
 
 def _supabase_settings_config():
@@ -91,6 +94,55 @@ def _render_random_auto_settings():
             st.error(f"自動固定設定を保存できませんでした: {e}")
 
 
+def _boat_ai_tabs(labels, *args, **kwargs):
+    rendered = st._boat_ai_original_tabs(labels, *args, **kwargs)
+
+    # スタッフにはメインナビの「設定」「検証」タブ自体を表示しない。
+    # app_core.py 側の権限制御はそのまま残し、UIだけ役割に合わせて簡潔にする。
+    try:
+        label_texts = [str(x) for x in labels]
+        is_main_tabs = (
+            "🎯 予想" in label_texts
+            and "🧠 学習データ" in label_texts
+            and "⚙️ 設定" in label_texts
+            and "📊 検証" in label_texts
+        )
+        is_owner = st.session_state.get("auth_role") == "admin"
+        if is_main_tabs and not is_owner:
+            components.html(
+                """
+                <script>
+                (() => {
+                  const hiddenLabels = new Set(['⚙️ 設定', '📊 検証']);
+                  const hideOwnerTabs = () => {
+                    const doc = window.parent.document;
+                    doc.querySelectorAll('[data-baseweb="tab"]').forEach((tab) => {
+                      const text = (tab.textContent || '').trim();
+                      if (hiddenLabels.has(text)) {
+                        tab.style.display = 'none';
+                        tab.setAttribute('aria-hidden', 'true');
+                        tab.tabIndex = -1;
+                      }
+                    });
+                  };
+                  hideOwnerTabs();
+                  setTimeout(hideOwnerTabs, 100);
+                  setTimeout(hideOwnerTabs, 500);
+                  const observer = new MutationObserver(hideOwnerTabs);
+                  observer.observe(window.parent.document.body, {childList: true, subtree: true});
+                  setTimeout(() => observer.disconnect(), 5000);
+                })();
+                </script>
+                """,
+                height=0,
+                width=0,
+            )
+    except Exception:
+        pass
+
+    return rendered
+
+
 def _boat_ai_subheader(body, *args, **kwargs):
     rendered = st._boat_ai_original_subheader(body, *args, **kwargs)
 
@@ -131,6 +183,7 @@ def _boat_ai_subheader(body, *args, **kwargs):
     return rendered
 
 
+st.tabs = _boat_ai_tabs
 st.subheader = _boat_ai_subheader
 
 _core = Path(__file__).with_name("app_core.py")
