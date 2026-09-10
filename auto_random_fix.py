@@ -159,13 +159,32 @@ def _deadline_is_safe(today, hhmm, margin_minutes=20):
         return False
 
 
+def _exhibition_ready(race):
+    """6艇すべての公式展示タイムが取得できたレースだけを固定対象にする。"""
+    if race is None or len(race) != 6 or "exhibition_time" not in race.columns:
+        return False
+
+    lanes = pd.to_numeric(race.get("lane"), errors="coerce")
+    times = pd.to_numeric(race["exhibition_time"], errors="coerce")
+    valid = lanes.between(1, 6) & times.between(6.0, 8.5)
+    return bool(valid.sum() == 6 and lanes[valid].nunique() == 6)
+
+
 def _pick_candidate(today):
+    """
+    締切20分以上前かつ未固定の候補をランダムに確認し、
+    公式展示タイムが6艇分そろったレースだけを返す。
+
+    展示未公開の候補は固定せずスキップする。候補確認時に取得した
+    race DataFrame をそのまま予想に使い、同じレースの再取得を避ける。
+    """
     date_key = today.strftime("%Y%m%d")
     schedule = fetch_today_schedule(date_key)
     holding = schedule[schedule["holding"].astype(bool)].copy()
     codes = holding["jcd"].astype(str).str.zfill(2).tolist()
     random.shuffle(codes)
 
+    candidates = []
     for jcd in codes:
         try:
             deadlines = fetch_venue_deadlines(date_key, jcd)
@@ -173,15 +192,39 @@ def _pick_candidate(today):
             print("[AUTO_RANDOM] deadline error", jcd, type(e).__name__, e)
             continue
 
-        races = [
-            int(rno) for rno, hhmm in deadlines.items()
-            if _deadline_is_safe(today, hhmm, margin_minutes=20)
-        ]
-        random.shuffle(races)
-        for rno in races:
-            race_key = f"{date_key}_{jcd}_{rno}"
-            if not _snapshot_exists(race_key):
-                return jcd, rno, race_key
+        for rno, hhmm in deadlines.items():
+            if not _deadline_is_safe(today, hhmm, margin_minutes=20):
+                continue
+            race_key = f"{date_key}_{jcd}_{int(rno)}"
+            if _snapshot_exists(race_key):
+                continue
+            candidates.append((jcd, int(rno), race_key))
+
+    random.shuffle(candidates)
+
+    for jcd, rno, race_key in candidates:
+        try:
+            race = fetch_official_race(date_key, jcd, rno)
+        except Exception as e:
+            print(
+                "[AUTO_RANDOM] official data error",
+                race_key,
+                type(e).__name__,
+                e,
+            )
+            continue
+
+        if not _exhibition_ready(race):
+            count = 0
+            if race is not None and "exhibition_time" in race.columns:
+                count = int(pd.to_numeric(race["exhibition_time"], errors="coerce").notna().sum())
+            print(
+                f"[AUTO_RANDOM] exhibition not ready: {race_key} ({count}/6); skip"
+            )
+            continue
+
+        print(f"[AUTO_RANDOM] exhibition ready: {race_key} (6/6)")
+        return jcd, rno, race_key, race
 
     return None
 
@@ -206,18 +249,17 @@ def main():
 
     candidate = _pick_candidate(today)
     if candidate is None:
-        print("[AUTO_RANDOM] no safe race found")
+        print("[AUTO_RANDOM] no unfixed race with complete exhibition data found")
         return
 
-    jcd, rno, race_key = candidate
+    jcd, rno, race_key, race = candidate
     venue = VENUES.get(jcd, jcd)
     date_key = today.strftime("%Y%m%d")
-    print("[AUTO_RANDOM] selected", race_key, venue, f"{rno}R")
+    print("[AUTO_RANDOM] selected", race_key, venue, f"{rno}R", "exhibition=6/6")
 
-    race = fetch_official_race(date_key, jcd, rno)
     odds = fetch_odds3t(date_key, jcd, rno)
-    if race is None or len(race) != 6:
-        raise RuntimeError("公式レースデータを6艇分取得できませんでした。")
+    if race is None or len(race) != 6 or not _exhibition_ready(race):
+        raise RuntimeError("展示タイム6艇分を含む公式レースデータを取得できませんでした。")
     if odds is None or len(odds) < 100:
         raise RuntimeError("3連単オッズを十分に取得できませんでした。")
 
