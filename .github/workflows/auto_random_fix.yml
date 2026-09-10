@@ -1,0 +1,33 @@
+name: Random Auto Fix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 8-20 * * *"
+      timezone: "Asia/Tokyo"
+
+concurrency:
+  group: random-auto-fix
+  cancel-in-progress: false
+
+jobs:
+  auto-random-fix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run random auto fix
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python auto_random_fix.py
