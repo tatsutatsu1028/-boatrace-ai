@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 
 from official_fetcher import VENUES, fetch_official_race, fetch_odds3t, fetch_race_result
@@ -2875,3 +2876,102 @@ with tab1:
                         )
 
                 st.warning("AI予想は確率推定であり、的中・利益を保証しません。オッズ変動、欠場・返還、展示と本番の進入差にも注意してください。")
+
+        # -------------------------------------------------
+        # 最下部到達で会場一覧を再取得
+        # -------------------------------------------------
+        # スマホで画面の一番下までスクロールしたら、開催会場の状態を
+        # BOAT RACE公式から取り直す。選択中会場・予想結果は維持する。
+        def _refresh_venues_from_bottom():
+            _date_key = d.strftime("%Y%m%d")
+            for _key in (
+                f"schedule_once_{_date_key}",
+                f"meeting_badges_{_date_key}",
+                f"meeting_deadlines_{_date_key}",
+            ):
+                st.session_state.pop(_key, None)
+
+        # JSから押すためのStreamlitボタン。画面上では非表示。
+        st.markdown(
+            """
+            <style>
+            .st-key-bottom_venue_refresh_trigger{
+                display:none !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(key="bottom_venue_refresh_trigger"):
+            st.button(
+                "会場一覧を更新",
+                key="bottom_venue_refresh_button",
+                on_click=_refresh_venues_from_bottom,
+            )
+
+        # iframe自体を最下部センサーとして使う。
+        # 一度発火した後は、300px以上上へ戻るまで再発火しないので
+        # rerun直後の無限更新を防げる。
+        components.html(
+            """
+            <script>
+            (() => {
+              const p = window.parent;
+              const frame = window.frameElement;
+              if (!p || !frame) return;
+
+              const armedKey = "boat_ai_bottom_refresh_armed";
+              const topKey = "boat_ai_bottom_refresh_scroll_top";
+
+              if (p.sessionStorage.getItem(armedKey) === null) {
+                p.sessionStorage.setItem(armedKey, "1");
+              }
+
+              // 更新後は会場選択が見える上端へ戻す。
+              if (p.sessionStorage.getItem(topKey) === "1") {
+                p.sessionStorage.removeItem(topKey);
+                setTimeout(() => {
+                  try {
+                    p.scrollTo({top: 0, behavior: "smooth"});
+                  } catch (_) {
+                    p.scrollTo(0, 0);
+                  }
+                }, 120);
+              }
+
+              const rearm = () => {
+                const doc = p.document.documentElement;
+                const body = p.document.body;
+                const scrollTop = p.scrollY || doc.scrollTop || body.scrollTop || 0;
+                const scrollHeight = Math.max(
+                  doc.scrollHeight || 0,
+                  body.scrollHeight || 0
+                );
+                const distance = scrollHeight - (scrollTop + p.innerHeight);
+                if (distance > 300) {
+                  p.sessionStorage.setItem(armedKey, "1");
+                }
+              };
+              p.addEventListener("scroll", rearm, {passive: true});
+
+              const observer = new p.IntersectionObserver((entries) => {
+                const hit = entries.some(e => e.isIntersecting);
+                if (!hit) return;
+                if (p.sessionStorage.getItem(armedKey) !== "1") return;
+
+                const btn = p.document.querySelector(
+                  ".st-key-bottom_venue_refresh_trigger button"
+                );
+                if (!btn) return;
+
+                p.sessionStorage.setItem(armedKey, "0");
+                p.sessionStorage.setItem(topKey, "1");
+                btn.click();
+              }, {threshold: 0.5});
+
+              observer.observe(frame);
+            })();
+            </script>
+            """,
+            height=1,
+        )
