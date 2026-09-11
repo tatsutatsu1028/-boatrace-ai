@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
@@ -7,6 +9,8 @@ import streamlit as st
 # 予想ロジック・買い目・確率計算には触れない。
 if not hasattr(st, "_boat_ai_original_subheader"):
     st._boat_ai_original_subheader = st.subheader
+
+JST = ZoneInfo("Asia/Tokyo")
 
 
 def _supabase_settings_config():
@@ -39,10 +43,20 @@ def _load_random_auto_settings():
     return False, 3
 
 
-def _save_random_auto_settings(enabled, daily_count):
+def _save_random_auto_settings(enabled, daily_count, previous_enabled=False):
     url, key = _supabase_settings_config()
     if not url or not key:
         raise RuntimeError("Supabase設定が見つかりません。")
+
+    payload = {
+        "random_auto_enabled": bool(enabled),
+        "random_auto_daily_count": int(daily_count),
+    }
+    # OFF→ONのたびに新しい実行単位として開始時刻を更新する。
+    # これにより同じ日に何度ONにしても、その回ごとに設定R数を実行できる。
+    if bool(enabled) and not bool(previous_enabled):
+        payload["random_auto_started_at"] = datetime.now(JST).isoformat(timespec="seconds")
+
     r = requests.patch(
         f"{url}/rest/v1/app_settings?id=eq.1",
         headers={
@@ -51,10 +65,7 @@ def _save_random_auto_settings(enabled, daily_count):
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         },
-        json={
-            "random_auto_enabled": bool(enabled),
-            "random_auto_daily_count": int(daily_count),
-        },
+        json=payload,
         timeout=10,
     )
     r.raise_for_status()
@@ -63,11 +74,14 @@ def _save_random_auto_settings(enabled, daily_count):
 def _render_random_auto_settings():
     enabled, daily_count = _load_random_auto_settings()
     st.markdown("#### 🎲 ランダム自動固定")
-    st.caption("締切前の開催レースからランダムに選び、予想→固定だけを自動で行います。舟券購入はしません。")
+    st.caption(
+        "ONにするたび、締切前の開催レースからランダムに選び、設定したR数だけ予想→固定します。"
+        "完了すると自動でOFFになります。舟券購入はしません。"
+    )
 
     is_owner = st.session_state.get("auth_role") == "admin"
     if not is_owner:
-        st.info(f"現在：{'ON' if enabled else 'OFF'} / 1日 {daily_count}R（変更はオーナーのみ）")
+        st.info(f"現在：{'ON' if enabled else 'OFF'} / 1回 {daily_count}R（変更はオーナーのみ）")
         return
 
     new_enabled = st.toggle(
@@ -76,7 +90,7 @@ def _render_random_auto_settings():
         key="random_auto_enabled_owner",
     )
     new_count = st.selectbox(
-        "1日の自動固定数",
+        "1回の自動固定数",
         options=[1, 2, 3, 4, 5, 6, 8, 10],
         index=[1, 2, 3, 4, 5, 6, 8, 10].index(daily_count) if daily_count in [1, 2, 3, 4, 5, 6, 8, 10] else 2,
         key="random_auto_daily_count_owner",
@@ -85,8 +99,13 @@ def _render_random_auto_settings():
 
     if new_enabled != enabled or int(new_count) != int(daily_count):
         try:
-            _save_random_auto_settings(new_enabled, new_count)
-            st.success(f"ランダム自動固定を{'ON' if new_enabled else 'OFF'}にしました。")
+            _save_random_auto_settings(new_enabled, new_count, previous_enabled=enabled)
+            if new_enabled and not enabled:
+                st.success(f"ランダム自動固定をONにしました。今回は {int(new_count)}R 固定すると自動でOFFになります。")
+            elif not new_enabled and enabled:
+                st.success("ランダム自動固定をOFFにしました。")
+            else:
+                st.success("ランダム自動固定の件数を更新しました。")
         except Exception as e:
             st.error(f"自動固定設定を保存できませんでした: {e}")
 
