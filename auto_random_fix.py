@@ -150,7 +150,7 @@ def _save_snapshot(race_key, date_text, venue, rno, final, tickets):
     return True
 
 
-def _deadline_is_safe(today, hhmm, margin_minutes=20):
+def _deadline_is_safe(today, hhmm, margin_minutes=15):
     try:
         hour, minute = [int(x) for x in str(hhmm).split(":")]
         deadline = datetime(today.year, today.month, today.day, hour, minute, tzinfo=JST)
@@ -172,7 +172,7 @@ def _exhibition_ready(race):
 
 def _pick_candidate(today):
     """
-    締切20分以上前かつ未固定の候補をランダムに確認し、
+    締切15分以上前かつ未固定の候補をランダムに確認し、
     公式展示タイムが6艇分そろったレースだけを返す。
 
     展示未公開の候補は固定せずスキップする。候補確認時に取得した
@@ -193,7 +193,7 @@ def _pick_candidate(today):
             continue
 
         for rno, hhmm in deadlines.items():
-            if not _deadline_is_safe(today, hhmm, margin_minutes=20):
+            if not _deadline_is_safe(today, hhmm, margin_minutes=15):
                 continue
             race_key = f"{date_key}_{jcd}_{int(rno)}"
             if _snapshot_exists(race_key):
