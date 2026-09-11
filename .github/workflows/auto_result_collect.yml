@@ -1,0 +1,33 @@
+name: Auto Result Collect
+
+on:
+  workflow_dispatch:
+  schedule:
+    # JST 09:00-22:45 every 15 minutes (UTC 00:00-13:45)
+    - cron: "*/15 0-13 * * *"
+
+concurrency:
+  group: auto-result-collect
+  cancel-in-progress: false
+
+jobs:
+  collect-auto-results:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect completed auto snapshot results
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python auto_result_collect.py
