@@ -4,11 +4,51 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+import prediction as _prediction
+import result_tracker as _result_tracker
 
 # 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
 # 予想ロジック・買い目・確率計算には触れない。
 if not hasattr(st, "_boat_ai_original_subheader"):
     st._boat_ai_original_subheader = st.subheader
+
+# AI総合信頼度(A/B/C)は、固定時点の表示値をそのまま検証できるよう
+# prediction_snapshots.payload_json に保存する。
+# confidence() の計算式自体は変更せず、呼ばれた結果をDataFrame attrsへ一時保持し、
+# result_tracker の既存スナップショットpayloadへ追記するだけにする。
+if not hasattr(_prediction, "_boat_ai_original_confidence"):
+    _prediction._boat_ai_original_confidence = _prediction.confidence
+
+if not hasattr(_result_tracker, "_boat_ai_original_snapshot_payload"):
+    _result_tracker._boat_ai_original_snapshot_payload = _result_tracker._snapshot_payload
+
+
+def _boat_ai_confidence(first, race):
+    label = _prediction._boat_ai_original_confidence(first, race)
+    try:
+        first.attrs["_boat_ai_confidence_label"] = str(label)
+    except Exception:
+        pass
+    return label
+
+
+def _boat_ai_snapshot_payload(final, tickets, research_variants=None):
+    payload = _result_tracker._boat_ai_original_snapshot_payload(
+        final,
+        tickets,
+        research_variants=research_variants,
+    )
+    try:
+        label = str(final.attrs.get("_boat_ai_confidence_label", "")).strip()
+    except Exception:
+        label = ""
+    if label in {"A", "B", "C"}:
+        payload["confidence"] = label
+    return payload
+
+
+_prediction.confidence = _boat_ai_confidence
+_result_tracker._snapshot_payload = _boat_ai_snapshot_payload
 
 JST = ZoneInfo("Asia/Tokyo")
 
