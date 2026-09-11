@@ -55,20 +55,34 @@ def _load_settings():
     return rows[0]
 
 
-def _today_auto_count(date_text):
+def _run_auto_count(date_text, started_at):
     url, _ = _cfg()
+    params = {
+        "select": "race_key",
+        "race_date": f"eq.{date_text}",
+        "collector_name": f"eq.{COLLECTOR}",
+    }
+    if started_at:
+        params["saved_at"] = f"gte.{started_at}"
     r = requests.get(
         f"{url}/rest/v1/prediction_snapshots",
-        params={
-            "select": "race_key",
-            "race_date": f"eq.{date_text}",
-            "collector_name": f"eq.{COLLECTOR}",
-        },
+        params=params,
         headers=_headers(),
         timeout=15,
     )
     r.raise_for_status()
     return len(r.json() or [])
+
+
+def _set_enabled(enabled):
+    url, _ = _cfg()
+    r = requests.patch(
+        f"{url}/rest/v1/app_settings?id=eq.1",
+        headers=_headers("return=minimal"),
+        json={"random_auto_enabled": bool(enabled)},
+        timeout=15,
+    )
+    r.raise_for_status()
 
 
 def _snapshot_exists(race_key):
@@ -234,6 +248,7 @@ def main():
     enabled = bool(settings.get("random_auto_enabled", False))
     target = int(settings.get("random_auto_daily_count", 3) or 3)
     target = max(1, min(target, 10))
+    started_at = settings.get("random_auto_started_at")
 
     if not enabled:
         print("[AUTO_RANDOM] OFF")
@@ -242,9 +257,10 @@ def main():
     now = datetime.now(JST)
     today = now.date()
     date_text = today.isoformat()
-    current = _today_auto_count(date_text)
+    current = _run_auto_count(date_text, started_at)
     if current >= target:
-        print(f"[AUTO_RANDOM] target reached: {current}/{target}")
+        _set_enabled(False)
+        print(f"[AUTO_RANDOM] target reached: {current}/{target}; switched OFF")
         return
 
     candidate = _pick_candidate(today)
@@ -285,7 +301,11 @@ def main():
     )
 
     if _save_snapshot(race_key, date_text, venue, rno, final, tickets):
-        print(f"[AUTO_RANDOM] saved {race_key}; daily {current + 1}/{target}")
+        new_count = current + 1
+        print(f"[AUTO_RANDOM] saved {race_key}; run {new_count}/{target}")
+        if new_count >= target:
+            _set_enabled(False)
+            print("[AUTO_RANDOM] run completed; switched OFF")
 
 
 if __name__ == "__main__":
