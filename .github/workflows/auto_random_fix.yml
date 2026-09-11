@@ -3,7 +3,7 @@ name: Random Auto Fix
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 8-20 * * *"
+    - cron: "15,45 8-20 * * *"
       timezone: "Asia/Tokyo"
 
 concurrency:
