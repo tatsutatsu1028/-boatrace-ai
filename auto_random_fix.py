@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 
 from official_fetcher import VENUES, fetch_official_race, fetch_odds3t
-from prediction import train, predict, trifecta, rank_tickets
+from prediction import train, predict, trifecta, rank_tickets, confidence
 from stake_allocator import allocate_stakes_smart
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 
@@ -115,7 +115,7 @@ def _json_safe(v):
     return v
 
 
-def _snapshot_payload(final, tickets):
+def _snapshot_payload(final, tickets, confidence_label=None):
     final_cols = [
         "lane", "racer_name", "p_first", "p_second", "p_third",
         "p_second_given_1", "p_second_given_2", "p_second_given_3",
@@ -132,10 +132,14 @@ def _snapshot_payload(final, tickets):
     ticket_rows = []
     for _, row in tickets.iterrows():
         ticket_rows.append({c: _json_safe(row[c]) for c in ticket_cols if c in row.index})
-    return {"final": final_rows, "tickets": ticket_rows, "research": {}}
+    payload = {"final": final_rows, "tickets": ticket_rows, "research": {}}
+    label = str(confidence_label or "").strip()
+    if label in {"A", "B", "C"}:
+        payload["confidence"] = label
+    return payload
 
 
-def _save_snapshot(race_key, date_text, venue, rno, final, tickets):
+def _save_snapshot(race_key, date_text, venue, rno, final, tickets, confidence_label=None):
     if _snapshot_exists(race_key):
         print("[AUTO_RANDOM] already fixed:", race_key)
         return False
@@ -149,7 +153,10 @@ def _save_snapshot(race_key, date_text, venue, rno, final, tickets):
         "venue": venue,
         "race_no": int(rno),
         "snapshot_kind": SNAPSHOT_KIND,
-        "payload_json": json.dumps(_snapshot_payload(final, tickets), ensure_ascii=False),
+        "payload_json": json.dumps(
+            _snapshot_payload(final, tickets, confidence_label=confidence_label),
+            ensure_ascii=False,
+        ),
     }
     r = requests.post(
         f"{url}/rest/v1/prediction_snapshots",
@@ -282,6 +289,7 @@ def main():
     history = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
     model = train(history)
     final = predict(model, race)
+    confidence_label = confidence(final, race)
     tri = trifecta(final)
 
     tickets = rank_tickets(
@@ -300,9 +308,20 @@ def main():
         use_odds=False,
     )
 
-    if _save_snapshot(race_key, date_text, venue, rno, final, tickets):
+    if _save_snapshot(
+        race_key,
+        date_text,
+        venue,
+        rno,
+        final,
+        tickets,
+        confidence_label=confidence_label,
+    ):
         new_count = current + 1
-        print(f"[AUTO_RANDOM] saved {race_key}; run {new_count}/{target}")
+        print(
+            f"[AUTO_RANDOM] saved {race_key}; confidence={confidence_label}; "
+            f"run {new_count}/{target}"
+        )
         if new_count >= target:
             _set_enabled(False)
             print("[AUTO_RANDOM] run completed; switched OFF")
