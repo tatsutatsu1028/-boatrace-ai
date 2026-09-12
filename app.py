@@ -30,6 +30,8 @@ if not hasattr(_prediction, "_boat_ai_original_predict"):
     _prediction._boat_ai_original_predict = _prediction.predict
 if not hasattr(_prediction, "_boat_ai_original_rank_tickets"):
     _prediction._boat_ai_original_rank_tickets = _prediction.rank_tickets
+if not hasattr(_prediction, "_boat_ai_original_research_prediction_variants"):
+    _prediction._boat_ai_original_research_prediction_variants = _prediction.research_prediction_variants
 if not hasattr(_stake_allocator, "_boat_ai_original_allocate_stakes_smart"):
     _stake_allocator._boat_ai_original_allocate_stakes_smart = _stake_allocator.allocate_stakes_smart
 
@@ -125,6 +127,23 @@ def _boat_ai_predict(model, race, *args, **kwargs):
 
 
 _prediction.predict = _boat_ai_predict
+
+
+def _boat_ai_research_prediction_variants(model, race, *args, **kwargs):
+    """研究用保存も本番と同じ保存済み重みを起点にする。"""
+    cfg = _runtime_settings()
+    kwargs["display_weight"] = cfg["display_weight"]
+    kwargs["weather_weight"] = cfg["weather_weight"]
+    kwargs["venue_course_weight"] = cfg["venue_course_weight"]
+    return _prediction._boat_ai_original_research_prediction_variants(
+        model,
+        race,
+        *args,
+        **kwargs,
+    )
+
+
+_prediction.research_prediction_variants = _boat_ai_research_prediction_variants
 
 
 def _boat_ai_rank_tickets(tri, odds=None, *args, **kwargs):
@@ -377,6 +396,25 @@ def _boat_ai_subheader(body, *args, **kwargs):
 
 
 st.subheader = _boat_ai_subheader
+
+# 保存済み重みを設定画面の初期表示にも反映する。ユーザーが変更した未保存値は上書きしない。
+try:
+    _boot_cfg = _runtime_settings()
+    _boot_style = _boot_cfg["prediction_style"]
+    st.session_state.setdefault(
+        f"display_weight_{_boot_style}", _boot_cfg["display_weight"]
+    )
+    st.session_state.setdefault(
+        f"weather_weight_{_boot_style}", _boot_cfg["weather_weight"]
+    )
+    st.session_state.setdefault(
+        f"venue_course_weight_{_boot_style}", _boot_cfg["venue_course_weight"]
+    )
+    st.session_state.setdefault(
+        f"hedge_enabled_{_boot_style}", _boot_cfg["hedge_enabled"]
+    )
+except Exception:
+    pass
 
 _core = Path(__file__).with_name("app_core.py")
 exec(
