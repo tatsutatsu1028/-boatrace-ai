@@ -2,20 +2,179 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import requests
 import streamlit as st
 import prediction as _prediction
 import result_tracker as _result_tracker
+import stake_allocator as _stake_allocator
 
 # 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
-# 予想ロジック・買い目・確率計算には触れない。
+# 予想ロジック本体は変更せず、手動固定と自動固定が同じ「保存済み本番設定」を使うよう入口だけ統一する。
 if not hasattr(st, "_boat_ai_original_subheader"):
     st._boat_ai_original_subheader = st.subheader
 
+# 手動固定と自動固定の共通設定。DB側の app_settings にも同名列を持たせる。
+_result_tracker.DEFAULT_SETTINGS.update({
+    "display_weight": 0.32,
+    "weather_weight": 0.10,
+    "venue_course_weight": 0.12,
+    "hedge_enabled": True,
+})
+
+if not hasattr(_result_tracker, "_boat_ai_original_save_settings"):
+    _result_tracker._boat_ai_original_save_settings = _result_tracker.save_settings
+if not hasattr(_prediction, "_boat_ai_original_train"):
+    _prediction._boat_ai_original_train = _prediction.train
+if not hasattr(_prediction, "_boat_ai_original_predict"):
+    _prediction._boat_ai_original_predict = _prediction.predict
+if not hasattr(_prediction, "_boat_ai_original_rank_tickets"):
+    _prediction._boat_ai_original_rank_tickets = _prediction.rank_tickets
+if not hasattr(_stake_allocator, "_boat_ai_original_allocate_stakes_smart"):
+    _stake_allocator._boat_ai_original_allocate_stakes_smart = _stake_allocator.allocate_stakes_smart
+
+
+def _runtime_settings():
+    """本番予想で使う保存済み設定を正規化して返す。"""
+    s = _result_tracker.load_settings()
+    style = str(s.get("prediction_style", "バランス"))
+    default_display = 0.42 if style == "展示重視" else 0.32
+    return {
+        "main_n": int(s.get("main_n", 3)),
+        "cover_n": int(s.get("cover_n", 3)),
+        "hole_n": int(s.get("hole_n", 0)),
+        "total_budget": int(s.get("total_budget", 2000)),
+        "min_bet": int(s.get("min_bet", 100)),
+        "longshot_min_prob_pct": float(s.get("longshot_min_prob_pct", 0.30)),
+        "value_bias": float(s.get("value_bias", 0.0)),
+        "prediction_style": style,
+        "display_weight": float(s.get("display_weight", default_display)),
+        "weather_weight": float(s.get("weather_weight", 0.10)),
+        "venue_course_weight": float(s.get("venue_course_weight", 0.12)),
+        "hedge_enabled": bool(s.get("hedge_enabled", True)),
+    }
+
+
+def _boat_ai_save_settings(settings):
+    """従来の設定に、予想重みと保険ON/OFFも一緒に保存する。"""
+    merged = dict(settings or {})
+    style = str(merged.get("prediction_style", "バランス"))
+    default_display = 0.42 if style == "展示重視" else 0.32
+    merged["display_weight"] = float(
+        st.session_state.get(f"display_weight_{style}", default_display)
+    )
+    merged["weather_weight"] = float(
+        st.session_state.get(f"weather_weight_{style}", 0.10)
+    )
+    merged["venue_course_weight"] = float(
+        st.session_state.get(f"venue_course_weight_{style}", 0.12)
+    )
+    merged["hedge_enabled"] = bool(
+        st.session_state.get(f"hedge_enabled_{style}", True)
+    )
+    return _result_tracker._boat_ai_original_save_settings(merged)
+
+
+_result_tracker.save_settings = _boat_ai_save_settings
+
+# 学習データは本番固定では常に sample_history.csv を使う。
+# 管理画面のCSVアップロードは確認・研究用として残すが、本番固定の学習器は自動固定と同一にする。
+def _boat_ai_train(_history):
+    canonical = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
+    return _prediction._boat_ai_original_train(canonical)
+
+
+_prediction.train = _boat_ai_train
+
+# 直近の本番final/raceを保持し、買い目選定時の保険判定も保存設定に統一する。
+_LAST_PRODUCTION_RACE = None
+_LAST_PRODUCTION_FINAL = None
+
+
+def _boat_ai_predict(model, race, *args, **kwargs):
+    global _LAST_PRODUCTION_RACE, _LAST_PRODUCTION_FINAL
+
+    # research_prediction_variants は current_meet_weight 等を明示して呼ぶ。
+    # それ以外の通常予想（展示前比較／最終予想）だけ保存済み本番設定へ固定する。
+    is_research_variant = any(
+        k in kwargs
+        for k in ("current_meet_weight", "course_weight", "class_weight", "kimarite_weight")
+    )
+
+    if not is_research_variant:
+        cfg = _runtime_settings()
+        requested_display = kwargs.get("display_weight", cfg["display_weight"])
+        # 展示前比較の display_weight=0 は維持する。
+        if float(requested_display) != 0.0:
+            kwargs["display_weight"] = cfg["display_weight"]
+        kwargs["weather_weight"] = cfg["weather_weight"]
+        kwargs["venue_course_weight"] = cfg["venue_course_weight"]
+        kwargs["original_display_scale"] = 0.0
+
+    out = _prediction._boat_ai_original_predict(model, race, *args, **kwargs)
+
+    if not is_research_variant and float(kwargs.get("display_weight", 0.0)) != 0.0:
+        try:
+            _LAST_PRODUCTION_RACE = race.copy()
+            _LAST_PRODUCTION_FINAL = out.copy()
+        except Exception:
+            _LAST_PRODUCTION_RACE = race
+            _LAST_PRODUCTION_FINAL = out
+
+    return out
+
+
+_prediction.predict = _boat_ai_predict
+
+
+def _boat_ai_rank_tickets(tri, odds=None, *args, **kwargs):
+    cfg = _runtime_settings()
+    kwargs["main_n"] = cfg["main_n"]
+    kwargs["cover_n"] = cfg["cover_n"]
+    kwargs["longshot_n"] = cfg["hole_n"]
+    kwargs["longshot_min_prob"] = cfg["longshot_min_prob_pct"] / 100.0
+    kwargs["use_odds"] = False
+
+    # hedge_lane は画面の一時トグルではなく保存済み設定から再計算する。
+    hedge_lane = None
+    if cfg["hedge_enabled"] and _LAST_PRODUCTION_RACE is not None and _LAST_PRODUCTION_FINAL is not None:
+        try:
+            fav_lane, risk_score, _ = _prediction.assess_favorite_risk(
+                _LAST_PRODUCTION_RACE,
+                _LAST_PRODUCTION_FINAL,
+            )
+            if risk_score >= 2:
+                hedge_lane = fav_lane
+        except Exception:
+            hedge_lane = None
+    kwargs["hedge_lane"] = hedge_lane
+
+    return _prediction._boat_ai_original_rank_tickets(tri, odds, *args, **kwargs)
+
+
+_prediction.rank_tickets = _boat_ai_rank_tickets
+
+
+def _boat_ai_allocate_stakes_smart(tickets, *args, **kwargs):
+    cfg = _runtime_settings()
+    kwargs["budget"] = cfg["total_budget"]
+    kwargs["unit"] = 100
+    kwargs["min_bet"] = cfg["min_bet"]
+    kwargs["max_longshot_share"] = 0.15
+    kwargs["max_ticket_share"] = 0.35
+    kwargs["value_bias"] = cfg["value_bias"]
+    kwargs["use_odds"] = False
+    return _stake_allocator._boat_ai_original_allocate_stakes_smart(
+        tickets,
+        *args,
+        **kwargs,
+    )
+
+
+_stake_allocator.allocate_stakes_smart = _boat_ai_allocate_stakes_smart
+
 # AI総合信頼度(A/B/C)は、固定時点の表示値をそのまま検証できるよう
 # prediction_snapshots.payload_json に保存する。
-# confidence() の計算式自体は変更せず、呼ばれた結果をDataFrame attrsへ一時保持し、
-# result_tracker の既存スナップショットpayloadへ追記するだけにする。
 if not hasattr(_prediction, "_boat_ai_original_confidence"):
     _prediction._boat_ai_original_confidence = _prediction.confidence
 
@@ -32,6 +191,25 @@ def _boat_ai_confidence(first, race):
     return label
 
 
+def _fixed_research_rule_status(final, tickets):
+    """固定時点で確定できるAだけ保存。B/C/Dは追跡オッズが必要なのでNone。"""
+    try:
+        p1_prob = float(pd.to_numeric(final["p_first"], errors="coerce").max())
+    except Exception:
+        p1_prob = 0.0
+
+    try:
+        t = tickets.copy()
+        t["stake"] = pd.to_numeric(t.get("stake", 0), errors="coerce").fillna(0)
+        purchased = t[t["stake"] > 0]
+        mainline = purchased[purchased["group"].astype(str).str.strip().eq("本線")]
+        a_ok = bool(p1_prob >= 0.80 and len(mainline))
+    except Exception:
+        a_ok = False
+
+    return {"A": a_ok, "B": None, "C": None, "D": None}
+
+
 def _boat_ai_snapshot_payload(final, tickets, research_variants=None):
     payload = _result_tracker._boat_ai_original_snapshot_payload(
         final,
@@ -44,6 +222,7 @@ def _boat_ai_snapshot_payload(final, tickets, research_variants=None):
         label = ""
     if label in {"A", "B", "C"}:
         payload["confidence"] = label
+    payload["research_rules"] = _fixed_research_rule_status(final, tickets)
     return payload
 
 
@@ -154,8 +333,15 @@ def _boat_ai_subheader(body, *args, **kwargs):
     rendered = st._boat_ai_original_subheader(body, *args, **kwargs)
 
     try:
+        if isinstance(body, str) and body == "学習データ":
+            st.caption(
+                "📌 本番固定は手動・自動とも sample_history.csv を共通学習データとして使用します。"
+                "アップロードCSVは確認・研究用で、本番固定の学習器には混ぜません。"
+            )
+
         if isinstance(body, str) and body == "買い目設定":
             _render_random_auto_settings()
+            st.caption("📌 本番固定は保存済み設定を使用します。変更した場合は『この設定を保存』後の予想から反映されます。")
 
         if isinstance(body, str) and body.endswith("AI最終予想"):
             current = st.session_state.get("result") or {}
