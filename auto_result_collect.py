@@ -127,14 +127,14 @@ def _build_record(snapshot, official):
     research = payload.get("research") or {}
     if not isinstance(final_rows, list) or not final_rows:
         raise ValueError("固定予想のfinalが空です。")
-    if not isinstance(ticket_rows, list) or not ticket_rows:
-        raise ValueError("固定予想のticketsが空です。")
+    if not isinstance(ticket_rows, list):
+        raise ValueError("固定予想のtickets形式が不正です。")
 
     final = pd.DataFrame(final_rows)
     tickets = pd.DataFrame(ticket_rows)
     if not {"lane", "p_first"}.issubset(final.columns):
         raise ValueError("固定予想の1着確率を復元できません。")
-    if not {"combo", "stake"}.issubset(tickets.columns):
+    if len(tickets) and not {"combo", "stake"}.issubset(tickets.columns):
         raise ValueError("固定買い目を復元できません。")
 
     actual_combo = str(official["trifecta"])
@@ -146,20 +146,27 @@ def _build_record(snapshot, official):
     p1_prob = _safe_float(p1_row.get("p_first"), 0.0)
 
     tickets = tickets.copy()
-    tickets["prob_num"] = pd.to_numeric(tickets.get("prob"), errors="coerce")
-    if "expected_return" in tickets.columns:
-        tickets["ev_num"] = pd.to_numeric(tickets["expected_return"], errors="coerce")
-        ranked_tickets = tickets.sort_values(["prob_num", "ev_num"], ascending=False, na_position="last")
+    if len(tickets):
+        tickets["prob_num"] = pd.to_numeric(tickets.get("prob"), errors="coerce")
+        if "expected_return" in tickets.columns:
+            tickets["ev_num"] = pd.to_numeric(tickets["expected_return"], errors="coerce")
+            ranked_tickets = tickets.sort_values(["prob_num", "ev_num"], ascending=False, na_position="last")
+        else:
+            ranked_tickets = tickets.sort_values("prob_num", ascending=False, na_position="last")
+
+        top = ranked_tickets.iloc[0]
+        top_ticket = str(top.get("combo", ""))
+        top_ticket_prob = _safe_float(top.get("prob"), 0.0)
+        top_ticket_odds = _safe_float(top.get("odds"), None)
+        top_ticket_stake = _safe_int(top.get("stake"), 0)
+        stake_num = pd.to_numeric(tickets["stake"], errors="coerce").fillna(0)
     else:
-        ranked_tickets = tickets.sort_values("prob_num", ascending=False, na_position="last")
-
-    top = ranked_tickets.iloc[0]
-    top_ticket = str(top.get("combo", ""))
-    top_ticket_prob = _safe_float(top.get("prob"), 0.0)
-    top_ticket_odds = _safe_float(top.get("odds"), None)
-    top_ticket_stake = _safe_int(top.get("stake"), 0)
-
-    stake_num = pd.to_numeric(tickets["stake"], errors="coerce").fillna(0)
+        top_ticket = ""
+        top_ticket_prob = 0.0
+        top_ticket_odds = None
+        top_ticket_stake = 0
+        tickets = pd.DataFrame(columns=["combo", "stake"])
+        stake_num = pd.Series(dtype=float)
     total_stake = int(stake_num.sum())
     purchased = tickets[stake_num > 0].copy()
     purchased_combos = set(purchased["combo"].astype(str))
