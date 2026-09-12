@@ -1321,6 +1321,9 @@ def rank_tickets(
     longshot_exception_ev=1.80,
     hedge_lane=None,
     use_odds=False,
+    first=None,
+    min_first_margin=None,
+    min_second_coverage=0,
 ):
     """
     3連単の確率表から購入候補を選ぶ。
@@ -1332,6 +1335,11 @@ def rank_tickets(
 
     オッズ自体は表示・記録用に残るので、後から使う設定に戻して
     比較することはできる。
+
+    first と min_first_margin を渡した場合は、1着確率1位と2位の差が
+    閾値未満のレースを見送る。min_second_coverage は、本命艇を1着に
+    置いた買い目に含める2着候補艇の最低数。単純な確率上位だけで
+    同じ1-2着へ集中するのを防ぐ。
     """
     x = tri.copy()
     x["prob"] = pd.to_numeric(x["prob"], errors="coerce").fillna(0.0)
@@ -1344,6 +1352,26 @@ def rank_tickets(
         x["odds"] = np.nan
 
     x["expected_return"] = x["prob"] * x["odds"]
+
+    favorite_lane = None
+    if first is not None and len(first) and "p_first" in first.columns:
+        ranked_first = first[["lane", "p_first"]].copy()
+        ranked_first["p_first"] = pd.to_numeric(
+            ranked_first["p_first"], errors="coerce"
+        )
+        ranked_first = ranked_first.dropna(subset=["lane", "p_first"]).sort_values(
+            "p_first", ascending=False
+        )
+        if len(ranked_first):
+            favorite_lane = int(ranked_first.iloc[0]["lane"])
+        if min_first_margin is not None and len(ranked_first) >= 2:
+            margin = float(
+                ranked_first.iloc[0]["p_first"] - ranked_first.iloc[1]["p_first"]
+            )
+            if margin < float(min_first_margin):
+                return pd.DataFrame(
+                    columns=["combo", "prob", "odds", "expected_return", "group"]
+                )
 
     # 期待値の列は表示・記録用に残すが、use_odds=False なら
     # 買い目の選択には使わない（確率だけで選ぶ）。
@@ -1471,6 +1499,50 @@ def rank_tickets(
     longshot["group"] = "穴"
 
     result = pd.concat([main, cover, longshot], ignore_index=True)
+
+    # 本命1着の買い目で2着候補を最低数カバーする。
+    # 既存候補のうち同じ2着艇へ重複している低確率買い目だけを置換し、
+    # 本線/抑え/穴の点数と保険買い目は維持する。
+    target_second = max(0, min(int(min_second_coverage), 5))
+    if favorite_lane is not None and target_second > 0 and len(result):
+        def _lanes(frame):
+            parts = frame["combo"].astype(str).str.split("-", expand=True)
+            return (
+                pd.to_numeric(parts[0], errors="coerce"),
+                pd.to_numeric(parts[1], errors="coerce"),
+            )
+
+        while True:
+            result_heads, result_seconds = _lanes(result)
+            favorite_mask = result_heads.eq(favorite_lane)
+            covered = set(result_seconds[favorite_mask].dropna().astype(int))
+            if len(covered) >= target_second:
+                break
+
+            pool_heads, pool_seconds = _lanes(x)
+            pool = x[
+                pool_heads.eq(favorite_lane)
+                & ~pool_seconds.isin(covered)
+                & ~x["combo"].isin(set(result["combo"]))
+            ].sort_values("prob", ascending=False)
+            if not len(pool):
+                break
+
+            counts = result_seconds[favorite_mask].value_counts()
+            replaceable = result[
+                favorite_mask
+                & result_seconds.map(counts).fillna(0).gt(1)
+            ].copy()
+            if not len(replaceable):
+                break
+
+            replace_idx = replaceable.sort_values("prob").index[0]
+            replacement = pool.iloc[0].copy()
+            replacement["group"] = result.loc[replace_idx, "group"]
+            for col in result.columns:
+                if col in replacement.index:
+                    result.loc[replace_idx, col] = replacement[col]
+
     keep = ["combo", "prob", "odds", "expected_return", "group"]
 
     for c in keep:
