@@ -468,6 +468,9 @@ def main():
         longshot_min_prob=runtime["longshot_min_prob_pct"] / 100.0,
         hedge_lane=hedge_lane,
         use_odds=False,
+        first=final,
+        min_first_margin=0.40,
+        min_second_coverage=3,
     )
     tickets = allocate_stakes_smart(
         tickets,
