@@ -12,7 +12,15 @@ import pandas as pd
 import requests
 
 from official_fetcher import VENUES, fetch_official_race, fetch_odds3t
-from prediction import train, predict, trifecta, rank_tickets, confidence
+from prediction import (
+    train,
+    predict,
+    trifecta,
+    rank_tickets,
+    confidence,
+    assess_favorite_risk,
+    research_prediction_variants,
+)
 from stake_allocator import allocate_stakes_smart
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 
@@ -53,6 +61,25 @@ def _load_settings():
     if not rows:
         raise RuntimeError("app_settings id=1 がありません。")
     return rows[0]
+
+
+def _runtime_settings(settings):
+    style = str(settings.get("prediction_style", "バランス"))
+    default_display = 0.42 if style == "展示重視" else 0.32
+    return {
+        "main_n": int(settings.get("main_n", 3) or 3),
+        "cover_n": int(settings.get("cover_n", 3) or 3),
+        "hole_n": int(settings.get("hole_n", 0) or 0),
+        "total_budget": int(settings.get("total_budget", 2000) or 2000),
+        "min_bet": int(settings.get("min_bet", 100) or 100),
+        "longshot_min_prob_pct": float(settings.get("longshot_min_prob_pct", 0.30) or 0.30),
+        "value_bias": float(settings.get("value_bias", 0.0) or 0.0),
+        "prediction_style": style,
+        "display_weight": float(settings.get("display_weight", default_display)),
+        "weather_weight": float(settings.get("weather_weight", 0.10)),
+        "venue_course_weight": float(settings.get("venue_course_weight", 0.12)),
+        "hedge_enabled": bool(settings.get("hedge_enabled", True)),
+    }
 
 
 def _run_auto_count(date_text, started_at):
@@ -115,7 +142,26 @@ def _json_safe(v):
     return v
 
 
-def _snapshot_payload(final, tickets, confidence_label=None):
+def _fixed_research_rule_status(final, tickets):
+    """固定時点で確定できるAだけ保存。B/C/Dは追跡オッズが必要なのでNone。"""
+    try:
+        p1_prob = float(pd.to_numeric(final["p_first"], errors="coerce").max())
+    except Exception:
+        p1_prob = 0.0
+
+    try:
+        t = tickets.copy()
+        t["stake"] = pd.to_numeric(t.get("stake", 0), errors="coerce").fillna(0)
+        purchased = t[t["stake"] > 0]
+        mainline = purchased[purchased["group"].astype(str).str.strip().eq("本線")]
+        a_ok = bool(p1_prob >= 0.80 and len(mainline))
+    except Exception:
+        a_ok = False
+
+    return {"A": a_ok, "B": None, "C": None, "D": None}
+
+
+def _snapshot_payload(final, tickets, research_variants=None, confidence_label=None):
     final_cols = [
         "lane", "racer_name", "p_first", "p_second", "p_third",
         "p_second_given_1", "p_second_given_2", "p_second_given_3",
@@ -126,20 +172,54 @@ def _snapshot_payload(final, tickets, confidence_label=None):
     ticket_cols = [
         "combo", "group", "prob", "odds", "expected_return", "stake", "stake_reason"
     ]
+
     final_rows = []
     for _, row in final.sort_values("lane").iterrows():
         final_rows.append({c: _json_safe(row[c]) for c in final_cols if c in row.index})
+
     ticket_rows = []
     for _, row in tickets.iterrows():
         ticket_rows.append({c: _json_safe(row[c]) for c in ticket_cols if c in row.index})
-    payload = {"final": final_rows, "tickets": ticket_rows, "research": {}}
+
+    research_payload = {}
+    if research_variants:
+        for label, variant_df in research_variants.items():
+            if variant_df is None or len(variant_df) == 0:
+                continue
+            rows = []
+            for _, row in variant_df.sort_values("lane").iterrows():
+                item = {}
+                for c in (
+                    "lane", "racer_name", "p_first", "p_second", "p_third",
+                    "model_version", "reason",
+                ):
+                    if c in row.index:
+                        item[c] = _json_safe(row[c])
+                rows.append(item)
+            research_payload[str(label)] = rows
+
+    payload = {
+        "final": final_rows,
+        "tickets": ticket_rows,
+        "research": research_payload,
+        "research_rules": _fixed_research_rule_status(final, tickets),
+    }
     label = str(confidence_label or "").strip()
     if label in {"A", "B", "C"}:
         payload["confidence"] = label
     return payload
 
 
-def _save_snapshot(race_key, date_text, venue, rno, final, tickets, confidence_label=None):
+def _save_snapshot(
+    race_key,
+    date_text,
+    venue,
+    rno,
+    final,
+    tickets,
+    research_variants=None,
+    confidence_label=None,
+):
     if _snapshot_exists(race_key):
         print("[AUTO_RANDOM] already fixed:", race_key)
         return False
@@ -154,7 +234,12 @@ def _save_snapshot(race_key, date_text, venue, rno, final, tickets, confidence_l
         "race_no": int(rno),
         "snapshot_kind": SNAPSHOT_KIND,
         "payload_json": json.dumps(
-            _snapshot_payload(final, tickets, confidence_label=confidence_label),
+            _snapshot_payload(
+                final,
+                tickets,
+                research_variants=research_variants,
+                confidence_label=confidence_label,
+            ),
             ensure_ascii=False,
         ),
     }
@@ -169,6 +254,62 @@ def _save_snapshot(race_key, date_text, venue, rno, final, tickets, confidence_l
         return False
     r.raise_for_status()
     return True
+
+
+def _add_to_odds_watchlist(race_date, jcd, rno):
+    """手動固定と同じく、固定後にオッズ追跡へ登録する。"""
+    url, _ = _cfg()
+    payload = {
+        "race_date": str(race_date),
+        "jcd": str(jcd).zfill(2),
+        "rno": int(rno),
+        "active": True,
+    }
+    r = requests.post(
+        f"{url}/rest/v1/odds_watchlist?on_conflict=race_date,jcd,rno",
+        headers=_headers("resolution=merge-duplicates,return=minimal"),
+        json=payload,
+        timeout=15,
+    )
+    r.raise_for_status()
+
+
+def _save_odds_snapshot_now(race_date, jcd, rno, odds_df):
+    """固定時点のオッズを1回保存し、B/C/Dの追跡起点を手動固定と揃える。"""
+    if odds_df is None or len(odds_df) == 0:
+        return 0
+
+    fetched_at = datetime.now(JST).isoformat(timespec="seconds")
+    payload = []
+    for _, row in odds_df.iterrows():
+        combo = str(row.get("combo", "")).strip()
+        try:
+            odd = float(row.get("odds"))
+        except Exception:
+            continue
+        if not combo or odd < 1:
+            continue
+        payload.append({
+            "race_date": str(race_date),
+            "jcd": str(jcd).zfill(2),
+            "rno": int(rno),
+            "combo": combo,
+            "odds": odd,
+            "fetched_at": fetched_at,
+        })
+
+    if not payload:
+        return 0
+
+    url, _ = _cfg()
+    r = requests.post(
+        f"{url}/rest/v1/odds_snapshots",
+        headers=_headers("return=minimal"),
+        json=payload,
+        timeout=30,
+    )
+    r.raise_for_status()
+    return len(payload)
 
 
 def _deadline_is_safe(today, hhmm, margin_minutes=15):
@@ -252,6 +393,7 @@ def _pick_candidate(today):
 
 def main():
     settings = _load_settings()
+    runtime = _runtime_settings(settings)
     enabled = bool(settings.get("random_auto_enabled", False))
     target = int(settings.get("random_auto_daily_count", 3) or 3)
     target = max(1, min(target, 10))
@@ -286,25 +428,55 @@ def main():
     if odds is None or len(odds) < 100:
         raise RuntimeError("3連単オッズを十分に取得できませんでした。")
 
+    # 本番学習データは手動固定と共通の sample_history.csv に固定。
     history = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
     model = train(history)
-    final = predict(model, race)
+
+    final = predict(
+        model,
+        race,
+        display_weight=runtime["display_weight"],
+        weather_weight=runtime["weather_weight"],
+        venue_course_weight=runtime["venue_course_weight"],
+        original_display_scale=0.0,
+    )
     confidence_label = confidence(final, race)
+
+    research_variants = research_prediction_variants(
+        model,
+        race,
+        display_weight=runtime["display_weight"],
+        weather_weight=runtime["weather_weight"],
+        venue_course_weight=runtime["venue_course_weight"],
+    )
+
     tri = trifecta(final)
+
+    favorite_lane, risk_score, _risk_reasons = assess_favorite_risk(race, final)
+    hedge_lane = (
+        favorite_lane
+        if runtime["hedge_enabled"] and risk_score >= 2
+        else None
+    )
 
     tickets = rank_tickets(
         tri,
         odds=odds,
-        main_n=int(settings.get("main_n", 4) or 4),
-        cover_n=int(settings.get("cover_n", 4) or 4),
-        longshot_n=int(settings.get("hole_n", 0) or 0),
+        main_n=runtime["main_n"],
+        cover_n=runtime["cover_n"],
+        longshot_n=runtime["hole_n"],
+        longshot_min_prob=runtime["longshot_min_prob_pct"] / 100.0,
+        hedge_lane=hedge_lane,
+        use_odds=False,
     )
     tickets = allocate_stakes_smart(
         tickets,
-        budget=int(settings.get("total_budget", 2000) or 2000),
+        budget=runtime["total_budget"],
         unit=100,
-        min_bet=int(settings.get("min_bet", 100) or 100),
-        value_bias=float(settings.get("value_bias", 0) or 0),
+        min_bet=runtime["min_bet"],
+        max_longshot_share=0.15,
+        max_ticket_share=0.35,
+        value_bias=runtime["value_bias"],
         use_odds=False,
     )
 
@@ -315,8 +487,23 @@ def main():
         rno,
         final,
         tickets,
+        research_variants=research_variants,
         confidence_label=confidence_label,
     ):
+        # 手動固定と同じく、固定直後からオッズ追跡を開始し、初回値も保存する。
+        try:
+            _add_to_odds_watchlist(date_key, jcd, rno)
+            saved_odds = _save_odds_snapshot_now(date_key, jcd, rno, odds)
+            print(f"[AUTO_RANDOM] odds tracking started: {race_key}; first={saved_odds}")
+        except Exception as e:
+            # 固定自体は成功しているため、追跡失敗で固定を取り消さない。
+            print(
+                "[AUTO_RANDOM] odds tracking start error",
+                race_key,
+                type(e).__name__,
+                str(e),
+            )
+
         new_count = current + 1
         print(
             f"[AUTO_RANDOM] saved {race_key}; confidence={confidence_label}; "
