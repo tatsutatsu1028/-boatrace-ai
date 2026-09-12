@@ -2284,6 +2284,9 @@ with tab1:
                             longshot_n=int(hole_n),
                             longshot_min_prob=float(longshot_min_prob_pct) / 100.0,
                             hedge_lane=hedge_lane,
+                            first=final,
+                            min_first_margin=0.40,
+                            min_second_coverage=3,
                         )
                         tickets = allocate_stakes_smart(
                             tickets,
@@ -2336,6 +2339,13 @@ with tab1:
                 with mc2:
                     total_stake_metric = int(tickets["stake"].sum())
                     st.metric("推奨購入総額", f"{total_stake_metric:,}円")
+
+                if total_stake_metric == 0:
+                    st.info(
+                        "このレースは見送りです。"
+                        "1着確率1位と2位の差が40ポイント未満のため、"
+                        "買い目を出していません。"
+                    )
 
                 # -------------------------------------------------
                 # 研究ルール A/B/C/D の現在判定（表示専用）
