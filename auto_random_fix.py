@@ -201,7 +201,8 @@ def _snapshot_payload(final, tickets, research_variants=None, confidence_label=N
         "kimarite_starts", "kimarite_wins", "kimarite_dominant", "kimarite_available",
     ]
     ticket_cols = [
-        "combo", "group", "prob", "odds", "expected_return", "stake", "stake_reason"
+        "combo", "group", "prob", "odds", "expected_return", "stake", "stake_reason",
+        "recommended",
     ]
 
     final_rows = []
@@ -503,6 +504,7 @@ def main():
         first=final,
         min_first_margin=0.40,
         min_second_coverage=3,
+        include_nonrecommended=True,
     )
     tickets = allocate_stakes_smart(
         tickets,
@@ -514,6 +516,12 @@ def main():
         value_bias=runtime["value_bias"],
         use_odds=False,
     )
+    if (
+        "recommended" in tickets.columns
+        and not tickets["recommended"].fillna(True).all()
+    ):
+        tickets["stake"] = 0
+        tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
 
     if _save_snapshot(
         race_key,
