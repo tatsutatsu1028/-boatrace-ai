@@ -1324,6 +1324,8 @@ def rank_tickets(
     first=None,
     min_first_margin=None,
     min_second_coverage=0,
+    close_third_gap=0.03,
+    close_third_coverage=4,
     include_nonrecommended=False,
 ):
     """
@@ -1340,8 +1342,11 @@ def rank_tickets(
     first と min_first_margin を渡した場合は、1着確率1位と2位の差が
     閾値未満のレースを見送る。min_second_coverage は、本命艇を1着に
     置いた買い目に含める2着候補艇の最低数。単純な確率上位だけで
-    同じ1-2着へ集中するのを防ぐ。include_nonrecommended=True なら、
-    見送り判定でも予想買い目を返し、recommended=False を付ける。
+    同じ1-2着へ集中するのを防ぐ。close_third_gap は3着確率上位3位と
+    4位の差がこの値以下の接戦時だけ、close_third_coverage 艇まで3着候補を
+    広げる。買い目総数は増やさず、重複する低確率買い目と入れ替える。
+    include_nonrecommended=True なら、見送り判定でも予想買い目を返し、
+    recommended=False を付ける。
     """
     x = tri.copy()
     x["prob"] = pd.to_numeric(x["prob"], errors="coerce").fillna(0.0)
@@ -1505,26 +1510,26 @@ def rank_tickets(
 
     result = pd.concat([main, cover, longshot], ignore_index=True)
 
+    def _combo_lanes(frame):
+        parts = frame["combo"].astype(str).str.split("-", expand=True)
+        return tuple(
+            pd.to_numeric(parts[i], errors="coerce")
+            for i in range(3)
+        )
+
     # 本命1着の買い目で2着候補を最低数カバーする。
     # 既存候補のうち同じ2着艇へ重複している低確率買い目だけを置換し、
     # 本線/抑え/穴の点数と保険買い目は維持する。
     target_second = max(0, min(int(min_second_coverage), 5))
     if favorite_lane is not None and target_second > 0 and len(result):
-        def _lanes(frame):
-            parts = frame["combo"].astype(str).str.split("-", expand=True)
-            return (
-                pd.to_numeric(parts[0], errors="coerce"),
-                pd.to_numeric(parts[1], errors="coerce"),
-            )
-
         while True:
-            result_heads, result_seconds = _lanes(result)
+            result_heads, result_seconds, _ = _combo_lanes(result)
             favorite_mask = result_heads.eq(favorite_lane)
             covered = set(result_seconds[favorite_mask].dropna().astype(int))
             if len(covered) >= target_second:
                 break
 
-            pool_heads, pool_seconds = _lanes(x)
+            pool_heads, pool_seconds, _ = _combo_lanes(x)
             pool = x[
                 pool_heads.eq(favorite_lane)
                 & ~pool_seconds.isin(covered)
@@ -1547,6 +1552,82 @@ def rank_tickets(
             for col in result.columns:
                 if col in replacement.index:
                     result.loc[replace_idx, col] = replacement[col]
+
+    # 3着確率の3位と4位が僅差なら、本命1着の3着候補を4艇まで広げる。
+    # 2着候補の最低カバー数と買い目総数を維持できる場合だけ置換する。
+    target_third = 0
+    if (
+        favorite_lane is not None
+        and first is not None
+        and len(first)
+        and "p_third" in first.columns
+        and close_third_gap is not None
+    ):
+        third_ranked = first[["lane", "p_third"]].copy()
+        third_ranked["lane"] = pd.to_numeric(third_ranked["lane"], errors="coerce")
+        third_ranked["p_third"] = pd.to_numeric(
+            third_ranked["p_third"], errors="coerce"
+        )
+        third_ranked = third_ranked.dropna().loc[
+            lambda frame: frame["lane"].ne(favorite_lane)
+        ].sort_values("p_third", ascending=False)
+        if len(third_ranked) >= 4:
+            boundary_gap = float(
+                third_ranked.iloc[2]["p_third"]
+                - third_ranked.iloc[3]["p_third"]
+            )
+            if boundary_gap <= max(0.0, float(close_third_gap)):
+                target_third = max(0, min(int(close_third_coverage), 5))
+
+    if favorite_lane is not None and target_third > 0 and len(result):
+        while True:
+            result_heads, result_seconds, result_thirds = _combo_lanes(result)
+            favorite_mask = result_heads.eq(favorite_lane)
+            covered_thirds = set(
+                result_thirds[favorite_mask].dropna().astype(int)
+            )
+            if len(covered_thirds) >= target_third:
+                break
+
+            pool_heads, _, pool_thirds = _combo_lanes(x)
+            pool = x[
+                pool_heads.eq(favorite_lane)
+                & ~pool_thirds.isin(covered_thirds)
+                & ~x["combo"].isin(set(result["combo"]))
+            ].sort_values("prob", ascending=False)
+            if not len(pool):
+                break
+
+            third_counts = result_thirds[favorite_mask].value_counts()
+            second_counts = result_seconds[favorite_mask].value_counts()
+            replacement_done = False
+
+            for _, replacement in pool.iterrows():
+                replacement_parts = str(replacement["combo"]).split("-")
+                replacement_second = int(replacement_parts[1])
+                replaceable_mask = (
+                    favorite_mask
+                    & result_thirds.map(third_counts).fillna(0).gt(1)
+                    & (
+                        result_seconds.map(second_counts).fillna(0).gt(1)
+                        | result_seconds.eq(replacement_second)
+                    )
+                )
+                replaceable = result[replaceable_mask].copy()
+                if not len(replaceable):
+                    continue
+
+                replace_idx = replaceable.sort_values("prob").index[0]
+                replacement = replacement.copy()
+                replacement["group"] = result.loc[replace_idx, "group"]
+                for col in result.columns:
+                    if col in replacement.index:
+                        result.loc[replace_idx, col] = replacement[col]
+                replacement_done = True
+                break
+
+            if not replacement_done:
+                break
 
     keep = ["combo", "prob", "odds", "expected_return", "group"]
     if include_nonrecommended:
