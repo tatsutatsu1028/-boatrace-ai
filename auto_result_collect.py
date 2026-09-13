@@ -231,9 +231,12 @@ def _build_record(snapshot, official):
     profit = payout - total_stake
     roi = payout / total_stake if total_stake > 0 else None
 
-    keep_ticket_cols = ["combo", "group", "prob", "odds", "expected_return", "stake"]
+    keep_ticket_cols = [
+        "combo", "group", "prob", "odds", "expected_return", "stake",
+        "recommended",
+    ]
     ticket_payload = []
-    for _, row in purchased.iterrows():
+    for _, row in tickets.iterrows():
         item = {}
         for c in keep_ticket_cols:
             if c in row.index:
