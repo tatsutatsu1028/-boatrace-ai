@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -27,6 +28,7 @@ from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 JST = ZoneInfo("Asia/Tokyo")
 COLLECTOR = "auto_random"
 SNAPSHOT_KIND = "auto_random"
+RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 def _cfg():
@@ -49,14 +51,43 @@ def _headers(prefer=None):
     return h
 
 
+def _request(method, url, *, attempts=3, accepted_status=(), **kwargs):
+    """一時的な接続失敗とData APIの5xxを指数バックオフで再試行する。"""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code in accepted_status:
+                return response
+            if response.status_code not in RETRYABLE_STATUS:
+                response.raise_for_status()
+                return response
+            last_error = requests.HTTPError(
+                f"{response.status_code} Server Error for url: {response.url}",
+                response=response,
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+
+        if attempt + 1 < attempts:
+            delay = 2 ** attempt
+            print(
+                f"[AUTO_RANDOM] transient API error; retry "
+                f"{attempt + 2}/{attempts} in {delay}s: {last_error}"
+            )
+            time.sleep(delay)
+
+    raise last_error
+
+
 def _load_settings():
     url, _ = _cfg()
-    r = requests.get(
+    r = _request(
+        "GET",
         f"{url}/rest/v1/app_settings?id=eq.1&select=*",
         headers=_headers(),
         timeout=15,
     )
-    r.raise_for_status()
     rows = r.json() or []
     if not rows:
         raise RuntimeError("app_settings id=1 がありません。")
@@ -91,36 +122,36 @@ def _run_auto_count(date_text, started_at):
     }
     if started_at:
         params["saved_at"] = f"gte.{started_at}"
-    r = requests.get(
+    r = _request(
+        "GET",
         f"{url}/rest/v1/prediction_snapshots",
         params=params,
         headers=_headers(),
         timeout=15,
     )
-    r.raise_for_status()
     return len(r.json() or [])
 
 
 def _set_enabled(enabled):
     url, _ = _cfg()
-    r = requests.patch(
+    _request(
+        "PATCH",
         f"{url}/rest/v1/app_settings?id=eq.1",
         headers=_headers("return=minimal"),
         json={"random_auto_enabled": bool(enabled)},
         timeout=15,
     )
-    r.raise_for_status()
 
 
 def _snapshot_exists(race_key):
     url, _ = _cfg()
-    r = requests.get(
+    r = _request(
+        "GET",
         f"{url}/rest/v1/prediction_snapshots",
         params={"select": "race_key", "race_key": f"eq.{race_key}", "limit": "1"},
         headers=_headers(),
         timeout=15,
     )
-    r.raise_for_status()
     return bool(r.json() or [])
 
 
@@ -243,16 +274,17 @@ def _save_snapshot(
             ensure_ascii=False,
         ),
     }
-    r = requests.post(
+    r = _request(
+        "POST",
         f"{url}/rest/v1/prediction_snapshots",
         headers=_headers("return=minimal"),
         json=record,
         timeout=20,
+        accepted_status={409},
     )
     if r.status_code == 409:
-        print("[AUTO_RANDOM] race fixed concurrently:", race_key)
-        return False
-    r.raise_for_status()
+        # 直前のPOSTがタイムアウト後にDB側で完了した場合も含む。
+        print("[AUTO_RANDOM] race already fixed after save attempt:", race_key)
     return True
 
 
@@ -265,13 +297,13 @@ def _add_to_odds_watchlist(race_date, jcd, rno):
         "rno": int(rno),
         "active": True,
     }
-    r = requests.post(
+    _request(
+        "POST",
         f"{url}/rest/v1/odds_watchlist?on_conflict=race_date,jcd,rno",
         headers=_headers("resolution=merge-duplicates,return=minimal"),
         json=payload,
         timeout=15,
     )
-    r.raise_for_status()
 
 
 def _save_odds_snapshot_now(race_date, jcd, rno, odds_df):
@@ -302,13 +334,13 @@ def _save_odds_snapshot_now(race_date, jcd, rno, odds_df):
         return 0
 
     url, _ = _cfg()
-    r = requests.post(
+    _request(
+        "POST",
         f"{url}/rest/v1/odds_snapshots",
         headers=_headers("return=minimal"),
         json=payload,
         timeout=30,
     )
-    r.raise_for_status()
     return len(payload)
 
 
