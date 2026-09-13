@@ -2417,18 +2417,26 @@ with tab1:
                 st.divider()
                 st.subheader(f"{VENUES[jcd]} {rno}R AI最終予想")
 
-                mc1, mc2 = st.columns(2)
+                total_stake_metric = int(tickets["stake"].sum())
+                mc1, mc2, mc3 = st.columns(3)
                 with mc1:
                     st.metric("AI総合信頼度", confidence(final, work_result))
                 with mc2:
-                    total_stake_metric = int(tickets["stake"].sum())
-                    st.metric("推奨購入総額", f"{total_stake_metric:,}円")
+                    st.metric(
+                        "推奨投資額（シミュレーション）",
+                        f"{total_stake_metric:,}円",
+                    )
+                with mc3:
+                    st.metric(
+                        "推奨判定",
+                        "非推奨" if total_stake_metric == 0 else "推奨",
+                    )
 
                 if total_stake_metric == 0:
-                    st.info(
-                        "このレースは見送りです。"
+                    st.warning(
+                        "⚠️ 非推奨レースです。予想は通常どおり表示しますが、"
                         "1着確率1位と2位の差が40ポイント未満のため、"
-                        "買い目を出していません。"
+                        "推奨買い目は表示せず、推奨投資額を0円としています。"
                     )
 
                 # -------------------------------------------------
