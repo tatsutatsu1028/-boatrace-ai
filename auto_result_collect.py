@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -14,6 +15,7 @@ from today_schedule_fetcher import fetch_venue_deadlines
 
 JST = ZoneInfo("Asia/Tokyo")
 COLLECTOR = "auto_random"
+RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
 RESULT_COLUMNS = [
     "saved_at", "race_date", "venue", "race_no", "race_key", "collector_name",
@@ -45,15 +47,42 @@ def _headers(prefer=None):
     return h
 
 
+def _request(method, url, *, attempts=3, **kwargs):
+    """一時的な接続失敗とData APIの5xxを指数バックオフで再試行する。"""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code not in RETRYABLE_STATUS:
+                response.raise_for_status()
+                return response
+            last_error = requests.HTTPError(
+                f"{response.status_code} Server Error for url: {response.url}",
+                response=response,
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+
+        if attempt + 1 < attempts:
+            delay = 2 ** attempt
+            print(
+                f"[AUTO_RESULT] transient API error; retry "
+                f"{attempt + 2}/{attempts} in {delay}s: {last_error}"
+            )
+            time.sleep(delay)
+
+    raise last_error
+
+
 def _result_exists(race_key):
     url, _ = _cfg()
-    r = requests.get(
+    r = _request(
+        "GET",
         f"{url}/rest/v1/prediction_results",
         params={"select": "race_key", "race_key": f"eq.{race_key}", "limit": "1"},
         headers=_headers(),
         timeout=15,
     )
-    r.raise_for_status()
     return bool(r.json() or [])
 
 
@@ -62,10 +91,11 @@ def _pending_snapshots():
     url, _ = _cfg()
     today = datetime.now(JST).date()
     start = (today - timedelta(days=1)).isoformat()
-    r = requests.get(
+    r = _request(
+        "GET",
         f"{url}/rest/v1/prediction_snapshots",
         params={
-            "select": "race_key,race_date,venue,race_no,saved_at,snapshot_kind,payload_json",
+            "select": "race_key,race_date,venue,race_no,saved_at,snapshot_kind",
             "collector_name": f"eq.{COLLECTOR}",
             "race_date": f"gte.{start}",
             "order": "race_date.asc,race_no.asc",
@@ -73,8 +103,28 @@ def _pending_snapshots():
         headers=_headers(),
         timeout=20,
     )
-    r.raise_for_status()
     return r.json() or []
+
+
+def _snapshot_payload(race_key):
+    """処理対象になった1レース分だけ、容量の大きい予想本体を取得する。"""
+    url, _ = _cfg()
+    r = _request(
+        "GET",
+        f"{url}/rest/v1/prediction_snapshots",
+        params={
+            "select": "payload_json",
+            "collector_name": f"eq.{COLLECTOR}",
+            "race_key": f"eq.{race_key}",
+            "limit": "1",
+        },
+        headers=_headers(),
+        timeout=20,
+    )
+    rows = r.json() or []
+    if not rows:
+        raise ValueError(f"固定予想が見つかりません: {race_key}")
+    return rows[0].get("payload_json")
 
 
 def _parse_race_key(race_key):
@@ -239,13 +289,13 @@ def _build_record(snapshot, official):
 def _upsert_result(record):
     url, _ = _cfg()
     body = {k: record.get(k) for k in RESULT_COLUMNS}
-    r = requests.post(
+    _request(
+        "POST",
         f"{url}/rest/v1/prediction_results?on_conflict=race_key",
         headers=_headers("resolution=merge-duplicates,return=minimal"),
         json=body,
         timeout=20,
     )
-    r.raise_for_status()
 
 
 def main():
@@ -268,7 +318,9 @@ def main():
                 continue
 
             official = fetch_race_result(date_key, jcd, rno)
-            record = _build_record(snap, official)
+            snapshot = dict(snap)
+            snapshot["payload_json"] = _snapshot_payload(race_key)
+            record = _build_record(snapshot, official)
             _upsert_result(record)
             saved += 1
             print(
