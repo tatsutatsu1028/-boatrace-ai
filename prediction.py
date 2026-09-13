@@ -1324,6 +1324,7 @@ def rank_tickets(
     first=None,
     min_first_margin=None,
     min_second_coverage=0,
+    include_nonrecommended=False,
 ):
     """
     3連単の確率表から購入候補を選ぶ。
@@ -1339,7 +1340,8 @@ def rank_tickets(
     first と min_first_margin を渡した場合は、1着確率1位と2位の差が
     閾値未満のレースを見送る。min_second_coverage は、本命艇を1着に
     置いた買い目に含める2着候補艇の最低数。単純な確率上位だけで
-    同じ1-2着へ集中するのを防ぐ。
+    同じ1-2着へ集中するのを防ぐ。include_nonrecommended=True なら、
+    見送り判定でも予想買い目を返し、recommended=False を付ける。
     """
     x = tri.copy()
     x["prob"] = pd.to_numeric(x["prob"], errors="coerce").fillna(0.0)
@@ -1354,6 +1356,7 @@ def rank_tickets(
     x["expected_return"] = x["prob"] * x["odds"]
 
     favorite_lane = None
+    recommended = True
     if first is not None and len(first) and "p_first" in first.columns:
         ranked_first = first[["lane", "p_first"]].copy()
         ranked_first["p_first"] = pd.to_numeric(
@@ -1369,9 +1372,11 @@ def rank_tickets(
                 ranked_first.iloc[0]["p_first"] - ranked_first.iloc[1]["p_first"]
             )
             if margin < float(min_first_margin):
-                return pd.DataFrame(
-                    columns=["combo", "prob", "odds", "expected_return", "group"]
-                )
+                recommended = False
+                if not include_nonrecommended:
+                    return pd.DataFrame(
+                        columns=["combo", "prob", "odds", "expected_return", "group"]
+                    )
 
     # 期待値の列は表示・記録用に残すが、use_odds=False なら
     # 買い目の選択には使わない（確率だけで選ぶ）。
@@ -1544,6 +1549,9 @@ def rank_tickets(
                     result.loc[replace_idx, col] = replacement[col]
 
     keep = ["combo", "prob", "odds", "expected_return", "group"]
+    if include_nonrecommended:
+        result["recommended"] = bool(recommended)
+        keep.append("recommended")
 
     for c in keep:
         if c not in result:
