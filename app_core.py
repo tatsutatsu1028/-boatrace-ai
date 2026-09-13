@@ -2371,6 +2371,7 @@ with tab1:
                             first=final,
                             min_first_margin=0.40,
                             min_second_coverage=3,
+                            include_nonrecommended=True,
                         )
                         tickets = allocate_stakes_smart(
                             tickets,
@@ -2381,6 +2382,12 @@ with tab1:
                             max_ticket_share=0.35,
                             value_bias=float(value_bias),
                         )
+                        if (
+                            "recommended" in tickets.columns
+                            and not tickets["recommended"].fillna(True).all()
+                        ):
+                            tickets["stake"] = 0
+                            tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
                         st.session_state["result"] = {
                             "context": ctx,
                             "before": before,
