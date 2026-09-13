@@ -155,6 +155,67 @@ def _research_rule_status_map():
         return {}
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _auto_random_progress():
+    """自動固定処理と同じ条件で、本日の固定件数と設定を取得する。"""
+    try:
+        url, key = supabase_config()
+        if not url or not key:
+            return None
+
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        settings_response = requests.get(
+            f"{url.rstrip('/')}/rest/v1/app_settings",
+            params={
+                "select": (
+                    "random_auto_enabled,random_auto_daily_count,"
+                    "random_auto_started_at"
+                ),
+                "id": "eq.1",
+                "limit": "1",
+            },
+            headers=headers,
+            timeout=10,
+        )
+        settings_response.raise_for_status()
+        settings_rows = settings_response.json() or []
+        if not settings_rows:
+            return None
+
+        settings = settings_rows[0]
+        target = int(settings.get("random_auto_daily_count", 3) or 3)
+        target = max(1, min(target, 10))
+        snapshot_params = {
+            "select": "race_key",
+            "race_date": f"eq.{_today_jst().isoformat()}",
+            "collector_name": "eq.auto_random",
+        }
+        started_at = settings.get("random_auto_started_at")
+        if started_at:
+            snapshot_params["saved_at"] = f"gte.{started_at}"
+
+        snapshots_response = requests.get(
+            f"{url.rstrip('/')}/rest/v1/prediction_snapshots",
+            params=snapshot_params,
+            headers=headers,
+            timeout=10,
+        )
+        snapshots_response.raise_for_status()
+        current = len(snapshots_response.json() or [])
+
+        return {
+            "current": current,
+            "target": target,
+            "enabled": bool(settings.get("random_auto_enabled", False)),
+        }
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _research_rule_d_progress():
     """Supabase RPCからD対象数だけを取得する。研究テーブル本体は公開しない。"""
@@ -807,6 +868,29 @@ with tab2:
         st.info("🔒 収集スタッフは学習データを変更できません。管理者と同じ既定データを使用します。")
 
 with tab3:
+    st.subheader("🤖 自動固定状況")
+    _auto_progress = _auto_random_progress()
+    if _auto_progress is None:
+        st.caption("自動固定状況を取得できませんでした。")
+    else:
+        _auto_count_col, _auto_state_col = st.columns(2)
+        with _auto_count_col:
+            st.metric(
+                "本日の自動固定",
+                f"{_auto_progress['current']} / {_auto_progress['target']}R",
+            )
+        with _auto_state_col:
+            st.metric(
+                "稼働状態",
+                "ON" if _auto_progress["enabled"] else "OFF",
+            )
+        if _auto_progress["current"] >= _auto_progress["target"]:
+            st.success("本日の目標レース数まで固定済みです。")
+        else:
+            _auto_remaining = _auto_progress["target"] - _auto_progress["current"]
+            st.caption(f"あと{_auto_remaining}Rで本日の目標に到達します。（30秒ごとに更新）")
+
+    st.divider()
     st.subheader("買い目設定")
     if not IS_ADMIN:
         st.info("🔒 収集スタッフは設定を保存できません。管理者の保存設定を使用します。")
