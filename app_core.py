@@ -2371,6 +2371,8 @@ with tab1:
                             first=final,
                             min_first_margin=0.40,
                             min_second_coverage=3,
+                            close_third_gap=0.03,
+                            close_third_coverage=4,
                             include_nonrecommended=True,
                         )
                         tickets = allocate_stakes_smart(
