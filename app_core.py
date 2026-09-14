@@ -22,6 +22,7 @@ from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants
 from stake_allocator import allocate_stakes_smart
 from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
+# 固定保存は旧スナップショット形式との互換性を維持する。
 from result_tracker import (
     load_results,
     load_analysis_view,
