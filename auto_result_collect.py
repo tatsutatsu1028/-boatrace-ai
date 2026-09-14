@@ -23,6 +23,8 @@ RESULT_COLUMNS = [
     "p1_lane", "p1_prob", "top_ticket", "top_ticket_prob", "top_ticket_odds",
     "top_ticket_stake", "total_stake", "payout", "profit", "roi",
     "hit_top_ticket", "hit_any_ticket", "predicted_first_hit",
+    "candidate_count", "candidate_hit", "candidate_hit_rank",
+    "hit_within_8", "hit_within_9", "hit_within_10",
     "tickets_json", "lane_probs_json",
 ]
 
@@ -218,6 +220,12 @@ def _build_record(snapshot, official):
         tickets = pd.DataFrame(columns=["combo", "stake"])
         stake_num = pd.Series(dtype=float)
     total_stake = int(stake_num.sum())
+    candidate_combos = tickets["combo"].astype(str).tolist()
+    candidate_hit_rank = (
+        candidate_combos.index(actual_combo) + 1
+        if actual_combo in candidate_combos
+        else None
+    )
     purchased = tickets[stake_num > 0].copy()
     purchased_combos = set(purchased["combo"].astype(str))
     hit_any = actual_combo in purchased_combos
@@ -276,6 +284,12 @@ def _build_record(snapshot, official):
         "roi": roi,
         "hit_top_ticket": bool(hit_top),
         "hit_any_ticket": bool(hit_any),
+        "candidate_count": int(len(candidate_combos)),
+        "candidate_hit": bool(candidate_hit_rank is not None),
+        "candidate_hit_rank": candidate_hit_rank,
+        "hit_within_8": bool(candidate_hit_rank and candidate_hit_rank <= 8),
+        "hit_within_9": bool(candidate_hit_rank and candidate_hit_rank <= 9),
+        "hit_within_10": bool(candidate_hit_rank and candidate_hit_rank <= 10),
         "predicted_first_hit": int(official["first"]) == p1_lane,
         "tickets_json": json.dumps(ticket_payload, ensure_ascii=False),
         "lane_probs_json": json.dumps({

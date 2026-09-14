@@ -19,6 +19,12 @@ SETTINGS_FILE = Path(__file__).parent / "app_settings.json"
 SUPABASE_TABLE = "prediction_results"
 SUPABASE_SETTINGS_TABLE = "app_settings"
 SUPABASE_SNAPSHOT_TABLE = "prediction_snapshots"
+CONDITIONAL_THIRD_COLUMNS = [
+    f"p_third_given_{first_lane}_{second_lane}"
+    for first_lane in range(1, 7)
+    for second_lane in range(1, 7)
+    if first_lane != second_lane
+]
 
 
 RESULT_COLUMNS = [
@@ -44,6 +50,12 @@ RESULT_COLUMNS = [
     "roi",
     "hit_top_ticket",
     "hit_any_ticket",
+    "candidate_count",
+    "candidate_hit",
+    "candidate_hit_rank",
+    "hit_within_8",
+    "hit_within_9",
+    "hit_within_10",
     "predicted_first_hit",
     "tickets_json",
     "lane_probs_json",
@@ -233,6 +245,7 @@ def _snapshot_payload(final, tickets, research_variants=None):
             "lane", "racer_name", "p_first", "p_second", "p_third",
             "p_second_given_1", "p_second_given_2", "p_second_given_3",
             "p_second_given_4", "p_second_given_5", "p_second_given_6",
+            *CONDITIONAL_THIRD_COLUMNS,
             "model_version", "reason",
             "kimarite_adjustment", "kimarite_effect_pct",
             "kimarite_starts", "kimarite_wins", "kimarite_dominant",
@@ -637,6 +650,16 @@ def save_race_result(
             .sum()
         )
 
+    candidate_combos = tickets.get(
+        "combo", pd.Series(dtype=str)
+    ).astype(str).tolist()
+    candidate_hit_rank = (
+        candidate_combos.index(actual_combo) + 1
+        if actual_combo in candidate_combos
+        else None
+    )
+    candidate_hit = candidate_hit_rank is not None
+
     purchased = tickets.copy()
 
     if "stake" in purchased.columns:
@@ -696,7 +719,8 @@ def save_race_result(
 
     ticket_payload = []
 
-    for _, row in purchased.iterrows():
+    # 資金配分と予想精度を分離するため、購入額0円の候補も保存する。
+    for _, row in tickets.iterrows():
         item = {}
 
         for c in keep_cols:
@@ -716,6 +740,7 @@ def save_race_result(
         "lane", "racer_name", "p_first", "p_second", "p_third",
         "p_second_given_1", "p_second_given_2", "p_second_given_3",
         "p_second_given_4", "p_second_given_5", "p_second_given_6",
+        *CONDITIONAL_THIRD_COLUMNS,
         "model_version", "reason",
         "kimarite_adjustment", "kimarite_effect_pct",
         "kimarite_starts", "kimarite_wins", "kimarite_dominant",
@@ -783,6 +808,12 @@ def save_race_result(
         "hit_any_ticket": bool(
             hit_any_ticket
         ),
+        "candidate_count": int(len(candidate_combos)),
+        "candidate_hit": bool(candidate_hit),
+        "candidate_hit_rank": candidate_hit_rank,
+        "hit_within_8": bool(candidate_hit_rank and candidate_hit_rank <= 8),
+        "hit_within_9": bool(candidate_hit_rank and candidate_hit_rank <= 9),
+        "hit_within_10": bool(candidate_hit_rank and candidate_hit_rank <= 10),
         "predicted_first_hit": bool(
             predicted_first_hit
         ),
@@ -1190,6 +1221,10 @@ def metrics(df=None):
             "races": 0,
             "first_hit_rate": np.nan,
             "ticket_hit_rate": np.nan,
+            "candidate_hit_rate": np.nan,
+            "hit_within_8_rate": np.nan,
+            "hit_within_9_rate": np.nan,
+            "hit_within_10_rate": np.nan,
             "top_ticket_hit_rate": np.nan,
             "total_stake": 0,
             "total_payout": 0,
@@ -1211,6 +1246,21 @@ def metrics(df=None):
         .str.lower()
         .isin(["true", "1"])
     )
+
+    def _bool_rate(column, fallback=None):
+        if column not in df.columns:
+            return fallback
+        raw = df[column]
+        normalized = raw.astype(str).str.strip().str.lower()
+        valid = raw.notna() & ~normalized.isin(["", "nan", "none", "null"])
+        if not valid.any():
+            return fallback
+        values = normalized[valid].isin(["true", "1"])
+        return float(values.mean())
+
+    # 旧データの hit_any_ticket は「資金を付けた買い目」の的中率であり、
+    # 候補的中率の代用にはしない。新指標がまだ無い期間は未集計として表示する。
+    candidate_hit_rate = _bool_rate("candidate_hit", np.nan)
 
     top_hit = (
         df["hit_top_ticket"]
@@ -1270,6 +1320,10 @@ def metrics(df=None):
         "ticket_hit_rate": float(
             any_hit.mean()
         ),
+        "candidate_hit_rate": candidate_hit_rate,
+        "hit_within_8_rate": _bool_rate("hit_within_8", np.nan),
+        "hit_within_9_rate": _bool_rate("hit_within_9", np.nan),
+        "hit_within_10_rate": _bool_rate("hit_within_10", np.nan),
         "top_ticket_hit_rate": float(
             top_hit.mean()
         ),

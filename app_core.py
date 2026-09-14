@@ -1218,8 +1218,8 @@ with tab4:
                 f"{vm['first_hit_rate']*100:.1f}%" if pd.notna(vm["first_hit_rate"]) else "-"
             )
             st.metric(
-                "購入買い目 的中率",
-                f"{vm['ticket_hit_rate']*100:.1f}%" if pd.notna(vm["ticket_hit_rate"]) else "-"
+                "予想候補 的中率（資金配分なし）",
+                f"{vm['candidate_hit_rate']*100:.1f}%" if pd.notna(vm["candidate_hit_rate"]) else "-"
             )
         with m2:
             st.metric("累計収支", f"{vm['profit']:+,}円")
@@ -1233,6 +1233,24 @@ with tab4:
             )
 
         st.caption("Brier score は小さいほど、予測確率と実際の結果のズレが小さい指標です。")
+
+        st.markdown("#### 🎯 買い目点数別の予想精度")
+        pc1, pc2, pc3 = st.columns(3)
+        for column, label, container in (
+            ("hit_within_8_rate", "8点内", pc1),
+            ("hit_within_9_rate", "9点内", pc2),
+            ("hit_within_10_rate", "10点内", pc3),
+        ):
+            value = vm.get(column, np.nan)
+            with container:
+                st.metric(
+                    label,
+                    f"{value*100:.1f}%" if pd.notna(value) else "-",
+                )
+        st.caption(
+            "投資額・推奨／非推奨に関係なく、固定時の候補上位に実結果が含まれた割合です。"
+            "回収率は別のシミュレーション指標として扱います。"
+        )
 
         st.markdown("#### 1着予測の確率校正")
         cal = calibration_table(results_df)
@@ -1325,8 +1343,10 @@ with tab4:
 
         show_cols = [
             "race_date","venue","race_no","trifecta_actual","p1_lane","p1_prob",
+            "candidate_count","candidate_hit","candidate_hit_rank",
             "total_stake","payout","profit","roi"
         ]
+        show_cols = [c for c in show_cols if c in results_df.columns]
         show = results_df[show_cols].copy()
 
         if "race_key" in results_df.columns:
@@ -1345,6 +1365,9 @@ with tab4:
             "trifecta_actual":"実3連単",
             "p1_lane":"AI本命",
             "p1_prob":"本命確率",
+            "candidate_count":"候補点数",
+            "candidate_hit":"予想的中",
+            "candidate_hit_rank":"的中順位",
             "total_stake":"購入",
             "payout":"払戻",
             "profit":"収支",
@@ -1352,10 +1375,11 @@ with tab4:
         })
 
         # スマホで最初に見えるよう、研究ルールをRのすぐ後ろへ移動。
-        show = show[[
+        _preferred_show_cols = [
             "日付", "場", "R", "研究ルール", "実3連単", "AI本命", "本命確率",
-            "購入", "払戻", "収支", "回収倍率"
-        ]]
+            "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
+        ]
+        show = show[[c for c in _preferred_show_cols if c in show.columns]]
 
         st.caption("研究ルールはレース終了後に確定したA/B/C/D判定です。『—』はどのルールにも非該当、『未判定』は研究結果がまだ保存されていないレースです。")
         st.dataframe(
@@ -1392,6 +1416,12 @@ with tab4:
             "roi": "回収倍率",
             "hit_top_ticket": "本命的中",
             "hit_any_ticket": "いずれか的中",
+            "candidate_count": "候補点数",
+            "candidate_hit": "予想候補的中",
+            "candidate_hit_rank": "的中順位",
+            "hit_within_8": "8点内的中",
+            "hit_within_9": "9点内的中",
+            "hit_within_10": "10点内的中",
             "predicted_first_hit": "1着予想的中",
             "tickets_json": "買い目詳細",
             "lane_probs_json": "6艇予測詳細",

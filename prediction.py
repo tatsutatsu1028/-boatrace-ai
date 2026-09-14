@@ -29,8 +29,14 @@ BASE_CAT = ["venue"]
 SECOND_NUM = [col for col in BASE_NUM if col != "lane"]
 SECOND_CAT = BASE_CAT + ["lane", "winner_lane"]
 
+# 3着v3では、候補艇だけでなく確定済みと仮定した1着・2着艇も条件にする。
+# P(3着艇 | 1着艇, 2着艇, レース特徴) を直接学習し、同じ艇でも
+# 1-2着の組み合わせによって3着順位が変わることを表現する。
+THIRD_NUM = [col for col in BASE_NUM if col != "lane"]
+THIRD_CAT = BASE_CAT + ["lane", "winner_lane", "second_lane"]
+
 # 検証データでロジック世代を区別するための固定ID。
-MODEL_VERSION = "position-v2-20260909"
+MODEL_VERSION = "position-v3-20260914"
 
 # オリジナル展示（直線・まわり足・1周）は順位ベースで評価するため、
 # 一部の艇にしか値が入っていないと、その艇だけが不当に高く評価される。
@@ -302,17 +308,66 @@ def train(history):
             y_second,
         )
 
-    m_third = _pipeline()
-    y_third = (
-        pd.to_numeric(position_history["finish"], errors="coerce") == 3
-    ).astype(int)
-    m_third.fit(position_history[BASE_NUM + BASE_CAT], y_third)
+    # 3着v3は実際の1着艇・2着艇を条件として全6艇へ付与する。
+    # race_keyがない合成履歴では、従来の周辺3着モデルへフォールバックする。
+    third_history = position_history.copy()
+    conditional_third_ready = False
+    if "race_key" in third_history.columns:
+        try:
+            _finish_num = pd.to_numeric(
+                third_history["finish"], errors="coerce"
+            )
+            _placing_rows = third_history.loc[
+                _finish_num.isin([1, 2]), ["race_key", "lane", "finish"]
+            ].copy()
+            _placing_rows["finish"] = pd.to_numeric(
+                _placing_rows["finish"], errors="coerce"
+            )
+            _placing_rows["lane"] = pd.to_numeric(
+                _placing_rows["lane"], errors="coerce"
+            )
+            _placing = (
+                _placing_rows.dropna()
+                .drop_duplicates(["race_key", "finish"], keep="first")
+                .pivot(index="race_key", columns="finish", values="lane")
+                .rename(columns={1: "winner_lane", 2: "second_lane"})
+                .reset_index()
+            )
+            third_history = third_history.merge(
+                _placing[["race_key", "winner_lane", "second_lane"]],
+                on="race_key",
+                how="left",
+            )
+            valid_third_conditions = (
+                pd.to_numeric(third_history["winner_lane"], errors="coerce").between(1, 6)
+                & pd.to_numeric(third_history["second_lane"], errors="coerce").between(1, 6)
+                & third_history["winner_lane"].ne(third_history["second_lane"])
+            )
+            third_history = third_history[valid_third_conditions].copy()
+            conditional_third_ready = len(third_history) >= 100
+        except Exception:
+            conditional_third_ready = False
+
+    if conditional_third_ready:
+        m_third = _pipeline(num_cols=THIRD_NUM, cat_cols=THIRD_CAT)
+        y_third = (
+            pd.to_numeric(third_history["finish"], errors="coerce") == 3
+        ).astype(int)
+        m_third.fit(third_history[THIRD_NUM + THIRD_CAT], y_third)
+    else:
+        m_third = _pipeline()
+        y_third = (
+            pd.to_numeric(position_history["finish"], errors="coerce") == 3
+        ).astype(int)
+        m_third.fit(position_history[BASE_NUM + BASE_CAT], y_third)
 
     m._second_model = m_second
     m._second_model_conditional = bool(conditional_second_ready)
     m._third_model = m_third
+    m._third_model_conditional = bool(conditional_third_ready)
     m._position_model_rows = int(len(position_history))
     m._second_model_rows = int(len(second_history))
+    m._third_model_rows = int(len(third_history))
 
     # 予想時に選手×想定コースの決まり手補正を使えるよう、
     # まず学習CSV自身からプロファイルを作る。
@@ -765,6 +820,8 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
     # winner_laneごとの条件付き2着分布を保持する。
     # key=仮定した1着艇、value=6艇分の2着条件付き確率。
     p_second_given_winner = {}
+    # (winner_lane, second_lane)ごとの条件付き3着分布を保持する。
+    p_third_given_first_second = {}
 
     try:
         second_model = getattr(model, "_second_model", None)
@@ -858,8 +915,10 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
 
     try:
         third_model = getattr(model, "_third_model", None)
+        conditional_third = bool(
+            getattr(model, "_third_model_conditional", False)
+        )
         if third_model is not None:
-            raw_third = third_model.predict_proba(x[BASE_NUM + BASE_CAT])[:, 1]
             third_adj = np.zeros(len(x), dtype=float)
 
             if "venue_course_3rd" in x.columns:
@@ -870,11 +929,65 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
                 z_c3 = _rank_score_higher_better(x["course_top3_rate"])
                 third_adj += 0.10 * np.clip(z_c3, -1.0, 1.0)
 
-            third_strength = raw_third * np.exp(third_adj)
-            if third_strength.sum() > 0:
-                p_third = third_strength / third_strength.sum()
+            lane_num = pd.to_numeric(x["lane"], errors="coerce").to_numpy()
+
+            if conditional_third:
+                for winner_lane in range(1, 7):
+                    for second_lane in range(1, 7):
+                        if second_lane == winner_lane:
+                            continue
+                        x_third = x.copy()
+                        x_third["winner_lane"] = winner_lane
+                        x_third["second_lane"] = second_lane
+                        raw_third = third_model.predict_proba(
+                            x_third[THIRD_NUM + THIRD_CAT]
+                        )[:, 1]
+                        third_strength = np.clip(raw_third, 1e-9, None) * np.exp(third_adj)
+                        third_strength = np.where(
+                            (lane_num == winner_lane) | (lane_num == second_lane),
+                            0.0,
+                            third_strength,
+                        )
+                        if third_strength.sum() > 0:
+                            cond = third_strength / third_strength.sum()
+                        else:
+                            cond = np.where(
+                                (lane_num == winner_lane) | (lane_num == second_lane),
+                                0.0,
+                                1.0,
+                            )
+                            cond = cond / cond.sum()
+                        p_third_given_first_second[(winner_lane, second_lane)] = cond
+
+                # UI用p_thirdは、1着・2着の全シナリオで加重した周辺確率。
+                p_third = np.zeros(len(x), dtype=float)
+                lane_to_pos = {
+                    int(v): i for i, v in enumerate(lane_num) if np.isfinite(v)
+                }
+                for winner_lane in range(1, 7):
+                    winner_pos = lane_to_pos.get(winner_lane)
+                    winner_prob = float(p[winner_pos]) if winner_pos is not None else 0.0
+                    second_dist = p_second_given_winner.get(winner_lane)
+                    if second_dist is None:
+                        second_dist = np.where(lane_num == winner_lane, 0.0, p_second)
+                        if second_dist.sum() > 0:
+                            second_dist = second_dist / second_dist.sum()
+                    for second_lane in range(1, 7):
+                        second_pos = lane_to_pos.get(second_lane)
+                        cond = p_third_given_first_second.get((winner_lane, second_lane))
+                        if second_pos is None or cond is None:
+                            continue
+                        p_third += winner_prob * float(second_dist[second_pos]) * cond
+                if p_third.sum() > 0:
+                    p_third = p_third / p_third.sum()
+            else:
+                raw_third = third_model.predict_proba(x[BASE_NUM + BASE_CAT])[:, 1]
+                third_strength = raw_third * np.exp(third_adj)
+                if third_strength.sum() > 0:
+                    p_third = third_strength / third_strength.sum()
     except Exception:
         p_third = p.copy()
+        p_third_given_first_second = {}
 
     out = x[["lane"]].copy()
 
@@ -891,6 +1004,11 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
         cond = p_second_given_winner.get(winner_lane)
         if cond is not None:
             out[f"p_second_given_{winner_lane}"] = cond
+
+    # 例: p_third_given_1_3 は「1号艇が1着、3号艇が2着の場合」の
+    # 各艇3着確率。固定スナップショットにも保存し、後日の検証に使う。
+    for (winner_lane, second_lane), cond in p_third_given_first_second.items():
+        out[f"p_third_given_{winner_lane}_{second_lane}"] = cond
 
     out["model_version"] = MODEL_VERSION
     out["adjustment"] = adjustment
@@ -1157,10 +1275,10 @@ def trifecta(
     おらず（平均で購入点数の1割強にとどまる）3連単的中率が低い
     （本命買い目的中8.8%）ことが分かったための対応。
 
-    3着確率についても同様に、COURSE_3RD_RANK_PROB（残り艇を番号順に
-    並べたときの実績順位分布）をブレンドする。1着・2着ほど極端では
-    ないが、3着争いでも若い番号（イン寄り）の艇がやや有利という
-    傾向が実データで確認できたため。
+    3着v3は winner_lane と second_lane を条件に加え、
+    P(3着艇 | 1着艇, 2着艇, レース特徴) を直接使う。条件付き列がない
+    旧モデル・旧スナップショットではp_thirdへ安全にフォールバックする。
+    COURSE_3RD_RANK_PROBは弱い事前分布として引き続きブレンドする。
     """
     s = dict(
         zip(
@@ -1223,11 +1341,24 @@ def trifecta(
         else:
             pb = pb_ability
 
+        third_conditional_col = f"p_third_given_{a}_{b}"
+        if third_conditional_col in first.columns:
+            s3_for_ab = dict(
+                zip(
+                    first["lane"].astype(int),
+                    pd.to_numeric(
+                        first[third_conditional_col], errors="coerce"
+                    ).fillna(0.0).astype(float),
+                )
+            )
+        else:
+            s3_for_ab = s3
+
         denom_c = sum(
-            (max(v, 1e-12) ** gamma_c) for k, v in s3.items()
+            (max(v, 1e-12) ** gamma_c) for k, v in s3_for_ab.items()
             if k not in (a, b)
         )
-        pc_ability = (max(s3[c], 1e-12) ** gamma_c) / denom_c
+        pc_ability = (max(s3_for_ab[c], 1e-12) ** gamma_c) / denom_c
 
         remaining_sorted = sorted(k for k in s if k not in (a, b))
         c_rank = remaining_sorted.index(c) + 1
@@ -1312,6 +1443,39 @@ def _take_unique(df, n):
     return source.head(int(n)).copy()
 
 
+def _third_scores_given_winner(first, winner_lane):
+    """1着艇を固定し、2着シナリオで加重した3着候補確率を返す。"""
+    lanes = pd.to_numeric(first["lane"], errors="coerce")
+    fallback_source = (
+        first["p_third"]
+        if "p_third" in first.columns
+        else pd.Series(0.0, index=first.index)
+    )
+    fallback = pd.to_numeric(fallback_source, errors="coerce").fillna(0.0)
+    second_col = f"p_second_given_{int(winner_lane)}"
+    if second_col not in first.columns:
+        return fallback
+
+    second_probs = pd.to_numeric(first[second_col], errors="coerce").fillna(0.0)
+    scores = pd.Series(0.0, index=first.index, dtype=float)
+    used = False
+    for second_lane in range(1, 7):
+        if second_lane == int(winner_lane):
+            continue
+        col = f"p_third_given_{int(winner_lane)}_{second_lane}"
+        second_match = lanes.eq(second_lane)
+        if col not in first.columns or not second_match.any():
+            continue
+        weight = float(second_probs.loc[second_match].iloc[0])
+        cond = pd.to_numeric(first[col], errors="coerce").fillna(0.0)
+        scores += weight * cond
+        used = True
+
+    if not used or scores.sum() <= 0:
+        return fallback
+    return scores / scores.sum()
+
+
 def adaptive_ticket_plan(first):
     """的中率重視で買い目を8〜10点に自動調整する。"""
     plan = {
@@ -1347,7 +1511,9 @@ def adaptive_ticket_plan(first):
     candidates = first.copy()
     candidates["lane"] = pd.to_numeric(candidates["lane"], errors="coerce")
     candidates[second_col] = pd.to_numeric(candidates[second_col], errors="coerce")
-    candidates["p_third"] = pd.to_numeric(candidates["p_third"], errors="coerce")
+    candidates["p_third"] = _third_scores_given_winner(
+        first, favorite_lane
+    ).reindex(candidates.index)
     candidates = candidates.dropna(subset=["lane"])
     candidates = candidates[candidates["lane"].ne(favorite_lane)]
 
@@ -1642,7 +1808,10 @@ def rank_tickets(
         and "p_third" in first.columns
         and close_third_gap is not None
     ):
-        third_ranked = first[["lane", "p_third"]].copy()
+        third_ranked = first[["lane"]].copy()
+        third_ranked["p_third"] = _third_scores_given_winner(
+            first, favorite_lane
+        ).reindex(third_ranked.index)
         third_ranked["lane"] = pd.to_numeric(third_ranked["lane"], errors="coerce")
         third_ranked["p_third"] = pd.to_numeric(
             third_ranked["p_third"], errors="coerce"

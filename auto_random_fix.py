@@ -30,6 +30,12 @@ JST = ZoneInfo("Asia/Tokyo")
 COLLECTOR = "auto_random"
 SNAPSHOT_KIND = "auto_random"
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+CONDITIONAL_THIRD_COLUMNS = [
+    f"p_third_given_{first_lane}_{second_lane}"
+    for first_lane in range(1, 7)
+    for second_lane in range(1, 7)
+    if first_lane != second_lane
+]
 
 
 def _cfg():
@@ -204,6 +210,7 @@ def _snapshot_payload(
         "lane", "racer_name", "p_first", "p_second", "p_third",
         "p_second_given_1", "p_second_given_2", "p_second_given_3",
         "p_second_given_4", "p_second_given_5", "p_second_given_6",
+        *CONDITIONAL_THIRD_COLUMNS,
         "model_version", "reason", "kimarite_adjustment", "kimarite_effect_pct",
         "kimarite_starts", "kimarite_wins", "kimarite_dominant", "kimarite_available",
     ]
