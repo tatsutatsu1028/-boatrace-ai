@@ -1311,6 +1311,84 @@ def _take_unique(df, n):
     return df.head(int(n)).copy()
 
 
+def adaptive_ticket_plan(first):
+    """的中率重視で買い目を8〜10点に自動調整する。"""
+    plan = {
+        "point_count": 8,
+        "main_n": 4,
+        "cover_n": 4,
+        "min_second_coverage": 3,
+        "second_boundary_gap": None,
+        "third_boundary_gap": None,
+        "reason": "候補差を判定できないため標準8点",
+    }
+    required = {"lane", "p_first", "p_third"}
+    if first is None or not len(first) or not required.issubset(first.columns):
+        return plan
+
+    ranked_first = first.copy()
+    ranked_first["lane"] = pd.to_numeric(ranked_first["lane"], errors="coerce")
+    ranked_first["p_first"] = pd.to_numeric(
+        ranked_first["p_first"], errors="coerce"
+    )
+    ranked_first = ranked_first.dropna(subset=["lane", "p_first"]).sort_values(
+        "p_first", ascending=False
+    )
+    if not len(ranked_first):
+        return plan
+
+    favorite_lane = int(ranked_first.iloc[0]["lane"])
+    conditional_col = f"p_second_given_{favorite_lane}"
+    second_col = conditional_col if conditional_col in first.columns else "p_second"
+    if second_col not in first.columns:
+        return plan
+
+    candidates = first.copy()
+    candidates["lane"] = pd.to_numeric(candidates["lane"], errors="coerce")
+    candidates[second_col] = pd.to_numeric(candidates[second_col], errors="coerce")
+    candidates["p_third"] = pd.to_numeric(candidates["p_third"], errors="coerce")
+    candidates = candidates.dropna(subset=["lane"])
+    candidates = candidates[candidates["lane"].ne(favorite_lane)]
+
+    second_ranked = candidates.dropna(subset=[second_col]).sort_values(
+        second_col, ascending=False
+    )
+    third_ranked = candidates.dropna(subset=["p_third"]).sort_values(
+        "p_third", ascending=False
+    )
+    if len(second_ranked) < 4 or len(third_ranked) < 4:
+        return plan
+
+    second_gap = float(
+        second_ranked.iloc[2][second_col] - second_ranked.iloc[3][second_col]
+    )
+    third_gap = float(
+        third_ranked.iloc[2]["p_third"] - third_ranked.iloc[3]["p_third"]
+    )
+    plan["second_boundary_gap"] = second_gap
+    plan["third_boundary_gap"] = third_gap
+
+    if third_gap <= 0.01 + 1e-12:
+        plan.update(
+            point_count=10,
+            main_n=5,
+            cover_n=5,
+            min_second_coverage=4,
+            reason="3着候補3位と4位が1ポイント以内のため10点",
+        )
+    elif second_gap > 0.05 + 1e-12 and third_gap > 0.05 + 1e-12:
+        plan["reason"] = "2・3着候補の境界差がともに5ポイント超のため8点"
+    else:
+        plan.update(
+            point_count=9,
+            main_n=4,
+            cover_n=5,
+            min_second_coverage=4,
+            reason="2・3着候補が接近しているため9点",
+        )
+    return plan
+
+
 def rank_tickets(
     tri,
     odds=None,
