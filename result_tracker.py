@@ -225,7 +225,7 @@ def _delete_supabase(race_key):
 # 予想時点スナップショット
 # -----------------------------
 
-def _snapshot_payload(final, tickets, research_variants=None):
+def _snapshot_payload(final, tickets, research_variants=None, ticket_plan=None):
     final_rows = []
     for _, row in final.sort_values("lane").iterrows():
         item = {}
@@ -270,11 +270,16 @@ def _snapshot_payload(final, tickets, research_variants=None):
                 rows.append(item)
             research_payload[str(label)] = rows
 
-    return {
+    payload = {
         "final": final_rows,
         "tickets": ticket_rows,
         "research": research_payload,
     }
+    if ticket_plan:
+        payload["ticket_plan"] = {
+            str(key): _json_safe(value) for key, value in ticket_plan.items()
+        }
+    return payload
 
 
 def load_prediction_snapshot(race_key):
@@ -332,6 +337,7 @@ def save_prediction_snapshot(
     final,
     tickets,
     research_variants=None,
+    ticket_plan=None,
     snapshot_kind="same_day",
     collector_name="owner",
 ):
@@ -355,6 +361,7 @@ def save_prediction_snapshot(
         final.copy(),
         tickets.copy(),
         research_variants=research_variants,
+        ticket_plan=ticket_plan,
     )
 
     record = {

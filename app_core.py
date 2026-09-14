@@ -19,7 +19,7 @@ import requests
 
 from official_fetcher import VENUES, fetch_official_race, fetch_odds3t, fetch_race_result
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
-from prediction import train, predict, trifecta, rank_tickets, confidence, assess_favorite_risk, research_prediction_variants
+from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants
 from stake_allocator import allocate_stakes_smart
 from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 from result_tracker import (
@@ -899,20 +899,16 @@ with tab3:
         st.session_state["app_settings"] = load_settings()
     saved = st.session_state["app_settings"]
 
-    main_n = st.number_input("🔥 本線 点数", 1, 10, int(saved.get("main_n", 3)))
-    cover_n = st.number_input("🛟 抑え 点数", 0, 10, int(saved.get("cover_n", 3)))
-    hole_n = st.number_input(
-        "💎 穴 点数", 0, 10, int(saved.get("hole_n", 0)),
-        help=(
-            "検証111レースでは穴は106点買って的中ゼロ（回収率0%）でした。"
-            "平均的中確率が1%前後しかなく、控除率25%の中では勝ちにくい帯です。"
-            "既定を0にしています。"
-        ),
+    st.info(
+        "🎯 的中率重視モード：条件付き2着確率と3着候補の接戦度から、"
+        "推奨買い目を1レース8〜10点に自動調整します。"
     )
-    if int(hole_n) > 0:
-        st.caption(
-            "⚠️ 検証データ上、穴の回収率は0%（106点・13,200円で的中ゼロ）でした。"
-        )
+
+    main_n, cover_n, hole_n = 4, 4, 0
+    st.caption(
+        "8点＝本線4＋抑え4、9点＝本線4＋抑え5、"
+        "10点＝本線5＋抑え5。穴枠は使いません。"
+    )
 
     st.divider()
     total_budget = st.number_input(
@@ -2356,6 +2352,7 @@ with tab1:
                             venue_course_weight=venue_course_weight,
                         )
                         tri = trifecta(final)
+                        ticket_plan = adaptive_ticket_plan(final)
 
                         favorite_lane, risk_score, risk_reasons = assess_favorite_risk(work, final)
                         hedge_lane = favorite_lane if (hedge_enabled and risk_score >= 2) else None
@@ -2363,15 +2360,15 @@ with tab1:
                         tickets = rank_tickets(
                             tri,
                             odds,
-                            main_n=int(main_n),
-                            cover_n=int(cover_n),
-                            longshot_n=int(hole_n),
+                            main_n=ticket_plan["main_n"],
+                            cover_n=ticket_plan["cover_n"],
+                            longshot_n=0,
                             longshot_min_prob=float(longshot_min_prob_pct) / 100.0,
                             hedge_lane=hedge_lane,
                             first=final,
                             min_first_margin=0.40,
-                            min_second_coverage=3,
-                            close_third_gap=0.03,
+                            min_second_coverage=ticket_plan["min_second_coverage"],
+                            close_third_gap=None,
                             close_third_coverage=4,
                             include_nonrecommended=True,
                         )
@@ -2399,6 +2396,7 @@ with tab1:
                             "hedge_lane": hedge_lane,
                             "risk_reasons": risk_reasons,
                             "research_variants": research_variants,
+                            "ticket_plan": ticket_plan,
                         }
                 except Exception as e:
                     st.error("AI予想でエラーが発生しました。")
@@ -2441,11 +2439,16 @@ with tab1:
                         "非推奨" if total_stake_metric == 0 else "推奨",
                     )
 
+                ticket_plan = result.get("ticket_plan") or {}
+                point_count = int(ticket_plan.get("point_count", len(tickets)))
+                plan_reason = ticket_plan.get("reason", "固定済みの買い目構成")
+                st.info(f"🎯 推奨買い目 {point_count}点：{plan_reason}")
+
                 if total_stake_metric == 0:
                     st.warning(
                         "⚠️ 非推奨レースです。予想は通常どおり表示しますが、"
                         "1着確率1位と2位の差が40ポイント未満のため、"
-                        "推奨買い目は表示せず、推奨投資額を0円としています。"
+                        "買い目は検証用予想として表示し、推奨投資額を0円としています。"
                     )
 
                 # -------------------------------------------------
@@ -2594,6 +2597,10 @@ with tab1:
                                 tickets=tickets,
                                 research_variants=st.session_state["result"].get(
                                     "research_variants",
+                                    {},
+                                ),
+                                ticket_plan=st.session_state["result"].get(
+                                    "ticket_plan",
                                     {},
                                 ),
                                 snapshot_kind=snapshot_kind,
