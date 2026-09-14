@@ -2649,10 +2649,6 @@ with tab1:
                                     "research_variants",
                                     {},
                                 ),
-                                ticket_plan=st.session_state["result"].get(
-                                    "ticket_plan",
-                                    {},
-                                ),
                                 snapshot_kind=snapshot_kind,
                                 collector_name=COLLECTOR_NAME,
                             )
