@@ -242,6 +242,42 @@ def _research_rule_d_progress():
         return None
 
 
+def _complete_adaptive_tickets(tickets, tri, odds, main_points, cover_points):
+    """予定点数に足りない買い目を、未採用の確率上位から補充する。"""
+    out = tickets.copy().drop_duplicates("combo", keep="first").reset_index(drop=True)
+    pool = tri.copy().drop_duplicates("combo", keep="first")
+    pool["prob"] = pd.to_numeric(pool["prob"], errors="coerce").fillna(0.0)
+
+    if odds is not None and len(odds) and {"combo", "odds"}.issubset(odds.columns):
+        odds_unique = odds[["combo", "odds"]].drop_duplicates("combo", keep="last")
+        pool = pool.merge(odds_unique, on="combo", how="left")
+    else:
+        pool["odds"] = np.nan
+    pool["odds"] = pd.to_numeric(pool["odds"], errors="coerce")
+    pool["expected_return"] = pool["prob"] * pool["odds"]
+
+    recommended = True
+    if "recommended" in out.columns and len(out):
+        recommended = bool(out["recommended"].fillna(True).all())
+
+    for group, target in (("本線", int(main_points)), ("抑え", int(cover_points))):
+        missing = target - int(out["group"].eq(group).sum())
+        if missing <= 0:
+            continue
+        picks = (
+            pool[~pool["combo"].isin(set(out["combo"]))]
+            .sort_values("prob", ascending=False)
+            .head(missing)
+            .copy()
+        )
+        picks["group"] = group
+        if "recommended" in out.columns:
+            picks["recommended"] = recommended
+        out = pd.concat([out, picks], ignore_index=True)
+
+    return out
+
+
 def _current_research_rule_status(final, tickets, odds_history):
     """
     AI予想画面用の研究ルール判定。
@@ -2374,6 +2410,13 @@ with tab1:
                             close_third_gap=None,
                             close_third_coverage=4,
                             include_nonrecommended=True,
+                        )
+                        tickets = _complete_adaptive_tickets(
+                            tickets,
+                            tri,
+                            odds,
+                            main_points=main_points,
+                            cover_points=cover_points,
                         )
                         if len(tickets) != target_points:
                             raise RuntimeError(
