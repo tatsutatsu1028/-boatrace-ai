@@ -1308,7 +1308,8 @@ def _safe_rank(series):
 def _take_unique(df, n):
     if n <= 0 or len(df) == 0:
         return df.head(0).copy()
-    return df.head(int(n)).copy()
+    source = df.drop_duplicates("combo", keep="first") if "combo" in df else df
+    return source.head(int(n)).copy()
 
 
 def adaptive_ticket_plan(first):
@@ -1711,6 +1712,43 @@ def rank_tickets(
     if include_nonrecommended:
         result["recommended"] = bool(recommended)
         keep.append("recommended")
+
+    # オッズ側に同じ組み合わせが重複していても、指定した本線・抑え・穴の
+    # 点数を必ず維持する。各候補選択後にも区分別の不足を最終確認し、
+    # 未採用の確率上位から補充する。
+    result = result.drop_duplicates("combo", keep="first").reset_index(drop=True)
+    target_by_group = {
+        "本線": max(0, int(main_n)),
+        "抑え": max(0, int(cover_n)),
+        "穴": max(0, int(longshot_n)),
+    }
+    for group, target in target_by_group.items():
+        group_idx = result.index[result["group"].eq(group)].tolist()
+        if len(group_idx) > target:
+            remove_idx = (
+                result.loc[group_idx]
+                .sort_values("prob", ascending=True)
+                .head(len(group_idx) - target)
+                .index
+            )
+            result = result.drop(index=remove_idx).reset_index(drop=True)
+
+        current = int(result["group"].eq(group).sum())
+        missing = target - current
+        if missing <= 0:
+            continue
+        pool = (
+            x[~x["combo"].isin(set(result["combo"]))]
+            .drop_duplicates("combo", keep="first")
+            .sort_values("prob", ascending=False)
+            .head(missing)
+            .copy()
+        )
+        if len(pool):
+            pool["group"] = group
+            if include_nonrecommended:
+                pool["recommended"] = bool(recommended)
+            result = pd.concat([result, pool], ignore_index=True)
 
     for c in keep:
         if c not in result:
