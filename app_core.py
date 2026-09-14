@@ -2353,6 +2353,9 @@ with tab1:
                         )
                         tri = trifecta(final)
                         ticket_plan = adaptive_ticket_plan(final)
+                        target_points = int(ticket_plan["point_count"])
+                        main_points = min(int(ticket_plan["main_n"]), target_points)
+                        cover_points = target_points - main_points
 
                         favorite_lane, risk_score, risk_reasons = assess_favorite_risk(work, final)
                         hedge_lane = favorite_lane if (hedge_enabled and risk_score >= 2) else None
@@ -2360,8 +2363,8 @@ with tab1:
                         tickets = rank_tickets(
                             tri,
                             odds,
-                            main_n=ticket_plan["main_n"],
-                            cover_n=ticket_plan["cover_n"],
+                            main_n=main_points,
+                            cover_n=cover_points,
                             longshot_n=0,
                             longshot_min_prob=float(longshot_min_prob_pct) / 100.0,
                             hedge_lane=hedge_lane,
@@ -2372,6 +2375,10 @@ with tab1:
                             close_third_coverage=4,
                             include_nonrecommended=True,
                         )
+                        if len(tickets) != target_points:
+                            raise RuntimeError(
+                                f"買い目点数の生成不整合: 予定{target_points}点 / 実際{len(tickets)}点"
+                            )
                         tickets = allocate_stakes_smart(
                             tickets,
                             budget=int(total_budget),
@@ -2440,7 +2447,7 @@ with tab1:
                     )
 
                 ticket_plan = result.get("ticket_plan") or {}
-                point_count = int(ticket_plan.get("point_count", len(tickets)))
+                point_count = len(tickets)
                 plan_reason = ticket_plan.get("reason", "固定済みの買い目構成")
                 st.info(f"🎯 推奨買い目 {point_count}点：{plan_reason}")
 
@@ -2681,7 +2688,7 @@ with tab1:
 
                 hedge_lane = st.session_state["result"].get("hedge_lane")
                 risk_reasons = st.session_state["result"].get("risk_reasons", [])
-                if hedge_lane is not None:
+                if hedge_lane is not None and (tickets["group"] == "穴").any():
                     st.warning(
                         f"🛟 {hedge_lane}号艇（本命）に不安要素あり（{' / '.join(risk_reasons)}）のため、"
                         f"穴の1点を{hedge_lane}号艇を含まない保険買い目に差し替えています。"

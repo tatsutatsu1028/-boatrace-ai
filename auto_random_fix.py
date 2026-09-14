@@ -498,6 +498,9 @@ def main():
 
     tri = trifecta(final)
     ticket_plan = adaptive_ticket_plan(final)
+    target_points = int(ticket_plan["point_count"])
+    main_points = min(int(ticket_plan["main_n"]), target_points)
+    cover_points = target_points - main_points
 
     favorite_lane, risk_score, _risk_reasons = assess_favorite_risk(race, final)
     hedge_lane = (
@@ -509,8 +512,8 @@ def main():
     tickets = rank_tickets(
         tri,
         odds=odds,
-        main_n=ticket_plan["main_n"],
-        cover_n=ticket_plan["cover_n"],
+        main_n=main_points,
+        cover_n=cover_points,
         longshot_n=0,
         longshot_min_prob=runtime["longshot_min_prob_pct"] / 100.0,
         hedge_lane=hedge_lane,
@@ -522,6 +525,10 @@ def main():
         close_third_coverage=4,
         include_nonrecommended=True,
     )
+    if len(tickets) != target_points:
+        raise RuntimeError(
+            f"買い目点数の生成不整合: 予定{target_points}点 / 実際{len(tickets)}点"
+        )
     tickets = allocate_stakes_smart(
         tickets,
         budget=runtime["total_budget"],
