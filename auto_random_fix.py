@@ -18,6 +18,7 @@ from prediction import (
     predict,
     trifecta,
     rank_tickets,
+    adaptive_ticket_plan,
     confidence,
     assess_favorite_risk,
     research_prediction_variants,
@@ -192,7 +193,13 @@ def _fixed_research_rule_status(final, tickets):
     return {"A": a_ok, "B": None, "C": None, "D": None}
 
 
-def _snapshot_payload(final, tickets, research_variants=None, confidence_label=None):
+def _snapshot_payload(
+    final,
+    tickets,
+    research_variants=None,
+    confidence_label=None,
+    ticket_plan=None,
+):
     final_cols = [
         "lane", "racer_name", "p_first", "p_second", "p_third",
         "p_second_given_1", "p_second_given_2", "p_second_given_3",
@@ -239,6 +246,10 @@ def _snapshot_payload(final, tickets, research_variants=None, confidence_label=N
     label = str(confidence_label or "").strip()
     if label in {"A", "B", "C"}:
         payload["confidence"] = label
+    if ticket_plan:
+        payload["ticket_plan"] = {
+            str(key): _json_safe(value) for key, value in ticket_plan.items()
+        }
     return payload
 
 
@@ -251,6 +262,7 @@ def _save_snapshot(
     tickets,
     research_variants=None,
     confidence_label=None,
+    ticket_plan=None,
 ):
     if _snapshot_exists(race_key):
         print("[AUTO_RANDOM] already fixed:", race_key)
@@ -271,6 +283,7 @@ def _save_snapshot(
                 tickets,
                 research_variants=research_variants,
                 confidence_label=confidence_label,
+                ticket_plan=ticket_plan,
             ),
             ensure_ascii=False,
         ),
@@ -484,6 +497,7 @@ def main():
     )
 
     tri = trifecta(final)
+    ticket_plan = adaptive_ticket_plan(final)
 
     favorite_lane, risk_score, _risk_reasons = assess_favorite_risk(race, final)
     hedge_lane = (
@@ -495,16 +509,16 @@ def main():
     tickets = rank_tickets(
         tri,
         odds=odds,
-        main_n=runtime["main_n"],
-        cover_n=runtime["cover_n"],
-        longshot_n=runtime["hole_n"],
+        main_n=ticket_plan["main_n"],
+        cover_n=ticket_plan["cover_n"],
+        longshot_n=0,
         longshot_min_prob=runtime["longshot_min_prob_pct"] / 100.0,
         hedge_lane=hedge_lane,
         use_odds=False,
         first=final,
         min_first_margin=0.40,
-        min_second_coverage=3,
-        close_third_gap=0.03,
+        min_second_coverage=ticket_plan["min_second_coverage"],
+        close_third_gap=None,
         close_third_coverage=4,
         include_nonrecommended=True,
     )
@@ -534,6 +548,7 @@ def main():
         tickets,
         research_variants=research_variants,
         confidence_label=confidence_label,
+        ticket_plan=ticket_plan,
     ):
         # 手動固定と同じく、固定直後からオッズ追跡を開始し、初回値も保存する。
         try:
