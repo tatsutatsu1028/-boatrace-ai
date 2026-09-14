@@ -148,10 +148,15 @@ _prediction.research_prediction_variants = _boat_ai_research_prediction_variants
 
 def _boat_ai_rank_tickets(tri, odds=None, *args, **kwargs):
     cfg = _runtime_settings()
-    kwargs["main_n"] = cfg["main_n"]
-    kwargs["cover_n"] = cfg["cover_n"]
-    kwargs["longshot_n"] = cfg["hole_n"]
-    kwargs["longshot_min_prob"] = cfg["longshot_min_prob_pct"] / 100.0
+    # app_core / 自動固定側が8〜10点の自動構成を明示した場合は、
+    # 保存済みの固定点数で上書きしない。未指定の旧呼び出しだけ設定値を使う。
+    kwargs.setdefault("main_n", cfg["main_n"])
+    kwargs.setdefault("cover_n", cfg["cover_n"])
+    kwargs.setdefault("longshot_n", cfg["hole_n"])
+    kwargs.setdefault(
+        "longshot_min_prob",
+        cfg["longshot_min_prob_pct"] / 100.0,
+    )
     kwargs["use_odds"] = False
 
     # hedge_lane は画面の一時トグルではなく保存済み設定から再計算する。
