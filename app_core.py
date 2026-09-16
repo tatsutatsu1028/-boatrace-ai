@@ -25,6 +25,7 @@ from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 # 固定保存は旧スナップショット形式との互換性を維持する。
 from result_tracker import (
     load_results,
+    load_payouts_for_date,
     load_analysis_view,
     save_race_result,
     delete_result,
@@ -887,7 +888,81 @@ st.session_state.setdefault("race", None)
 st.session_state.setdefault("odds", None)
 st.session_state.setdefault("race_context", None)
 
-tab1, tab2, tab3, tab4 = st.tabs(["🎯 予想", "🧠 学習データ", "⚙️ 設定", "📊 検証"])
+tab1, payout_tab, tab2, tab3, tab4 = st.tabs(
+    ["🎯 予想", "💴 本日の払戻", "🧠 学習データ", "⚙️ 設定", "📊 検証"]
+)
+
+with payout_tab:
+    st.subheader("💴 払戻")
+    st.caption(
+        "当日または過去の日付を選び、確定済みレースの払戻だけを表示します。"
+        "予想計算は行いません。"
+    )
+
+    with st.form("payout_history_form"):
+        payout_date = st.date_input(
+            "表示日",
+            value=_today_jst(),
+            key="payout_history_date",
+        )
+        payout_submit = st.form_submit_button("払戻を読み込む")
+
+    if payout_submit:
+        try:
+            with st.spinner("払戻を読み込んでいます…"):
+                payout_rows = load_payouts_for_date(payout_date.isoformat())
+            st.session_state["payout_history_rows"] = payout_rows
+            st.session_state["payout_history_loaded_date"] = payout_date.isoformat()
+            st.session_state.pop("payout_history_error", None)
+        except Exception as exc:
+            st.session_state["payout_history_error"] = (
+                f"払戻を取得できませんでした: {type(exc).__name__} {exc}"
+            )
+
+    payout_error = st.session_state.get("payout_history_error")
+    if payout_error:
+        st.error(payout_error)
+
+    loaded_date = st.session_state.get("payout_history_loaded_date")
+    payout_rows = st.session_state.get("payout_history_rows")
+    if isinstance(payout_rows, pd.DataFrame) and loaded_date:
+        st.markdown(f"#### {loaded_date} の払戻")
+        if payout_rows.empty:
+            st.info("この日付の確定済み払戻はまだありません。")
+        else:
+            payout_total = int(payout_rows["payout"].sum())
+            payout_hit_count = int(payout_rows["payout"].gt(0).sum())
+            payout_count_col, payout_hit_col, payout_total_col = st.columns(3)
+            with payout_count_col:
+                st.metric("確定", f"{len(payout_rows)}R")
+            with payout_hit_col:
+                st.metric("払戻あり", f"{payout_hit_count}R")
+            with payout_total_col:
+                st.metric("払戻合計", f"{payout_total:,}円")
+
+            payout_display = payout_rows.copy()
+            payout_display["R"] = (
+                pd.to_numeric(payout_display["race_no"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .astype(str)
+                + "R"
+            )
+            payout_display["結果"] = payout_display["trifecta_actual"].fillna("-")
+            payout_display["払戻"] = payout_display["payout"].map(
+                lambda value: f"{int(value):,}円"
+            )
+            st.dataframe(
+                payout_display[["venue", "R", "結果", "払戻"]].rename(
+                    columns={"venue": "会場"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "払戻は固定予想の仮定購入額に基づく検証上の受取額です。"
+                "実際の購入額が異なる場合、実際の受取額とは一致しません。"
+            )
 
 with tab2:
     st.subheader("学習データ")
