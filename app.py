@@ -234,11 +234,17 @@ def _fixed_research_rule_status(final, tickets):
     return {"A": a_ok, "B": None, "C": None, "D": None}
 
 
-def _boat_ai_snapshot_payload(final, tickets, research_variants=None):
+def _boat_ai_snapshot_payload(
+    final,
+    tickets,
+    research_variants=None,
+    race_features=None,
+):
     payload = _result_tracker._boat_ai_original_snapshot_payload(
         final,
         tickets,
         research_variants=research_variants,
+        race_features=race_features,
     )
     try:
         label = str(final.attrs.get("_boat_ai_confidence_label", "")).strip()
