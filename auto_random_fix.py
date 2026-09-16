@@ -36,6 +36,21 @@ CONDITIONAL_THIRD_COLUMNS = [
     for second_lane in range(1, 7)
     if first_lane != second_lane
 ]
+SNAPSHOT_FEATURE_COLUMNS = [
+    "lane", "racer_id", "racer_name", "racer_class", "avg_st",
+    "racer_win_rate", "local_win_rate", "motor_2ren", "boat_2ren",
+    "weight", "tilt", "exhibition_time", "exhibition_st",
+    "original_straight", "original_turn", "original_lap",
+    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_st", "current_meet_races",
+    "course_top3_rate", "course_avg_st", "course_start_rank",
+    "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
+    "venue_course_4th", "venue_course_5th", "venue_course_6th",
+    "venue_kimarite_nige", "venue_kimarite_makuri",
+    "venue_kimarite_sashi", "venue_kimarite_makuri_sashi",
+    "venue_kimarite_nuki", "venue_kimarite_megumare",
+    "wind_speed", "wave_height", "temperature",
+]
 
 
 def _cfg():
@@ -205,6 +220,7 @@ def _snapshot_payload(
     research_variants=None,
     confidence_label=None,
     ticket_plan=None,
+    race_features=None,
 ):
     final_cols = [
         "lane", "racer_name", "p_first", "p_second", "p_third",
@@ -245,11 +261,22 @@ def _snapshot_payload(
             research_payload[str(label)] = rows
 
     payload = {
+        "feature_schema_version": 1,
         "final": final_rows,
         "tickets": ticket_rows,
         "research": research_payload,
         "research_rules": _fixed_research_rule_status(final, tickets),
+        "race_features": [],
     }
+    if race_features is not None and len(race_features):
+        for _, row in race_features.sort_values("lane").iterrows():
+            payload["race_features"].append(
+                {
+                    column: _json_safe(row[column])
+                    for column in SNAPSHOT_FEATURE_COLUMNS
+                    if column in row.index
+                }
+            )
     label = str(confidence_label or "").strip()
     if label in {"A", "B", "C"}:
         payload["confidence"] = label
@@ -270,6 +297,7 @@ def _save_snapshot(
     research_variants=None,
     confidence_label=None,
     ticket_plan=None,
+    race_features=None,
 ):
     if _snapshot_exists(race_key):
         print("[AUTO_RANDOM] already fixed:", race_key)
@@ -291,6 +319,7 @@ def _save_snapshot(
                 research_variants=research_variants,
                 confidence_label=confidence_label,
                 ticket_plan=ticket_plan,
+                race_features=race_features,
             ),
             ensure_ascii=False,
         ),
@@ -563,6 +592,7 @@ def main():
         research_variants=research_variants,
         confidence_label=confidence_label,
         ticket_plan=ticket_plan,
+        race_features=race,
     ):
         # 手動固定と同じく、固定直後からオッズ追跡を開始し、初回値も保存する。
         try:

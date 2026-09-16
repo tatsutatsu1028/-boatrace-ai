@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import re
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 import unicodedata
 import numpy as np
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from current_meet_fetcher import fetch_current_meet
 from course_stats_fetcher import fetch_course_stats_for_race, fetch_venue_course_profile
 BASE = "https://www.boatrace.jp/owpc/pc/race"
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 UA = {
     "User-Agent": "Mozilla/5.0 (compatible; BoatraceAIMobile/2.5; personal-analysis-tool)"
 }
@@ -584,6 +586,124 @@ def fetch_race_result(date_yyyymmdd, jcd, rno):
         "kimarite": kimarite,
         "source_url": url,
     }
+
+
+def _parse_venue_result_list_html(html, date_yyyymmdd, jcd, source_url=""):
+    """結果一覧HTMLから確定済み3連単と100円払戻だけを抽出する。"""
+    code = str(jcd).zfill(2)
+    soup = BeautifulSoup(html, "lxml")
+    table = _find_table(soup, ["3連勝単式", "払戻金", "2連勝単式"])
+    rows = []
+
+    if table is None:
+        return pd.DataFrame(
+            columns=[
+                "race_date", "jcd", "venue", "race_no",
+                "trifecta", "payout_per_100", "remarks", "source_url",
+            ]
+        )
+
+    for row in _expand_table(table):
+        cells = [_norm(value) for value in row]
+        race_index = next(
+            (
+                i for i, value in enumerate(cells)
+                if re.fullmatch(r"(?:[1-9]|1[0-2])R", value)
+            ),
+            None,
+        )
+        if race_index is None:
+            continue
+
+        combo_index = None
+        combo = None
+        for i, value in enumerate(cells[race_index + 1:], start=race_index + 1):
+            match = re.fullmatch(
+                r"\s*([1-6])\s*[-－]\s*([1-6])\s*[-－]\s*([1-6])\s*",
+                value,
+            )
+            if match:
+                combo = "-".join(match.groups())
+                combo_index = i
+                break
+
+        if combo is None or combo_index is None:
+            continue
+
+        payout = None
+        payout_index = None
+        for i, value in enumerate(cells[combo_index + 1:], start=combo_index + 1):
+            cleaned = (
+                value.replace("¥", "")
+                .replace("￥", "")
+                .replace("円", "")
+                .replace(",", "")
+                .replace(" ", "")
+                .strip()
+            )
+            if re.fullmatch(r"\d+", cleaned) and int(cleaned) >= 100:
+                payout = int(cleaned)
+                payout_index = i
+                break
+
+        if payout is None:
+            continue
+
+        # 3連単払戻より後ろには2連単と備考が続く。備考として意味のある
+        # 非数値テキストだけを残す。
+        remarks = []
+        for value in cells[(payout_index or combo_index) + 1:]:
+            if not value or value in remarks:
+                continue
+            if re.fullmatch(r"[1-6]\s*[-－]\s*[1-6]", value):
+                continue
+            cleaned = value.replace("¥", "").replace("￥", "").replace(",", "")
+            if re.fullmatch(r"\s*\d+\s*円?\s*", cleaned):
+                continue
+            remarks.append(value)
+
+        rows.append(
+            {
+                "race_date": str(date_yyyymmdd),
+                "jcd": code,
+                "venue": VENUES.get(code, code),
+                "race_no": int(cells[race_index][:-1]),
+                "trifecta": combo,
+                "payout_per_100": int(payout),
+                "remarks": " / ".join(remarks),
+                "source_url": source_url,
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("race_no").reset_index(drop=True)
+
+
+def fetch_venue_result_list(date_yyyymmdd, jcd):
+    """BOAT RACE公式の結果一覧から会場1日分の3連単払戻を取得する。"""
+    code = str(jcd).zfill(2)
+    url = (
+        f"{BASE}/resultlist?hd={str(date_yyyymmdd)}&jcd={code}"
+    )
+    response = None
+    last_error = None
+    for attempt in range(2):
+        try:
+            response = requests.get(url, headers=UA, timeout=15)
+            response.raise_for_status()
+            break
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(1)
+    if response is None:
+        raise last_error or RuntimeError("公式結果一覧を取得できませんでした。")
+    response.encoding = response.apparent_encoding or "utf-8"
+    return _parse_venue_result_list_html(
+        response.text,
+        date_yyyymmdd=str(date_yyyymmdd),
+        jcd=code,
+        source_url=url,
+    )
 
 
 def fetch_official_race(date_yyyymmdd, jcd, rno):

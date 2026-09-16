@@ -26,6 +26,22 @@ CONDITIONAL_THIRD_COLUMNS = [
     if first_lane != second_lane
 ]
 
+SNAPSHOT_FEATURE_COLUMNS = [
+    "lane", "racer_id", "racer_name", "racer_class", "avg_st",
+    "racer_win_rate", "local_win_rate", "motor_2ren", "boat_2ren",
+    "weight", "tilt", "exhibition_time", "exhibition_st",
+    "original_straight", "original_turn", "original_lap",
+    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_st", "current_meet_races",
+    "course_top3_rate", "course_avg_st", "course_start_rank",
+    "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
+    "venue_course_4th", "venue_course_5th", "venue_course_6th",
+    "venue_kimarite_nige", "venue_kimarite_makuri",
+    "venue_kimarite_sashi", "venue_kimarite_makuri_sashi",
+    "venue_kimarite_nuki", "venue_kimarite_megumare",
+    "wind_speed", "wave_height", "temperature",
+]
+
 
 RESULT_COLUMNS = [
     "saved_at",
@@ -250,7 +266,22 @@ def _delete_supabase(race_key):
 # 予想時点スナップショット
 # -----------------------------
 
-def _snapshot_payload(final, tickets, research_variants=None):
+def _snapshot_feature_rows(race_features):
+    if race_features is None or len(race_features) == 0:
+        return []
+    rows = []
+    for _, row in race_features.sort_values("lane").iterrows():
+        rows.append(
+            {
+                column: _json_safe(row[column])
+                for column in SNAPSHOT_FEATURE_COLUMNS
+                if column in row.index
+            }
+        )
+    return rows
+
+
+def _snapshot_payload(final, tickets, research_variants=None, race_features=None):
     final_rows = []
     for _, row in final.sort_values("lane").iterrows():
         item = {}
@@ -297,9 +328,11 @@ def _snapshot_payload(final, tickets, research_variants=None):
             research_payload[str(label)] = rows
 
     return {
+        "feature_schema_version": 1,
         "final": final_rows,
         "tickets": ticket_rows,
         "research": research_payload,
+        "race_features": _snapshot_feature_rows(race_features),
     }
 
 
@@ -358,6 +391,7 @@ def save_prediction_snapshot(
     final,
     tickets,
     research_variants=None,
+    race_features=None,
     snapshot_kind="same_day",
     collector_name="owner",
 ):
@@ -381,6 +415,7 @@ def save_prediction_snapshot(
         final.copy(),
         tickets.copy(),
         research_variants=research_variants,
+        race_features=race_features.copy() if race_features is not None else None,
     )
 
     record = {

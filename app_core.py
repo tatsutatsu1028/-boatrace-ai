@@ -17,7 +17,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 
-from official_fetcher import VENUES, fetch_official_race, fetch_odds3t, fetch_race_result
+from official_fetcher import (
+    VENUES,
+    fetch_official_race,
+    fetch_odds3t,
+    fetch_race_result,
+    fetch_venue_result_list,
+)
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants
 from stake_allocator import allocate_stakes_smart
@@ -25,7 +31,6 @@ from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 # 固定保存は旧スナップショット形式との互換性を維持する。
 from result_tracker import (
     load_results,
-    load_payouts_for_date,
     load_analysis_view,
     save_race_result,
     delete_result,
@@ -827,6 +832,54 @@ def fetch_schedule_once(date_str):
     return fetch_today_schedule(date_str)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_fetch_daily_payouts(date_str):
+    """開催場の結果一覧を並列取得し、確定済み3連単払戻をまとめる。"""
+    frames = []
+    errors = []
+    schedule = fetch_today_schedule(date_str)
+    codes = (
+        schedule.loc[schedule["holding"].fillna(False), "jcd"]
+        .astype(str)
+        .str.zfill(2)
+        .tolist()
+    )
+    if not codes:
+        raise RuntimeError(
+            "選択日の開催会場を公式サイトから取得できませんでした。"
+        )
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(codes)))) as executor:
+        future_codes = {
+            executor.submit(fetch_venue_result_list, date_str, code): code
+            for code in codes
+        }
+        for future in as_completed(future_codes):
+            code = future_codes[future]
+            try:
+                frame = future.result()
+                if frame is not None and len(frame):
+                    frames.append(frame)
+            except Exception as exc:
+                errors.append(
+                    f"{VENUES.get(code, code)}: {type(exc).__name__}"
+                )
+
+    if not frames:
+        columns = [
+            "race_date", "jcd", "venue", "race_no",
+            "trifecta", "payout_per_100", "remarks", "source_url",
+        ]
+        return pd.DataFrame(columns=columns), errors
+
+    out = pd.concat(frames, ignore_index=True)
+    out["race_no"] = pd.to_numeric(out["race_no"], errors="coerce")
+    out["payout_per_100"] = pd.to_numeric(
+        out["payout_per_100"], errors="coerce"
+    ).fillna(0).astype(int)
+    out = out.sort_values(["jcd", "race_no"], kind="stable").reset_index(drop=True)
+    return out, errors
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def cached_fetch_deadlines(date_str, jcd):
     """
@@ -895,8 +948,8 @@ tab1, payout_tab, tab2, tab3, tab4 = st.tabs(
 with payout_tab:
     st.subheader("💴 払戻")
     st.caption(
-        "当日または過去の日付を選び、確定済みレースの払戻だけを表示します。"
-        "予想計算は行いません。"
+        "当日または過去の日付を選び、全開催の確定済み3連単と"
+        "100円当たりの公式払戻を表示します。AI予想の有無には関係しません。"
     )
 
     with st.form("payout_history_form"):
@@ -910,8 +963,11 @@ with payout_tab:
     if payout_submit:
         try:
             with st.spinner("払戻を読み込んでいます…"):
-                payout_rows = load_payouts_for_date(payout_date.isoformat())
+                payout_rows, payout_errors = cached_fetch_daily_payouts(
+                    payout_date.strftime("%Y%m%d")
+                )
             st.session_state["payout_history_rows"] = payout_rows
+            st.session_state["payout_history_errors"] = payout_errors
             st.session_state["payout_history_loaded_date"] = payout_date.isoformat()
             st.session_state.pop("payout_history_error", None)
         except Exception as exc:
@@ -930,15 +986,15 @@ with payout_tab:
         if payout_rows.empty:
             st.info("この日付の確定済み払戻はまだありません。")
         else:
-            payout_total = int(payout_rows["payout"].sum())
-            payout_hit_count = int(payout_rows["payout"].gt(0).sum())
+            venue_count = int(payout_rows["jcd"].nunique())
+            max_payout = int(payout_rows["payout_per_100"].max())
             payout_count_col, payout_hit_col, payout_total_col = st.columns(3)
             with payout_count_col:
                 st.metric("確定", f"{len(payout_rows)}R")
             with payout_hit_col:
-                st.metric("払戻あり", f"{payout_hit_count}R")
+                st.metric("開催場", f"{venue_count}場")
             with payout_total_col:
-                st.metric("払戻合計", f"{payout_total:,}円")
+                st.metric("最高払戻", f"{max_payout:,}円")
 
             payout_display = payout_rows.copy()
             payout_display["R"] = (
@@ -948,21 +1004,26 @@ with payout_tab:
                 .astype(str)
                 + "R"
             )
-            payout_display["結果"] = payout_display["trifecta_actual"].fillna("-")
-            payout_display["払戻"] = payout_display["payout"].map(
+            payout_display["3連単"] = payout_display["trifecta"].fillna("-")
+            payout_display["100円払戻"] = payout_display["payout_per_100"].map(
                 lambda value: f"{int(value):,}円"
             )
             st.dataframe(
-                payout_display[["venue", "R", "結果", "払戻"]].rename(
-                    columns={"venue": "会場"}
+                payout_display[["venue", "R", "3連単", "100円払戻", "remarks"]].rename(
+                    columns={"venue": "会場", "remarks": "備考"}
                 ),
                 use_container_width=True,
                 hide_index=True,
             )
             st.caption(
-                "払戻は固定予想の仮定購入額に基づく検証上の受取額です。"
-                "実際の購入額が異なる場合、実際の受取額とは一致しません。"
+                "払戻はBOAT RACE公式結果の3連単・100円当たりの金額です。"
+                "予想結果やシミュレーション投資額から計算した値ではありません。"
             )
+            payout_errors = st.session_state.get("payout_history_errors", [])
+            if payout_errors:
+                st.caption(
+                    "一部会場の確認に失敗しました: " + ", ".join(payout_errors)
+                )
 
 with tab2:
     st.subheader("学習データ")
@@ -2755,6 +2816,7 @@ with tab1:
                                     "research_variants",
                                     {},
                                 ),
+                                race_features=work_result,
                                 snapshot_kind=snapshot_kind,
                                 collector_name=COLLECTOR_NAME,
                             )
