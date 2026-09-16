@@ -61,6 +61,19 @@ RESULT_COLUMNS = [
     "lane_probs_json",
 ]
 
+PAYOUT_COLUMNS = [
+    "race_key",
+    "race_date",
+    "venue",
+    "race_no",
+    "first_actual",
+    "second_actual",
+    "third_actual",
+    "trifecta_actual",
+    "payout",
+    "saved_at",
+]
+
 
 def _safe_float(v, default=np.nan):
     try:
@@ -489,6 +502,47 @@ def _load_raw():
 
 def load_results():
     return _load_raw()
+
+
+def load_payouts_for_date(race_date):
+    """選択日の確定結果から、払戻表示に必要な列だけを取得する。"""
+    date_text = str(race_date or "").strip()
+    if not date_text:
+        return pd.DataFrame(columns=PAYOUT_COLUMNS)
+
+    if _use_supabase():
+        url, _ = _supabase_config()
+        response = requests.get(
+            f"{url}/rest/v1/{SUPABASE_TABLE}",
+            params={
+                "select": ",".join(PAYOUT_COLUMNS),
+                "race_date": f"eq.{date_text}",
+                "order": "venue.asc,race_no.asc",
+            },
+            headers=_headers(),
+            timeout=20,
+        )
+        response.raise_for_status()
+        rows = response.json() or []
+        if not rows:
+            return pd.DataFrame(columns=PAYOUT_COLUMNS)
+        out = pd.DataFrame(rows)
+    else:
+        out = _load_local()
+        if len(out):
+            out = out[out["race_date"].astype(str).eq(date_text)].copy()
+
+    for column in PAYOUT_COLUMNS:
+        if column not in out.columns:
+            out[column] = np.nan
+
+    out["race_no"] = pd.to_numeric(out["race_no"], errors="coerce")
+    out["payout"] = pd.to_numeric(out["payout"], errors="coerce").fillna(0).astype(int)
+    return (
+        out[PAYOUT_COLUMNS]
+        .sort_values(["venue", "race_no"], kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 def result_exists(race_key):
