@@ -349,8 +349,10 @@ def _ticket_groups(tickets):
     return out
 
 
-def _assemble(header, fav_lines, groups, hashtags):
+def _assemble(header, fav_lines, groups, insight=""):
     parts = [header]
+    if insight:
+        parts.append(insight)
     if fav_lines:
         parts.append("\n".join(fav_lines))
 
@@ -360,12 +362,80 @@ def _assemble(header, fav_lines, groups, hashtags):
             parts.append(f"【{label}】\n" + "\n".join(combos))
 
     parts.append(_FOOTER)
-    if hashtags:
-        parts.append(" ".join(hashtags))
     return "\n\n".join(p for p in parts if p)
 
 
-def build_post_text(race_date, venue, race_no, final=None, tickets=None):
+def _lane_number(value):
+    try:
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _race_insight(final, tickets, style_seed=""):
+    """予想値と補正理由から、レース固有の短い説明を作る。"""
+    if final is None or len(final) == 0 or "p_first" not in final.columns:
+        return "AI予測をもとに上位候補を選びました。"
+
+    ranked = final.copy()
+    ranked["_p_first"] = ranked["p_first"].map(_num)
+    ranked = ranked.sort_values("_p_first", ascending=False)
+    top = ranked.iloc[0]
+    top_lane = _lane_number(top.get("lane"))
+    top_label = f"{top_lane}号艇" if top_lane else "本命艇"
+    top_prob = _num(top.get("_p_first"), 0.0)
+    second_prob = _num(ranked.iloc[1].get("_p_first"), 0.0) if len(ranked) > 1 else 0.0
+    margin_pt = max(0.0, (top_prob - second_prob) * 100.0)
+
+    positive_reasons = []
+    for reason in _clean(top.get("reason")).split("/"):
+        reason = reason.strip()
+        if reason and not any(word in reason for word in ("下位", "低調", "不利", "展示F")):
+            positive_reasons.append(reason)
+
+    primary = "・".join(positive_reasons[:2])
+    if primary:
+        evidence_action = f"{primary}を評価"
+        evidence_noun = primary
+    elif margin_pt >= 10:
+        evidence_action = (
+            f"1着確率2位との差{margin_pt:.1f}ポイントを評価"
+        )
+        evidence_noun = f"1着確率2位との差{margin_pt:.1f}ポイント"
+    else:
+        evidence_action = "1着予測で最上位と判断"
+        evidence_noun = "1着予測トップ"
+
+    groups = _ticket_groups(tickets)
+    point_count = sum(len(values) for values in groups.values())
+    if point_count >= 10:
+        ticket_note = "2・3着候補が接近しているため10点で組み立てます。"
+    elif point_count == 9:
+        ticket_note = "相手候補が接近しているため9点で組み立てます。"
+    elif point_count:
+        ticket_note = f"候補差を見ながら{point_count}点に絞りました。"
+    else:
+        ticket_note = "上位候補を中心に見ます。"
+
+    styles = [
+        f"{top_label}を中心視。{evidence_action}。{ticket_note}",
+        f"注目は{top_label}。{evidence_action}し、軸候補としました。{ticket_note}",
+        f"1着候補は{top_label}。今回のポイントは{evidence_noun}です。{ticket_note}",
+        f"{evidence_action}し、{top_label}を本命に選びました。{ticket_note}",
+        f"{top_label}が1着予測トップ。{evidence_noun}が判断材料です。{ticket_note}",
+    ]
+    style_index = sum(ord(char) for char in str(style_seed)) % len(styles)
+    return styles[style_index]
+
+
+def build_post_text(
+    race_date,
+    venue,
+    race_no,
+    final=None,
+    tickets=None,
+    deadline=None,
+):
     """Threads投稿本文の下書きを作る。500文字を超える場合は段階的に短縮する。"""
     venue = _clean(venue)
     race_date = _clean(race_date)
@@ -374,25 +444,31 @@ def build_post_text(race_date, venue, race_no, final=None, tickets=None):
     except Exception:
         rno = _clean(race_no)
 
-    header = " ".join(x for x in ["🚤", race_date, venue, rno] if x)
+    deadline = _clean(deadline)
+    deadline_text = f"締切予定 {deadline}" if deadline else ""
+    header = " ".join(
+        x for x in ["🚤", race_date, venue, rno, deadline_text] if x
+    )
     groups = _ticket_groups(tickets)
-    hashtags = ["#競艇", "#ボートレース", "#AI予想"]
-    if venue:
-        hashtags.append(f"#{venue}")
+    insight = _race_insight(
+        final,
+        tickets,
+        style_seed=f"{race_date}|{venue}|{rno}",
+    )
 
     candidates = [
-        (_favorites(final, 3, with_names=True), dict(groups), list(hashtags)),
-        (_favorites(final, 3, with_names=False), dict(groups), list(hashtags)),
+        (_favorites(final, 3, with_names=True), dict(groups), insight),
+        (_favorites(final, 3, with_names=False), dict(groups), insight),
     ]
     no_hole = {k: v for k, v in groups.items() if k != "穴"}
-    candidates.append((_favorites(final, 3, with_names=False), no_hole, list(hashtags)))
-    candidates.append((_favorites(final, 3, with_names=False), no_hole, []))
-    candidates.append(([], no_hole, []))
+    candidates.append((_favorites(final, 3, with_names=False), no_hole, insight))
+    candidates.append((_favorites(final, 3, with_names=False), no_hole, ""))
+    candidates.append(([], no_hole, ""))
 
-    for fav_lines, gr, tags in candidates:
-        text = _assemble(header, fav_lines, gr, tags)
+    for fav_lines, gr, race_note in candidates:
+        text = _assemble(header, fav_lines, gr, race_note)
         if len(text) <= TEXT_LIMIT:
             return text
 
     only_main = {"本線": groups.get("本線") or []}
-    return _assemble(header, [], only_main, [])[:TEXT_LIMIT]
+    return _assemble(header, [], only_main)[:TEXT_LIMIT]

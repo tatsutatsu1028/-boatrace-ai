@@ -2721,6 +2721,7 @@ with tab1:
                             race_no=rno,
                             final=final,
                             tickets=tickets,
+                            deadline=(deadlines or {}).get(rno),
                         )
 
                         _posted_key = f"threads_posted_{ctx}"
