@@ -320,7 +320,9 @@ def _snapshot_payload(final, tickets, research_variants=None, race_features=None
                 item = {}
                 for c in (
                     "lane", "racer_name", "p_first", "p_second", "p_third",
-                    "model_version", "reason",
+                    "model_version", "reason", "challenger_score",
+                    "challenger_evidence", "challenger_delta",
+                    "challenger_version",
                 ):
                     if c in row.index:
                         item[c] = _json_safe(row[c])
@@ -860,7 +862,9 @@ def save_race_result(
                 item = {}
                 for c in (
                     "lane", "racer_name", "p_first", "p_second", "p_third",
-                    "model_version", "reason",
+                    "model_version", "reason", "challenger_score",
+                    "challenger_evidence", "challenger_delta",
+                    "challenger_version",
                 ):
                     if c in vrow.index:
                         item[c] = _json_safe(vrow[c])

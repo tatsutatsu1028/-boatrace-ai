@@ -409,6 +409,180 @@ def _rank_score_higher_better(series):
     return -_rank_score_lower_better(series)
 
 
+CHALLENGER_VERSION = "conditional-challenger-v1-20260917"
+
+
+def _conditional_challenger_components(race):
+    """艇番に依存しない4分類の相対優位スコアを返す。
+
+    各項目は同一レース内の順位差だけで評価する。展示STは展示Fの影響を
+    受けやすいため使わず、現行方針どおり展示タイムを採用する。
+    """
+    x = race.copy()
+    if "lane" not in x.columns:
+        return pd.DataFrame()
+
+    zeros = np.zeros(len(x), dtype=float)
+
+    player = zeros.copy()
+    if "racer_win_rate" in x.columns:
+        player += 0.60 * _rank_score_higher_better(x["racer_win_rate"])
+    if "local_win_rate" in x.columns:
+        player += 0.40 * _rank_score_higher_better(x["local_win_rate"])
+
+    exhibition = zeros.copy()
+    if "exhibition_time" in x.columns:
+        exhibition = _rank_score_lower_better(x["exhibition_time"])
+
+    course = zeros.copy()
+    if "course_top3_rate" in x.columns:
+        course += 0.55 * _rank_score_higher_better(x["course_top3_rate"])
+    if "course_avg_st" in x.columns:
+        course += 0.30 * _rank_score_lower_better(x["course_avg_st"])
+    if "course_start_rank" in x.columns:
+        course += 0.15 * _rank_score_lower_better(x["course_start_rank"])
+
+    meet = zeros.copy()
+    if "current_meet_avg_finish" in x.columns:
+        meet += 0.45 * _rank_score_lower_better(x["current_meet_avg_finish"])
+    if "current_meet_top2_rate" in x.columns:
+        meet += 0.35 * _rank_score_higher_better(x["current_meet_top2_rate"])
+    if "current_meet_avg_st" in x.columns:
+        meet += 0.20 * _rank_score_lower_better(x["current_meet_avg_st"])
+    if "current_meet_races" in x.columns:
+        meet_races = pd.to_numeric(
+            x["current_meet_races"], errors="coerce"
+        ).fillna(0.0)
+        meet *= np.clip(meet_races.to_numpy(dtype=float) / 6.0, 0.0, 1.0)
+    else:
+        meet *= 0.0
+
+    components = pd.DataFrame({
+        "lane": pd.to_numeric(x["lane"], errors="coerce"),
+        "challenger_player": player,
+        "challenger_exhibition": exhibition,
+        "challenger_course": course,
+        "challenger_meet": meet,
+    })
+    components["challenger_score"] = (
+        components["challenger_player"] * 0.30
+        + components["challenger_exhibition"] * 0.30
+        + components["challenger_course"] * 0.25
+        + components["challenger_meet"] * 0.15
+    )
+    return components
+
+
+def conditional_challenger_prediction(
+    race,
+    final,
+    strength=1.50,
+    max_probability_shift=0.10,
+):
+    """外艇の複数根拠が一致するときだけ1着確率を試験補正する。
+
+    現時点では保存・比較用のシャドー予想として使用する。1号艇本命が
+    45〜70%のときに限り、選手・展示・コース・今節のうち3分類以上で
+    本命艇を上回る外艇だけを補正する。確率変化は1艇10ポイント以内。
+    """
+    if final is None:
+        return final
+    out = final.copy()
+    required = {"lane", "p_first"}
+    if not len(out) or not required.issubset(out.columns):
+        return out
+
+    out["lane"] = pd.to_numeric(out["lane"], errors="coerce")
+    base = pd.to_numeric(out["p_first"], errors="coerce").fillna(0.0)
+    base_values = base.to_numpy(dtype=float)
+    if base_values.sum() <= 0:
+        return out
+    base_values = base_values / base_values.sum()
+
+    out["challenger_score"] = 0.0
+    out["challenger_evidence"] = 0
+    out["challenger_delta"] = 0.0
+    out["challenger_version"] = CHALLENGER_VERSION
+
+    favorite_pos = int(np.argmax(base_values))
+    favorite_lane = int(out.iloc[favorite_pos]["lane"])
+    favorite_prob = float(base_values[favorite_pos])
+    if favorite_lane != 1 or not (0.45 <= favorite_prob <= 0.70):
+        return out
+
+    components = _conditional_challenger_components(race)
+    if components.empty:
+        return out
+    out = out.merge(components, on="lane", how="left", suffixes=("", "_new"))
+    for col in (
+        "challenger_player",
+        "challenger_exhibition",
+        "challenger_course",
+        "challenger_meet",
+        "challenger_score_new",
+    ):
+        if col not in out.columns:
+            out[col] = 0.0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+
+    favorite_row = out[out["lane"].eq(favorite_lane)]
+    if favorite_row.empty:
+        return final.copy()
+    favorite_row = favorite_row.iloc[0]
+
+    category_cols = (
+        "challenger_player",
+        "challenger_exhibition",
+        "challenger_course",
+        "challenger_meet",
+    )
+    evidence = np.zeros(len(out), dtype=int)
+    for col in category_cols:
+        evidence += (
+            out[col].to_numpy(dtype=float) - float(favorite_row[col]) > 0.05
+        ).astype(int)
+
+    score = out["challenger_score_new"].to_numpy(dtype=float)
+    favorite_score = float(favorite_row["challenger_score_new"])
+    advantage = np.maximum(score - favorite_score, 0.0)
+    eligible = (
+        out["lane"].ne(favorite_lane).to_numpy()
+        & (evidence >= 3)
+        & (advantage > 0)
+    )
+    log_bonus = np.where(eligible, float(strength) * advantage, 0.0)
+    if not np.any(log_bonus > 0):
+        out["challenger_score"] = score
+        out["challenger_evidence"] = evidence
+        return out.drop(columns=["challenger_score_new"])
+
+    adjusted_strength = base_values * np.exp(log_bonus)
+    adjusted = adjusted_strength / adjusted_strength.sum()
+
+    delta = adjusted - base_values
+    largest_shift = float(np.max(np.abs(delta)))
+    if largest_shift > float(max_probability_shift) > 0:
+        delta *= float(max_probability_shift) / largest_shift
+        adjusted = base_values + delta
+        adjusted = np.clip(adjusted, 0.0, None)
+        adjusted = adjusted / adjusted.sum()
+        delta = adjusted - base_values
+
+    out["p_first"] = adjusted
+    out["challenger_score"] = score
+    out["challenger_evidence"] = evidence
+    out["challenger_delta"] = delta
+
+    if "reason" in out.columns:
+        for i in range(len(out)):
+            if delta[i] <= 1e-9:
+                continue
+            reason = str(out.iloc[i].get("reason") or "基礎データ中心")
+            out.at[out.index[i], "reason"] = reason + " / 条件付き外艇補正"
+
+    return out.drop(columns=["challenger_score_new"])
+
+
 def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_weight=0.16, weather_weight=0.10, venue_course_weight=0.12, class_weight=0.12, kimarite_weight=0.06, original_display_scale=0.0):
     x = race.copy()
 
@@ -1130,6 +1304,13 @@ def research_prediction_variants(
         class_weight=0.12,
         kimarite_weight=0.06,
         original_display_scale=0.0,
+    )
+
+    # 生特徴量が保存され始めた2026-09-17以降のシャドー検証用。
+    # 現行の買い目・推奨判定は変更せず、結果確定後に1着精度を比較する。
+    variants["条件付き外艇補正"] = conditional_challenger_prediction(
+        race,
+        variants["現行全部入り"],
     )
 
     return variants

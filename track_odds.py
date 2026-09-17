@@ -463,7 +463,11 @@ def _build_result_record(
                 if not isinstance(row, dict):
                     continue
                 item = {}
-                for c in ("lane", "racer_name", "p_first", "reason"):
+                for c in (
+                    "lane", "racer_name", "p_first", "reason",
+                    "challenger_score", "challenger_evidence",
+                    "challenger_delta", "challenger_version",
+                ):
                     if c in row:
                         item[c] = _clean_json_value(row.get(c))
                 cleaned_rows.append(item)
