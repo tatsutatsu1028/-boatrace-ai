@@ -335,11 +335,9 @@ def _ticket_groups(tickets):
     if tickets is None or len(tickets) == 0 or "combo" not in tickets.columns:
         return out
 
+    # Threadsには予想された買い目をすべて載せる。stake は仮の資金配分であり、
+    # 0円でも予想点数や投稿文の買い目から除外しない。
     df = tickets.copy()
-    if "stake" in df.columns:
-        stake = df["stake"].map(lambda v: _num(v, 0.0))
-        if stake.sum() > 0:
-            df = df[stake > 0]
 
     for _, row in df.iterrows():
         group = _clean(row.get("group")) or "抑え"

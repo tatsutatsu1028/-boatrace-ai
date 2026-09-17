@@ -2735,7 +2735,7 @@ with tab1:
                             "投稿内容（送信前に編集できます）",
                             value=_default_text,
                             height=240,
-                            key=f"threads_text_{ctx}",
+                            key=f"threads_text_v2_{ctx}",
                         )
                         _len = len(_text)
                         if _len > THREADS_TEXT_LIMIT:
