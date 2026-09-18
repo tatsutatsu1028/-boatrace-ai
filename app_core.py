@@ -2846,6 +2846,7 @@ with tab1:
                                       <button id="copy-title" style="padding:9px 14px;cursor:pointer;">📋 タイトルをコピー</button>
                                       <button id="copy-body" style="padding:9px 14px;cursor:pointer;">📋 本文をコピー</button>
                                       <button id="copy-all" style="padding:9px 14px;cursor:pointer;">📋 タイトル＋本文をコピー</button>
+                                      <button id="copy-tags" style="padding:9px 14px;cursor:pointer;">📋 ハッシュタグをコピー</button>
                                       <span id="copy-status" style="align-self:center;font-size:13px;"></span>
                                     </div>
                                     <script>
@@ -2863,6 +2864,7 @@ with tab1:
                                     document.getElementById("copy-title").onclick = () => copyText(data.title);
                                     document.getElementById("copy-body").onclick = () => copyText(data.body);
                                     document.getElementById("copy-all").onclick = () => copyText(data.title + "\\n\\n" + data.body);
+                                    document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
                                     </script>
                                     """,
                                     height=58,
