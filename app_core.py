@@ -2725,8 +2725,7 @@ with tab1:
                                 else ("推奨" if _pub_recommended else ("本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"))
                             )
                             st.info(
-                                f"📝 記事投稿対象：{_pub_reason} ／ "
-                                f"本命 {_pub_p1_lane}号艇 {_pub_p1_prob:.1%}"
+                                f"📝 note記事作成｜本命{_pub_p1_lane}号艇 {_pub_p1_prob:.1%}"
                             )
 
                             _pub_groups = {"本線": [], "抑え": [], "穴": []}
