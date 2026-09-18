@@ -2843,17 +2843,17 @@ with tab1:
                                 components.html(
                                     f"""
                                     <style>
-                                      .copy-wrap { margin:2px 0 8px 0; font-family:system-ui,-apple-system,sans-serif; }
-                                      .copy-sub { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
-                                      .copy-sub button {
+                                      .copy-wrap {{ margin:2px 0 8px 0; font-family:system-ui,-apple-system,sans-serif; }}
+                                      .copy-sub {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }}
+                                      .copy-sub button {{
                                         width:100%; min-height:44px; padding:9px 8px; cursor:pointer;
                                         font-size:13px; border-radius:10px;
-                                      }
-                                      #copy-status { display:block; min-height:20px; padding-top:5px; font-size:13px; text-align:center; }
-                                      @media (max-width:520px) {
-                                        .copy-sub { grid-template-columns:1fr; }
-                                        .copy-sub button { min-height:46px; font-size:14px; }
-                                      }
+                                      }}
+                                      #copy-status {{ display:block; min-height:20px; padding-top:5px; font-size:13px; text-align:center; }}
+                                      @media (max-width:520px) {{
+                                        .copy-sub {{ grid-template-columns:1fr; }}
+                                        .copy-sub button {{ min-height:46px; font-size:14px; }}
+                                      }}
                                     </style>
                                     <div class="copy-wrap">
                                       <div class="copy-sub">
