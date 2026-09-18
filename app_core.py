@@ -2715,13 +2715,14 @@ with tab1:
                         _pub_p1_prob = float(_pub_probs.loc[_pub_top_idx])
                         _pub_p1_lane = int(final.loc[_pub_top_idx, "lane"])
                         _pub_recommended = total_stake_metric > 0
-                        _pub_eligible = _pub_recommended or _pub_p1_prob >= 0.70
+                        # 記事投稿の最終判断はオーナーが行うため、全レースで投稿UIを表示する。
+                        _pub_eligible = True
 
                         if _pub_eligible:
                             _pub_reason = (
                                 "推奨＋本命70%以上"
                                 if (_pub_recommended and _pub_p1_prob >= 0.70)
-                                else ("推奨" if _pub_recommended else "本命70%以上")
+                                else ("推奨" if _pub_recommended else ("本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"))
                             )
                             st.info(
                                 f"📝 記事投稿対象：{_pub_reason} ／ "
