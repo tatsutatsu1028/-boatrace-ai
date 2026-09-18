@@ -1205,6 +1205,45 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
 
 
 
+EXTERNAL_SECOND_RESEARCH_VERSION = "position-v3-external-second-research-v1-20260919"
+
+def external_second_research_prediction(race, final, meet_gap=20.0, motor_gap=5.0, multiplier=1.40):
+    """5/6号艇の条件付き2着確率を、現行を変えず研究用に相対補正する。"""
+    if final is None: return final
+    out = final.copy()
+    out["external_second_research_version"] = EXTERNAL_SECOND_RESEARCH_VERSION
+    out["external_second_research_eligible_count"] = 0
+    need = {"lane", "current_meet_top2_rate", "motor_2ren"}
+    if not len(out) or "lane" not in out.columns or not need.issubset(race.columns): return out
+    out["lane"] = pd.to_numeric(out["lane"], errors="coerce")
+    features = race[list(need)].copy()
+    for c in need: features[c] = pd.to_numeric(features[c], errors="coerce")
+    fmap = features.set_index("lane")
+    for winner_lane in range(1, 7):
+        col = f"p_second_given_{winner_lane}"
+        if col not in out.columns: continue
+        probs = pd.to_numeric(out[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        inner = out[out["lane"].between(2,4) & out["lane"].ne(winner_lane)].copy()
+        if inner.empty: continue
+        inner["_p"] = pd.to_numeric(inner[col], errors="coerce").fillna(0.0)
+        ilane = int(inner.sort_values("_p", ascending=False).iloc[0]["lane"])
+        if ilane not in fmap.index: continue
+        im, imo = fmap.at[ilane,"current_meet_top2_rate"], fmap.at[ilane,"motor_2ren"]
+        if pd.isna(im) or pd.isna(imo): continue
+        adj, n = probs.copy(), 0
+        for pos,row in out.reset_index(drop=True).iterrows():
+            lane = int(row["lane"]) if pd.notna(row["lane"]) else 0
+            if lane not in (5,6) or lane==winner_lane or lane not in fmap.index: continue
+            m,mo=fmap.at[lane,"current_meet_top2_rate"],fmap.at[lane,"motor_2ren"]
+            if pd.notna(m) and pd.notna(mo) and m-im>=meet_gap and mo-imo>=motor_gap:
+                adj[pos] *= multiplier; n += 1
+        adj=np.where(out["lane"].to_numpy(dtype=float)==winner_lane,0.0,adj)
+        if adj.sum()>0: adj=adj/adj.sum()
+        out[f"research_{col}"]=adj
+        out["external_second_research_eligible_count"] += n
+    return out
+
+
 def research_prediction_variants(
     model,
     race,
@@ -1309,6 +1348,11 @@ def research_prediction_variants(
     # 生特徴量が保存され始めた2026-09-17以降のシャドー検証用。
     # 現行の買い目・推奨判定は変更せず、結果確定後に1着精度を比較する。
     variants["条件付き外艇補正"] = conditional_challenger_prediction(
+        race,
+        variants["現行全部入り"],
+    )
+
+    variants["2着外艇相対補正"] = external_second_research_prediction(
         race,
         variants["現行全部入り"],
     )
