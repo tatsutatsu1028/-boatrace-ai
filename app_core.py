@@ -2734,16 +2734,35 @@ with tab1:
                                     if _pub_combo:
                                         _pub_groups.setdefault(_pub_group, []).append(_pub_combo)
 
+                            def _compact_note_tickets(_combos):
+                                """同じ1着-2着の3着候補をまとめる。例: 1-2-3,1-2-4,1-2-6 -> 1-2-346"""
+                                _grouped = {}
+                                _fallback = []
+                                for _combo in _combos:
+                                    _parts = [p.strip() for p in str(_combo).split("-")]
+                                    if len(_parts) == 3 and all(p.isdigit() for p in _parts):
+                                        _key = (_parts[0], _parts[1])
+                                        _grouped.setdefault(_key, [])
+                                        if _parts[2] not in _grouped[_key]:
+                                            _grouped[_key].append(_parts[2])
+                                    else:
+                                        _fallback.append(str(_combo))
+                                _out = []
+                                for (_first, _second), _thirds in _grouped.items():
+                                    _third_text = "".join(_thirds)
+                                    _out.append(f"{_first}-{_second}-{_third_text}")
+                                return _out + _fallback
+
                             _pub_lines = ["【本線買い目】"]
                             if _pub_groups.get("本線"):
-                                _pub_lines += _pub_groups["本線"]
+                                _pub_lines += _compact_note_tickets(_pub_groups["本線"])
                             else:
                                 _pub_lines += ["なし"]
 
                             _cover_tickets = (_pub_groups.get("抑え") or []) + (_pub_groups.get("穴") or [])
                             _pub_lines += ["", "【抑え買い目】"]
                             if _cover_tickets:
-                                _pub_lines += _cover_tickets
+                                _pub_lines += _compact_note_tickets(_cover_tickets)
                             else:
                                 _pub_lines += ["なし"]
 
