@@ -2835,16 +2835,47 @@ with tab1:
                                 else:
                                     st.success(f"🔒 本日{_seq}本目 → 有料予想 {_price}円（確定済み）")
                                 _title_prefix = "無料予想" if _ptype == "FREE" else "有料予想"
-                                st.text_input(
+                                _note_title = st.text_input(
                                     "noteタイトル",
                                     value=f"【{_title_prefix}】{VENUES[jcd]} {rno}R｜展示後予想",
                                     key=f"note_title_{ctx}",
                                 )
-                                st.text_area(
+                                _note_body = st.text_area(
                                     "note本文（そのままコピー用）",
                                     value=_existing_pub.get("article_text") or _pub_article,
                                     height=420,
                                     key=f"note_body_{ctx}",
+                                )
+                                _copy_payload = json.dumps(
+                                    {"title": _note_title, "body": _note_body},
+                                    ensure_ascii=False,
+                                ).replace("</", "<\\/")
+                                components.html(
+                                    f"""
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 8px 0;">
+                                      <button id="copy-title" style="padding:9px 14px;cursor:pointer;">📋 タイトルをコピー</button>
+                                      <button id="copy-body" style="padding:9px 14px;cursor:pointer;">📋 本文をコピー</button>
+                                      <button id="copy-all" style="padding:9px 14px;cursor:pointer;">📋 タイトル＋本文をコピー</button>
+                                      <span id="copy-status" style="align-self:center;font-size:13px;"></span>
+                                    </div>
+                                    <script>
+                                    const data = {_copy_payload};
+                                    const status = document.getElementById("copy-status");
+                                    async function copyText(value) {{
+                                      try {{
+                                        await navigator.clipboard.writeText(value);
+                                        status.textContent = "コピーしました";
+                                      }} catch (e) {{
+                                        status.textContent = "コピーできませんでした";
+                                      }}
+                                      setTimeout(() => status.textContent = "", 1800);
+                                    }}
+                                    document.getElementById("copy-title").onclick = () => copyText(data.title);
+                                    document.getElementById("copy-body").onclick = () => copyText(data.body);
+                                    document.getElementById("copy-all").onclick = () => copyText(data.title + "\\n\\n" + data.body);
+                                    </script>
+                                    """,
+                                    height=58,
                                 )
                             else:
                                 st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
