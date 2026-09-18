@@ -2746,8 +2746,13 @@ with tab1:
                             _pub_main_opp = [x for x in _pub_lanes if x != _pub_p1_lane][:2]
                             _pub_cover = [x for x in _pub_lanes if x not in [_pub_p1_lane] + _pub_main_opp][:1]
 
+                            _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
                             _pub_lines = [
                                 "展示データ反映後の最終予想です。",
+                                "",
+                                f"会場：{VENUES[jcd]}",
+                                f"レース：{rno}R",
+                                f"締切予定：{_pub_deadline}" if _pub_deadline else "締切予定：未取得",
                                 "",
                                 "本命",
                                 f"◎ {_pub_p1_lane}号艇",
