@@ -433,40 +433,54 @@ def build_post_text(
     final=None,
     tickets=None,
     deadline=None,
+    publication_type="FREE",
+    note_url="https://note.com/tenji_kara",
 ):
-    """Threads投稿本文の下書きを作る。500文字を超える場合は段階的に短縮する。"""
+    """「今日も展示から。」用Threads下書き。投稿前にアプリ上で編集できる。"""
     venue = _clean(venue)
-    race_date = _clean(race_date)
     try:
         rno = f"{int(race_no)}R"
     except Exception:
         rno = _clean(race_no)
 
-    deadline = _clean(deadline)
-    deadline_text = f"締切予定 {deadline}" if deadline else ""
-    header = " ".join(
-        x for x in ["🚤", race_date, venue, rno, deadline_text] if x
-    )
-    groups = _ticket_groups(tickets)
-    insight = _race_insight(
-        final,
-        tickets,
-        style_seed=f"{race_date}|{venue}|{rno}",
-    )
+    ranked = final.copy() if final is not None else None
+    top_lane = None
+    opponents = []
+    if ranked is not None and len(ranked) and "p_first" in ranked.columns:
+        ranked["_p"] = ranked["p_first"].map(_num)
+        ranked = ranked.sort_values("_p", ascending=False)
+        lanes = [_lane_number(v) for v in ranked["lane"].tolist()]
+        lanes = [x for x in lanes if x]
+        if lanes:
+            top_lane = lanes[0]
+            opponents = lanes[1:4]
 
-    candidates = [
-        (_favorites(final, 3, with_names=True), dict(groups), insight),
-        (_favorites(final, 3, with_names=False), dict(groups), insight),
-    ]
-    no_hole = {k: v for k, v in groups.items() if k != "穴"}
-    candidates.append((_favorites(final, 3, with_names=False), no_hole, insight))
-    candidates.append((_favorites(final, 3, with_names=False), no_hole, ""))
-    candidates.append(([], no_hole, ""))
+    kind = str(publication_type or "FREE").upper()
+    title = f"【{venue} {rno}｜展示後予想】"
+    link = str(note_url or "").strip()
 
-    for fav_lines, gr, race_note in candidates:
-        text = _assemble(header, fav_lines, gr, race_note)
-        if len(text) <= TEXT_LIMIT:
-            return text
+    if kind == "PAID":
+        parts = [
+            "🔒 " + title,
+            "展示データ反映完了。",
+            "ここは記事にします。",
+            "本命・相手本線・抑え・\n3連単の最終買い目をまとめました。",
+            "続きはこちら👇" + (f"\n{link}" if link else ""),
+        ]
+    else:
+        main = f"◎ {top_lane}号艇" if top_lane else "◎ 本命はnoteに掲載"
+        if opponents:
+            main += f"\n相手本線：{'・'.join(f'{x}号艇' for x in opponents[:2])}"
+            if len(opponents) >= 3:
+                main += f"\n抑え：{opponents[2]}号艇"
+        parts = [
+            "🚤 " + title,
+            "展示データ反映後の最終予想。",
+            main,
+            "ここは無料で公開します。",
+            "3連単の買い目・見立てはこちら👇" + (f"\n{link}" if link else ""),
+        ]
 
-    only_main = {"本線": groups.get("本線") or []}
-    return _assemble(header, [], only_main)[:TEXT_LIMIT]
+    text = "\n\n".join(parts)
+    return text[:TEXT_LIMIT]
+
