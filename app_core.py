@@ -2725,6 +2725,15 @@ with tab1:
                                 else ("推奨" if _pub_recommended else ("本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"))
                             )
                             _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
+
+                            _pub_groups = {"本線": [], "抑え": [], "穴": []}
+                            if "combo" in tickets.columns:
+                                for _, _pub_row in tickets.iterrows():
+                                    _pub_combo = str(_pub_row.get("combo", "") or "").strip()
+                                    _pub_group = str(_pub_row.get("group", "抑え") or "抑え").strip()
+                                    if _pub_combo:
+                                        _pub_groups.setdefault(_pub_group, []).append(_pub_combo)
+
                             _pub_lines = ["【本線買い目】"]
                             if _pub_groups.get("本線"):
                                 _pub_lines += _pub_groups["本線"]
