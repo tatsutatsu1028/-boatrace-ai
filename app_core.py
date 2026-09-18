@@ -2703,6 +2703,159 @@ with tab1:
                         st.caption("ルールDの累計件数は現在取得できませんでした。")
 
                 # -------------------------------------------------
+                # note投稿管理（オーナー専用）
+                # -------------------------------------------------
+                # 推奨レース、または本命1着確率70%以上だけを投稿候補にする。
+                # 「記事用に確定」を押した時点でSupabase側が当日の通し番号を原子的に採番し、
+                # 1〜3本目=無料、4本目以降=有料300円に固定する。同一レースの再押下では増えない。
+                if IS_ADMIN:
+                    try:
+                        _pub_probs = pd.to_numeric(final["p_first"], errors="coerce")
+                        _pub_top_idx = _pub_probs.idxmax()
+                        _pub_p1_prob = float(_pub_probs.loc[_pub_top_idx])
+                        _pub_p1_lane = int(final.loc[_pub_top_idx, "lane"])
+                        _pub_recommended = total_stake_metric > 0
+                        _pub_eligible = _pub_recommended or _pub_p1_prob >= 0.70
+
+                        if _pub_eligible:
+                            _pub_reason = (
+                                "推奨＋本命70%以上"
+                                if (_pub_recommended and _pub_p1_prob >= 0.70)
+                                else ("推奨" if _pub_recommended else "本命70%以上")
+                            )
+                            st.info(
+                                f"📝 記事投稿対象：{_pub_reason} ／ "
+                                f"本命 {_pub_p1_lane}号艇 {_pub_p1_prob:.1%}"
+                            )
+
+                            _pub_groups = {"本線": [], "抑え": [], "穴": []}
+                            if "combo" in tickets.columns:
+                                for _, _pub_row in tickets.iterrows():
+                                    _pub_combo = str(_pub_row.get("combo", "") or "").strip()
+                                    _pub_group = str(_pub_row.get("group", "抑え") or "抑え").strip()
+                                    if _pub_combo:
+                                        _pub_groups.setdefault(_pub_group, []).append(_pub_combo)
+
+                            _pub_ranked = final.copy()
+                            _pub_ranked["_p"] = pd.to_numeric(_pub_ranked["p_first"], errors="coerce")
+                            _pub_ranked = _pub_ranked.sort_values("_p", ascending=False)
+                            _pub_lanes = [int(x) for x in _pub_ranked["lane"].head(4).tolist()]
+                            _pub_main_opp = [x for x in _pub_lanes if x != _pub_p1_lane][:2]
+                            _pub_cover = [x for x in _pub_lanes if x not in [_pub_p1_lane] + _pub_main_opp][:1]
+
+                            _pub_lines = [
+                                "展示データ反映後の最終予想です。",
+                                "",
+                                "## 本命",
+                                f"◎ {_pub_p1_lane}号艇",
+                                "",
+                                "相手本線：" + "・".join(f"{x}号艇" for x in _pub_main_opp),
+                                "抑え：" + ("・".join(f"{x}号艇" for x in _pub_cover) if _pub_cover else "なし"),
+                                "",
+                                "## 3連単 買い目",
+                            ]
+                            if _pub_groups.get("本線"):
+                                _pub_lines += ["【本命】"] + _pub_groups["本線"]
+                            _cover_tickets = (_pub_groups.get("抑え") or []) + (_pub_groups.get("穴") or [])
+                            if _cover_tickets:
+                                _pub_lines += ["", "【抑え】"] + _cover_tickets
+                            _pub_lines += [
+                                "",
+                                f"計{len(tickets)}点",
+                                "",
+                                "※資金配分は指定していません。",
+                                "オッズとご自身の予算に合わせて、購入する買い目・金額をご判断ください。",
+                                "",
+                                "## 見立て",
+                                "【ポイント】",
+                                f"・本命は{_pub_p1_lane}号艇（1着確率 {_pub_p1_prob:.1%}）",
+                                f"・投稿対象判定：{_pub_reason}",
+                                "",
+                                "公開した予想は、的中・不的中を問わず結果を記録して検証します。",
+                                "",
+                                "※掲載している予想は、的中や利益を保証するものではありません。舟券の購入はご自身の判断でお願いします。",
+                            ]
+                            _pub_article = "\n".join(_pub_lines)
+
+                            _pub_url, _pub_key = supabase_config()
+                            _pub_race_key = ctx
+                            _pub_date = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
+
+                            _existing_pub = None
+                            if _pub_url and _pub_key:
+                                try:
+                                    _er = requests.get(
+                                        f"{_pub_url}/rest/v1/note_publications",
+                                        params={"race_key": f"eq.{_pub_race_key}", "select": "*"},
+                                        headers={"apikey": _pub_key, "Authorization": f"Bearer {_pub_key}"},
+                                        timeout=10,
+                                    )
+                                    if _er.ok and (_er.json() or []):
+                                        _existing_pub = _er.json()[0]
+                                except Exception:
+                                    _existing_pub = None
+
+                            if _existing_pub:
+                                _ptype = _existing_pub.get("publication_type")
+                                _seq = int(_existing_pub.get("sequence_no") or 0)
+                                _price = int(_existing_pub.get("price") or 0)
+                                if _ptype == "FREE":
+                                    st.success(f"✅ 本日{_seq}本目 → 無料予想（確定済み）")
+                                else:
+                                    st.success(f"🔒 本日{_seq}本目 → 有料予想 {_price}円（確定済み）")
+                                _title_prefix = "無料予想" if _ptype == "FREE" else "有料予想"
+                                st.text_input(
+                                    "noteタイトル",
+                                    value=f"【{_title_prefix}】{VENUES[jcd]} {rno}R｜展示後予想",
+                                    key=f"note_title_{ctx}",
+                                )
+                                st.text_area(
+                                    "note本文（そのままコピー用）",
+                                    value=_existing_pub.get("article_text") or _pub_article,
+                                    height=420,
+                                    key=f"note_body_{ctx}",
+                                )
+                            else:
+                                st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
+                                if st.button("📝 note記事用に確定", key=f"reserve_note_{ctx}"):
+                                    if not _pub_url or not _pub_key:
+                                        st.error("Supabase設定が見つかりません。")
+                                    else:
+                                        try:
+                                            _rr = requests.post(
+                                                f"{_pub_url}/rest/v1/rpc/reserve_note_publication",
+                                                headers={
+                                                    "apikey": _pub_key,
+                                                    "Authorization": f"Bearer {_pub_key}",
+                                                    "Content-Type": "application/json",
+                                                },
+                                                json={
+                                                    "p_race_key": _pub_race_key,
+                                                    "p_publication_date": _pub_date,
+                                                    "p_venue": VENUES[jcd],
+                                                    "p_race_no": int(rno),
+                                                    "p_trigger_reason": _pub_reason,
+                                                    "p_p1_lane": _pub_p1_lane,
+                                                    "p_p1_prob": _pub_p1_prob,
+                                                    "p_title": f"{VENUES[jcd]} {rno}R｜展示後予想",
+                                                    "p_article_text": _pub_article,
+                                                },
+                                                timeout=10,
+                                            )
+                                            _rr.raise_for_status()
+                                            st.success("記事枠を確定しました。無料／有料は自動判定されています。")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error("記事枠の確定に失敗しました。")
+                                            st.code(str(e))
+                        else:
+                            st.caption(
+                                f"📝 記事投稿対象外：本命 {_pub_p1_lane}号艇 {_pub_p1_prob:.1%} ／ 非推奨"
+                            )
+                    except Exception as e:
+                        st.caption(f"記事投稿判定を表示できませんでした: {e}")
+
+                # -------------------------------------------------
                 # スレッズ投稿
                 # -------------------------------------------------
                 # 投稿できるのはオーナーだけ。収集スタッフの画面には出さない。
