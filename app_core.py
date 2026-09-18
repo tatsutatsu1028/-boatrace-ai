@@ -2546,8 +2546,7 @@ with tab1:
                             original_display_scale=0.0,
                         )
 
-                        # 研究用比較は日次検証側で実行する。
-                        # 画面の最終予想では本番予想を優先し、重い研究計算で待たせない。
+                        # 本番予想を先に表示する。研究用比較は「検証用に固定」する時だけ計算する。
                         research_variants = {}
                         tri = trifecta(final)
                         ticket_plan = adaptive_ticket_plan(final)
@@ -3011,6 +3010,20 @@ with tab1:
                                         "締切時刻を過ぎているため、本番検証用の予想は固定できません。"
                                     )
 
+                            _research_for_snapshot = st.session_state["result"].get(
+                                "research_variants", {}
+                            )
+                            if not _research_for_snapshot:
+                                with st.spinner("研究用データを保存中…"):
+                                    _research_for_snapshot = research_prediction_variants(
+                                        model,
+                                        work_result,
+                                        display_weight=display_weight,
+                                        weather_weight=weather_weight,
+                                        venue_course_weight=venue_course_weight,
+                                    )
+                                st.session_state["result"]["research_variants"] = _research_for_snapshot
+
                             snap = save_prediction_snapshot(
                                 race_key=ctx,
                                 race_date=d.isoformat(),
@@ -3018,10 +3031,7 @@ with tab1:
                                 race_no=rno,
                                 final=final,
                                 tickets=tickets,
-                                research_variants=st.session_state["result"].get(
-                                    "research_variants",
-                                    {},
-                                ),
+                                research_variants=_research_for_snapshot,
                                 race_features=work_result,
                                 snapshot_kind=snapshot_kind,
                                 collector_name=COLLECTOR_NAME,
