@@ -465,7 +465,7 @@ def build_post_text(
             "展示データ反映完了。",
             "ここは記事にします。",
             "本命・相手本線・抑え・\n3連単の最終買い目をまとめました。",
-            "続きはこちら👇" + (f"\n{link}" if link else ""),
+            "続きはプロフィールのnoteから👇",
         ]
     else:
         main = f"◎ {top_lane}号艇" if top_lane else "◎ 本命はnoteに掲載"
@@ -478,7 +478,7 @@ def build_post_text(
             "展示データ反映後の最終予想。",
             main,
             "1日3R無料で公開します。",
-            "3連単の買い目・見立てはこちら👇" + (f"\n{link}" if link else ""),
+            "買い目はnoteに公開しました。\nプロフィールのリンクからどうぞ👇",
         ]
 
     text = "\n\n".join(parts)
