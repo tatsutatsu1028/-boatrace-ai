@@ -2842,12 +2842,31 @@ with tab1:
                                 ).replace("</", "<\\/")
                                 components.html(
                                     f"""
-                                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 8px 0;">
-                                      <button id="copy-title" style="padding:9px 14px;cursor:pointer;">📋 タイトルをコピー</button>
-                                      <button id="copy-body" style="padding:9px 14px;cursor:pointer;">📋 本文をコピー</button>
-                                      <button id="copy-all" style="padding:9px 14px;cursor:pointer;">📋 タイトル＋本文をコピー</button>
-                                      <button id="copy-tags" style="padding:9px 14px;cursor:pointer;">📋 ハッシュタグをコピー</button>
-                                      <span id="copy-status" style="align-self:center;font-size:13px;"></span>
+                                    <style>
+                                      .copy-wrap { margin:2px 0 8px 0; font-family:system-ui,-apple-system,sans-serif; }
+                                      .copy-main {
+                                        width:100%; min-height:52px; padding:12px 14px; margin-bottom:8px;
+                                        cursor:pointer; font-size:16px; font-weight:700; border-radius:12px;
+                                      }
+                                      .copy-sub { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+                                      .copy-sub button {
+                                        width:100%; min-height:44px; padding:9px 8px; cursor:pointer;
+                                        font-size:13px; border-radius:10px;
+                                      }
+                                      #copy-status { display:block; min-height:20px; padding-top:5px; font-size:13px; text-align:center; }
+                                      @media (max-width:520px) {
+                                        .copy-sub { grid-template-columns:1fr; }
+                                        .copy-sub button { min-height:46px; font-size:14px; }
+                                      }
+                                    </style>
+                                    <div class="copy-wrap">
+                                      <button id="copy-all" class="copy-main">📋 タイトル＋本文をコピー</button>
+                                      <div class="copy-sub">
+                                        <button id="copy-title">タイトルだけ</button>
+                                        <button id="copy-body">本文だけ</button>
+                                        <button id="copy-tags">ハッシュタグ</button>
+                                      </div>
+                                      <span id="copy-status"></span>
                                     </div>
                                     <script>
                                     const data = {_copy_payload};
@@ -2867,7 +2886,7 @@ with tab1:
                                     document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
                                     </script>
                                     """,
-                                    height=58,
+                                    height=235,
                                 )
                             else:
                                 st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
