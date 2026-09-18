@@ -2789,6 +2789,29 @@ with tab1:
                             _pub_race_key = ctx
                             _pub_date = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
 
+                            # 当日の未投稿DRAFTだけを削除して、投稿回数を0から数え直す。
+                            # 公開済み（note_url / published_atあり）は誤削除しない。
+                            if _pub_url and _pub_key:
+                                if st.button("🔄 本日の投稿回数をリセット", key=f"reset_note_count_{_pub_date}"):
+                                    try:
+                                        _reset = requests.post(
+                                            f"{_pub_url}/rest/v1/rpc/reset_note_publications_for_date",
+                                            headers={
+                                                "apikey": _pub_key,
+                                                "Authorization": f"Bearer {_pub_key}",
+                                                "Content-Type": "application/json",
+                                            },
+                                            json={"p_publication_date": _pub_date},
+                                            timeout=10,
+                                        )
+                                        _reset.raise_for_status()
+                                        _deleted = int(_reset.json() or 0)
+                                        st.success(f"本日の未投稿記事 {_deleted}件をリセットしました。投稿回数は0から数え直します。")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error("投稿回数のリセットに失敗しました。")
+                                        st.code(str(e))
+
                             _existing_pub = None
                             if _pub_url and _pub_key:
                                 try:
