@@ -2747,13 +2747,13 @@ with tab1:
                             _pub_lines = [
                                 "展示データ反映後の最終予想です。",
                                 "",
-                                "## 本命",
+                                "本命",
                                 f"◎ {_pub_p1_lane}号艇",
                                 "",
                                 "相手本線：" + "・".join(f"{x}号艇" for x in _pub_main_opp),
                                 "抑え：" + ("・".join(f"{x}号艇" for x in _pub_cover) if _pub_cover else "なし"),
                                 "",
-                                "## 3連単 買い目",
+                                "3連単 買い目",
                             ]
                             if _pub_groups.get("本線"):
                                 _pub_lines += ["【本命】"] + _pub_groups["本線"]
@@ -2767,7 +2767,7 @@ with tab1:
                                 "※資金配分は指定していません。",
                                 "オッズとご自身の予算に合わせて、購入する買い目・金額をご判断ください。",
                                 "",
-                                "## 見立て",
+                                "見立て",
                                 "【ポイント】",
                                 f"・本命は{_pub_p1_lane}号艇（1着確率 {_pub_p1_prob:.1%}）",
                                 f"・投稿対象判定：{_pub_reason}",
