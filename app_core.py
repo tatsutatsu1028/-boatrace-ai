@@ -2841,46 +2841,31 @@ with tab1:
                                     ensure_ascii=False,
                                 ).replace("</", "<\\/")
                                 components.html(
-                                    f"""
-                                    <style>
-                                      .copy-wrap {{ margin:2px 0 8px 0; font-family:system-ui,-apple-system,sans-serif; }}
-                                      .copy-sub {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }}
-                                      .copy-sub button {{
-                                        width:100%; min-height:44px; padding:9px 8px; cursor:pointer;
-                                        font-size:13px; border-radius:10px;
-                                      }}
-                                      #copy-status {{ display:block; min-height:20px; padding-top:5px; font-size:13px; text-align:center; }}
-                                      @media (max-width:520px) {{
-                                        .copy-sub {{ grid-template-columns:1fr; }}
-                                        .copy-sub button {{ min-height:46px; font-size:14px; }}
-                                      }}
-                                    </style>
-                                    <div class="copy-wrap">
-                                      <div class="copy-sub">
-                                        <button id="copy-title">タイトルだけ</button>
-                                        <button id="copy-body">本文だけ</button>
-                                        <button id="copy-tags">ハッシュタグ</button>
-                                      </div>
-                                      <span id="copy-status"></span>
+                                    """
+                                    <div style="display:grid;grid-template-columns:1fr;gap:10px;margin:2px 0 8px 0;">
+                                      <button id="copy-title" style="width:100%;min-height:48px;padding:10px 12px;font-size:15px;cursor:pointer;border-radius:10px;">📋 タイトルをコピー</button>
+                                      <button id="copy-body" style="width:100%;min-height:48px;padding:10px 12px;font-size:15px;cursor:pointer;border-radius:10px;">📋 本文をコピー</button>
+                                      <button id="copy-tags" style="width:100%;min-height:48px;padding:10px 12px;font-size:15px;cursor:pointer;border-radius:10px;">📋 ハッシュタグをコピー</button>
+                                      <span id="copy-status" style="min-height:20px;font-size:13px;text-align:center;"></span>
                                     </div>
                                     <script>
-                                    const data = {_copy_payload};
+                                    const data = __COPY_PAYLOAD__;
                                     const status = document.getElementById("copy-status");
-                                    async function copyText(value) {{
-                                      try {{
+                                    async function copyText(value) {
+                                      try {
                                         await navigator.clipboard.writeText(value);
                                         status.textContent = "コピーしました";
-                                      }} catch (e) {{
+                                      } catch (e) {
                                         status.textContent = "コピーできませんでした";
-                                      }}
+                                      }
                                       setTimeout(() => status.textContent = "", 1800);
-                                    }}
+                                    }
                                     document.getElementById("copy-title").onclick = () => copyText(data.title);
                                     document.getElementById("copy-body").onclick = () => copyText(data.body);
                                     document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
                                     </script>
-                                    """,
-                                    height=190,
+                                    """.replace("__COPY_PAYLOAD__", _copy_payload),
+                                    height=205,
                                 )
                             else:
                                 st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
