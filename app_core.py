@@ -2546,14 +2546,9 @@ with tab1:
                             original_display_scale=0.0,
                         )
 
-                        # 研究用の比較は別計算。final（本番予想）は一切変更しない。
-                        research_variants = research_prediction_variants(
-                            model,
-                            work,
-                            display_weight=display_weight,
-                            weather_weight=weather_weight,
-                            venue_course_weight=venue_course_weight,
-                        )
+                        # 研究用比較は日次検証側で実行する。
+                        # 画面の最終予想では本番予想を優先し、重い研究計算で待たせない。
+                        research_variants = {}
                         tri = trifecta(final)
                         ticket_plan = adaptive_ticket_plan(final)
                         target_points = int(ticket_plan["point_count"])
