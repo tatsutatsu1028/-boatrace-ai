@@ -2725,61 +2725,23 @@ with tab1:
                                 else ("推奨" if _pub_recommended else ("本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"))
                             )
                             _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
-                            _pub_deadline_text = f"｜締切予定 {_pub_deadline}" if _pub_deadline else ""
-                            st.info(
-                                f"📝 note記事作成｜{VENUES[jcd]} {rno}R{_pub_deadline_text}｜"
-                                f"本命{_pub_p1_lane}号艇 {_pub_p1_prob:.1%}"
-                            )
-
-                            _pub_groups = {"本線": [], "抑え": [], "穴": []}
-                            if "combo" in tickets.columns:
-                                for _, _pub_row in tickets.iterrows():
-                                    _pub_combo = str(_pub_row.get("combo", "") or "").strip()
-                                    _pub_group = str(_pub_row.get("group", "抑え") or "抑え").strip()
-                                    if _pub_combo:
-                                        _pub_groups.setdefault(_pub_group, []).append(_pub_combo)
-
-                            _pub_ranked = final.copy()
-                            _pub_ranked["_p"] = pd.to_numeric(_pub_ranked["p_first"], errors="coerce")
-                            _pub_ranked = _pub_ranked.sort_values("_p", ascending=False)
-                            _pub_lanes = [int(x) for x in _pub_ranked["lane"].head(4).tolist()]
-                            _pub_main_opp = [x for x in _pub_lanes if x != _pub_p1_lane][:2]
-                            _pub_cover = [x for x in _pub_lanes if x not in [_pub_p1_lane] + _pub_main_opp][:1]
-
-                            _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
-                            _pub_lines = [
-                                "展示データ反映後の最終予想です。",
-                                "",
-                                f"会場：{VENUES[jcd]}",
-                                f"レース：{rno}R",
-                                f"締切予定：{_pub_deadline}" if _pub_deadline else "締切予定：未取得",
-                                "",
-                                "本命",
-                                f"◎ {_pub_p1_lane}号艇",
-                                "",
-                                "相手本線：" + "・".join(f"{x}号艇" for x in _pub_main_opp),
-                                "抑え：" + ("・".join(f"{x}号艇" for x in _pub_cover) if _pub_cover else "なし"),
-                                "",
-                                "3連単 買い目",
-                            ]
+                            _pub_lines = ["【本線買い目】"]
                             if _pub_groups.get("本線"):
-                                _pub_lines += ["【本命】"] + _pub_groups["本線"]
+                                _pub_lines += _pub_groups["本線"]
+                            else:
+                                _pub_lines += ["なし"]
+
                             _cover_tickets = (_pub_groups.get("抑え") or []) + (_pub_groups.get("穴") or [])
+                            _pub_lines += ["", "【抑え買い目】"]
                             if _cover_tickets:
-                                _pub_lines += ["", "【抑え】"] + _cover_tickets
+                                _pub_lines += _cover_tickets
+                            else:
+                                _pub_lines += ["なし"]
+
                             _pub_lines += [
-                                "",
-                                f"計{len(tickets)}点",
                                 "",
                                 "※資金配分は指定していません。",
                                 "オッズとご自身の予算に合わせて、購入する買い目・金額をご判断ください。",
-                                "",
-                                "見立て",
-                                "【ポイント】",
-                                f"・展示データ反映後、{_pub_p1_lane}号艇を軸に予想を組み立てました。",
-                                "・相手関係と買い目を絞り、最終予想としてまとめています。",
-                                "",
-                                "公開した予想は、的中・不的中を問わず結果を記録して検証します。",
                                 "",
                                 "※掲載している予想は、的中や利益を保証するものではありません。舟券の購入はご自身の判断でお願いします。",
                             ]
@@ -2837,7 +2799,7 @@ with tab1:
                                 _title_prefix = "無料予想" if _ptype == "FREE" else "有料予想"
                                 _note_title = st.text_input(
                                     "noteタイトル",
-                                    value=f"【{_title_prefix}】{VENUES[jcd]} {rno}R｜展示後予想",
+                                    value=(f"【{_title_prefix}】{VENUES[jcd]} {rno}R｜締切 {_pub_deadline}" if _pub_deadline else f"【{_title_prefix}】{VENUES[jcd]} {rno}R"),
                                     key=f"note_title_{ctx}",
                                 )
                                 _note_body = st.text_area(
@@ -2899,7 +2861,7 @@ with tab1:
                                                     "p_trigger_reason": _pub_reason,
                                                     "p_p1_lane": _pub_p1_lane,
                                                     "p_p1_prob": _pub_p1_prob,
-                                                    "p_title": f"{VENUES[jcd]} {rno}R｜展示後予想",
+                                                    "p_title": (f"{VENUES[jcd]} {rno}R｜締切 {_pub_deadline}" if _pub_deadline else f"{VENUES[jcd]} {rno}R"),
                                                     "p_article_text": _pub_article,
                                                 },
                                                 timeout=10,
