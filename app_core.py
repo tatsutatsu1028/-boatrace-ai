@@ -2841,31 +2841,31 @@ with tab1:
                                     ensure_ascii=False,
                                 ).replace("</", "<\\/")
                                 components.html(
-                                    """
-                                    <div style="display:grid;grid-template-columns:1fr;gap:10px;margin:2px 0 8px 0;">
-                                      <button id="copy-title" style="width:100%;min-height:48px;padding:10px 12px;font-size:15px;cursor:pointer;border-radius:10px;">📋 タイトルをコピー</button>
-                                      <button id="copy-body" style="width:100%;min-height:48px;padding:10px 12px;font-size:15px;cursor:pointer;border-radius:10px;">📋 本文をコピー</button>
-                                      <button id="copy-tags" style="width:100%;min-height:48px;padding:10px 12px;font-size:15px;cursor:pointer;border-radius:10px;">📋 ハッシュタグをコピー</button>
-                                      <span id="copy-status" style="min-height:20px;font-size:13px;text-align:center;"></span>
+                                    f"""
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 8px 0;">
+                                      <button id="copy-title" style="padding:9px 14px;cursor:pointer;">📋 タイトルをコピー</button>
+                                      <button id="copy-body" style="padding:9px 14px;cursor:pointer;">📋 本文をコピー</button>
+                                      <button id="copy-all" style="padding:9px 14px;cursor:pointer;">📋 タイトル＋本文をコピー</button>
+                                      <span id="copy-status" style="align-self:center;font-size:13px;"></span>
                                     </div>
                                     <script>
-                                    const data = __COPY_PAYLOAD__;
+                                    const data = {_copy_payload};
                                     const status = document.getElementById("copy-status");
-                                    async function copyText(value) {
-                                      try {
+                                    async function copyText(value) {{
+                                      try {{
                                         await navigator.clipboard.writeText(value);
                                         status.textContent = "コピーしました";
-                                      } catch (e) {
+                                      }} catch (e) {{
                                         status.textContent = "コピーできませんでした";
-                                      }
+                                      }}
                                       setTimeout(() => status.textContent = "", 1800);
-                                    }
+                                    }}
                                     document.getElementById("copy-title").onclick = () => copyText(data.title);
                                     document.getElementById("copy-body").onclick = () => copyText(data.body);
-                                    document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
+                                    document.getElementById("copy-all").onclick = () => copyText(data.title + "\\n\\n" + data.body);
                                     </script>
-                                    """.replace("__COPY_PAYLOAD__", _copy_payload),
-                                    height=205,
+                                    """,
+                                    height=58,
                                 )
                             else:
                                 st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
