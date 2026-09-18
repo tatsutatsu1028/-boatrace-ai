@@ -2876,6 +2876,11 @@ with tab1:
                             final=final,
                             tickets=tickets,
                             deadline=(deadlines or {}).get(rno),
+                            publication_type=(
+                                str(_pub_existing.get("publication_type") or "FREE")
+                                if "_pub_existing" in locals() and _pub_existing
+                                else "FREE"
+                            ),
                         )
 
                         _posted_key = f"threads_posted_{ctx}"
