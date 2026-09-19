@@ -12,6 +12,16 @@ from bs4 import BeautifulSoup
 
 from official_fetcher import VENUES, fetch_odds3t, fetch_race_result
 from odds_rollup import rollup_and_prune, DEFAULT_RETENTION_DAYS
+
+# result_tracker.py の lane_keep_cols と同じ定義。
+# streamlit/pandas 依存を避けるため import はせずここに複製する。
+CONDITIONAL_THIRD_COLUMNS = [
+    f"p_third_given_{first_lane}_{second_lane}"
+    for first_lane in range(1, 7)
+    for second_lane in range(1, 7)
+    if first_lane != second_lane
+]
+
 # スレッズ投稿は任意機能。threads_poster.py を置いていない場合でも
 # オッズ追跡・結果確定・集約は動くようにしておく。
 try:
@@ -445,10 +455,20 @@ def _build_result_record(
                 item[c] = _clean_json_value(row.get(c))
         ticket_payload.append(item)
 
+    lane_keep_cols = (
+        "lane", "racer_name", "p_first", "p_second", "p_third",
+        "p_second_given_1", "p_second_given_2", "p_second_given_3",
+        "p_second_given_4", "p_second_given_5", "p_second_given_6",
+        *CONDITIONAL_THIRD_COLUMNS,
+        "model_version", "reason",
+        "kimarite_adjustment", "kimarite_effect_pct",
+        "kimarite_starts", "kimarite_wins", "kimarite_dominant",
+        "kimarite_available",
+    )
     lane_payload = []
     for row in sorted(valid_final, key=lambda x: _safe_int(x.get("lane"), 99)):
         item = {}
-        for c in ("lane", "racer_name", "p_first", "reason"):
+        for c in lane_keep_cols:
             if c in row:
                 item[c] = _clean_json_value(row.get(c))
         lane_payload.append(item)
