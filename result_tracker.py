@@ -27,6 +27,16 @@ CONDITIONAL_THIRD_COLUMNS = [
     if first_lane != second_lane
 ]
 
+# 今節成績・当地コース別成績・水面のコース別特性。prediction.predict() が
+# final に複製して返すので、そのまま lane_probs_json にも保存する。
+LANE_CONTEXT_COLUMNS = [
+    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_st", "current_meet_races",
+    "course_top3_rate", "course_avg_st", "course_start_rank",
+    "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
+    "venue_course_4th", "venue_course_5th", "venue_course_6th",
+]
+
 SNAPSHOT_FEATURE_COLUMNS = [
     "lane", "racer_id", "racer_name", "racer_class", "avg_st",
     "racer_win_rate", "local_win_rate", "motor_2ren", "boat_2ren",
@@ -295,6 +305,7 @@ def _snapshot_payload(final, tickets, research_variants=None, race_features=None
             "kimarite_adjustment", "kimarite_effect_pct",
             "kimarite_starts", "kimarite_wins", "kimarite_dominant",
             "kimarite_available",
+            *LANE_CONTEXT_COLUMNS,
         ):
             if c in row.index:
                 item[c] = _json_safe(row[c])
@@ -837,6 +848,7 @@ def save_race_result(
         "kimarite_adjustment", "kimarite_effect_pct",
         "kimarite_starts", "kimarite_wins", "kimarite_dominant",
         "kimarite_available",
+        *LANE_CONTEXT_COLUMNS,
     ]
     lane_payload = []
 

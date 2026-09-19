@@ -24,6 +24,16 @@ BASE_NUM = [
 ]
 BASE_CAT = ["venue"]
 
+# 今節成績・当地コース別成績・水面のコース別特性は学習には使わず補正のみに
+# 使うが、後日の検証用に predict() の出力 (final) へもそのまま持ち出す。
+LANE_CONTEXT_COLUMNS = [
+    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_st", "current_meet_races",
+    "course_top3_rate", "course_avg_st", "course_start_rank",
+    "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
+    "venue_course_4th", "venue_course_5th", "venue_course_6th",
+]
+
 # 2着v2では「候補艇」と「1着艇」の組み合わせをカテゴリとして直接学習する。
 # 1着モデルの特徴量・学習方法は一切変更しない。
 SECOND_NUM = [col for col in BASE_NUM if col != "lane"]
@@ -1195,6 +1205,12 @@ def predict(model, race, display_weight=0.32, current_meet_weight=0.18, course_w
     out["kimarite_wins"] = kimarite_wins
     out["kimarite_dominant"] = kimarite_dominant
     out["kimarite_available"] = kimarite_available
+
+    # 今節成績・当地コース別成績・水面のコース別特性は、後日の検証保存
+    # (result_tracker.lane_keep_cols) で欠落しないよう final にも複製する。
+    for c in LANE_CONTEXT_COLUMNS:
+        if c in x.columns:
+            out[c] = x[c]
 
     out["reason"] = [
         " / ".join(r) if r else "基礎データ中心"

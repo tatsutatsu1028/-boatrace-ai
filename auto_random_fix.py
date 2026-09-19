@@ -36,6 +36,13 @@ CONDITIONAL_THIRD_COLUMNS = [
     for second_lane in range(1, 7)
     if first_lane != second_lane
 ]
+LANE_CONTEXT_COLUMNS = [
+    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_st", "current_meet_races",
+    "course_top3_rate", "course_avg_st", "course_start_rank",
+    "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
+    "venue_course_4th", "venue_course_5th", "venue_course_6th",
+]
 SNAPSHOT_FEATURE_COLUMNS = [
     "lane", "racer_id", "racer_name", "racer_class", "avg_st",
     "racer_win_rate", "local_win_rate", "motor_2ren", "boat_2ren",
@@ -210,6 +217,7 @@ def _snapshot_payload(
         *CONDITIONAL_THIRD_COLUMNS,
         "model_version", "reason", "kimarite_adjustment", "kimarite_effect_pct",
         "kimarite_starts", "kimarite_wins", "kimarite_dominant", "kimarite_available",
+        *LANE_CONTEXT_COLUMNS,
     ]
     ticket_cols = [
         "combo", "group", "prob", "odds", "expected_return", "stake", "stake_reason",
