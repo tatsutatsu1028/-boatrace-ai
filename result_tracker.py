@@ -19,6 +19,7 @@ SETTINGS_FILE = Path(__file__).parent / "app_settings.json"
 SUPABASE_TABLE = "prediction_results"
 SUPABASE_SETTINGS_TABLE = "app_settings"
 SUPABASE_SNAPSHOT_TABLE = "prediction_snapshots"
+SUPABASE_SCHEDULE_TABLE = "daily_schedule"
 CONDITIONAL_THIRD_COLUMNS = [
     f"p_third_given_{first_lane}_{second_lane}"
     for first_lane in range(1, 7)
@@ -1585,3 +1586,68 @@ def load_analysis_view(kind):
             flush=True,
         )
         return pd.DataFrame()
+
+
+# -----------------------------
+# 開催スケジュール事前取得（daily_schedule）
+# -----------------------------
+# schedule_prefetcher.py（GitHub Actions）が朝1回＋日中の状態差分更新で
+# Supabaseへ保存したその日の開催会場・締切一覧をここで読むだけにする。
+# アプリ側（会場選択画面）から公式サイトへ直接問い合わせないようにするための窓口。
+
+
+def fetch_daily_schedule_supabase(date_str):
+    """
+    Supabaseのdaily_scheduleテーブルから指定日の開催スケジュールを読む。
+
+    戻り値: {jcd: {"jcd", "holding", "day_label", "status",
+                    "next_race_no", "next_race_time", "deadlines"}, ...}
+    その日のデータが1件も無い場合・Supabase未設定・取得失敗時はNoneを返す。
+    呼び出し側（app_core.fetch_daily_schedule）はNoneの場合、
+    公式サイトからの直接取得にフォールバックする。
+    """
+    if not _use_supabase():
+        return None
+
+    try:
+        url, _ = _supabase_config()
+        endpoint = (
+            f"{url}/rest/v1/{SUPABASE_SCHEDULE_TABLE}"
+            f"?race_date=eq.{date_str}&select=*"
+        )
+        r = requests.get(endpoint, headers=_headers(), timeout=15)
+        r.raise_for_status()
+        rows = r.json()
+    except Exception as e:
+        print(
+            "[RESULT_TRACKER] daily_schedule fetch error:",
+            type(e).__name__, str(e), flush=True,
+        )
+        return None
+
+    if not rows:
+        return None
+
+    result = {}
+    for row in rows:
+        code = str(row.get("jcd", "")).zfill(2)
+        raw_deadlines = row.get("deadlines") or {}
+        deadlines = {}
+        if isinstance(raw_deadlines, dict):
+            for rno, hhmm in raw_deadlines.items():
+                try:
+                    deadlines[int(rno)] = hhmm
+                except (TypeError, ValueError):
+                    continue
+
+        result[code] = {
+            "jcd": code,
+            "holding": bool(row.get("holding")),
+            "day_label": row.get("day_label") or "",
+            "status": row.get("status") or "",
+            "next_race_no": row.get("next_race_no"),
+            "next_race_time": row.get("next_race_time") or "",
+            "deadlines": deadlines,
+        }
+
+    return result

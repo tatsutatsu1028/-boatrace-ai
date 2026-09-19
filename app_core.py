@@ -48,6 +48,7 @@ from result_tracker import (
     load_prediction_snapshot,
     save_prediction_snapshot,
     supabase_config,
+    fetch_daily_schedule_supabase,
 )
 # スレッズ投稿は任意機能。threads_poster.py を置いていない場合でも
 # アプリ本体は動くようにしておく（未導入で全体が落ちるのを防ぐ）。
@@ -823,13 +824,60 @@ def cached_fetch_race_bundle(date_str, jcd, rno, include_odds=True):
     return race, odds
 
 
-def fetch_schedule_once(date_str):
+def fetch_daily_schedule(date_str):
     """
-    開催会場一覧はアプリを開いたセッション内で1回だけ取得する。
-    開いた時点で最終R発売終了/開催終了なら🟢を付けない。
-    その後は自動更新せず、次にアプリを開き直した時に再判定する。
+    その日の開催会場一覧・締切一覧を返す。
+
+    朝のバッチ（schedule_prefetcher.py、GitHub Actions）がSupabaseの
+    daily_scheduleテーブルへ事前保存しているため、通常はそれを読むだけで
+    済み、会場選択のたびに公式サイトへ問い合わせることはない。
+    バッチが未実行・失敗している等でSupabase側にその日のデータが
+    無い場合だけ、従来どおり公式サイトから直接取得する（フォールバック）。
+
+    戻り値: {jcd: {"jcd", "holding", "day_label", "status",
+                    "next_race_no", "next_race_time", "deadlines"}}
     """
-    return fetch_today_schedule(date_str)
+    from_supabase = fetch_daily_schedule_supabase(date_str)
+    if from_supabase:
+        return from_supabase
+
+    print(
+        "[SCHEDULE] Supabase daily_schedule miss, falling back to live fetch:",
+        date_str, flush=True,
+    )
+
+    schedule = fetch_today_schedule(date_str)
+    result = {
+        str(row["jcd"]).zfill(2): {
+            "jcd": str(row["jcd"]).zfill(2),
+            "holding": bool(row.get("holding")),
+            "day_label": row.get("day_label") or "",
+            "status": str(row.get("status", "") or "").strip(),
+            "next_race_no": row.get("next_race_no"),
+            "next_race_time": row.get("next_race_time") or "",
+            "deadlines": {},
+        }
+        for row in schedule.to_dict("records")
+    }
+
+    active_codes = [
+        code for code, info in result.items()
+        if info["holding"] and info["status"] not in {"開催終了", "中止"}
+    ]
+    if active_codes:
+        with ThreadPoolExecutor(max_workers=min(8, len(active_codes))) as executor:
+            future_codes = {
+                executor.submit(fetch_venue_deadlines, date_str, code): code
+                for code in active_codes
+            }
+            for future in as_completed(future_codes):
+                code = future_codes[future]
+                try:
+                    result[code]["deadlines"] = future.result()
+                except Exception:
+                    pass
+
+    return result
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1840,63 +1888,23 @@ with tab1:
 
     st.markdown("### 🏟️ 会場を選択")
     try:
-        _schedule_key = f"schedule_once_{d.strftime('%Y%m%d')}"
+        _date_key = d.strftime("%Y%m%d")
+        _schedule_key = f"daily_schedule_{_date_key}"
         if _schedule_key not in st.session_state:
-            st.session_state[_schedule_key] = fetch_schedule_once(
-                d.strftime("%Y%m%d")
-            )
+            st.session_state[_schedule_key] = fetch_daily_schedule(_date_key)
 
-        schedule = st.session_state[_schedule_key]
-        schedule_by_jcd = {
-            str(row["jcd"]): row for row in schedule.to_dict("records")
-        }
+        schedule_by_jcd = st.session_state[_schedule_key]
 
-        # 開催中の会場だけ、その日の締切一覧を1回取得して、
-        # 朝/昼/夜表示と「締切15分以内の次レース」判定の両方に使う。
-        _meeting_badges_key = f"meeting_badges_{d.strftime('%Y%m%d')}"
-        _meeting_deadlines_key = f"meeting_deadlines_{d.strftime('%Y%m%d')}"
-        if (
-            _meeting_badges_key not in st.session_state
-            or _meeting_deadlines_key not in st.session_state
-        ):
-            _meeting_badges = {}
-            _meeting_deadlines = {}
-            _active_codes = []
-            for _code, _info in schedule_by_jcd.items():
-                _holding = bool(_info.get("holding"))
-                _status = str(_info.get("status", "") or "").strip()
-                if _holding and _status not in {"開催終了", "中止"}:
-                    _active_codes.append(_code)
-
-            # 会場ごとの締切取得は独立しているため並列取得。
-            if _active_codes:
-                with ThreadPoolExecutor(
-                    max_workers=min(8, len(_active_codes))
-                ) as _ex:
-                    _future_codes = {
-                        _ex.submit(
-                            cached_fetch_deadlines,
-                            d.strftime("%Y%m%d"),
-                            _code,
-                        ): _code
-                        for _code in _active_codes
-                    }
-                    for _future in as_completed(_future_codes):
-                        _code = _future_codes[_future]
-                        try:
-                            _dls = _future.result()
-                            _meeting_deadlines[_code] = _dls
-                            _badge = _meeting_time_badge(_dls)
-                            if _badge:
-                                _meeting_badges[_code] = _badge
-                        except Exception:
-                            pass
-
-            st.session_state[_meeting_badges_key] = _meeting_badges
-            st.session_state[_meeting_deadlines_key] = _meeting_deadlines
-
-        meeting_badges = st.session_state.get(_meeting_badges_key, {})
-        meeting_deadlines = st.session_state.get(_meeting_deadlines_key, {})
+        # 朝/昼/夜表示と「締切15分以内の次レース」判定は、
+        # 事前取得済みの締切一覧(deadlines)からその場で計算する。
+        meeting_badges = {}
+        meeting_deadlines = {}
+        for _code, _info in schedule_by_jcd.items():
+            _dls = _info.get("deadlines") or {}
+            meeting_deadlines[_code] = _dls
+            _badge = _meeting_time_badge(_dls)
+            if _badge:
+                meeting_badges[_code] = _badge
     except Exception as e:
         st.caption("本日の開催状況を取得できませんでした（会場は手動で選べます）。")
         st.code(str(e))
@@ -2061,12 +2069,17 @@ with tab1:
                 f"⛔ {VENUES[jcd]}は本日の開催が中止になっています。"
             )
 
-        # 会場を選んだら、その日の1R〜12R締切予定時刻を一度取得して固定。
+        # 会場を選んだら、その日の1R〜12R締切予定時刻を表示する。
+        # 通常は事前取得済みのスケジュール(schedule_by_jcd)に含まれる
+        # deadlinesを使う。含まれていない場合だけ公式サイトから
+        # 直接取得する（フォールバック）。
         # 締切15分以内のレースだけ「時刻」を赤系で強調する。
-        try:
-            deadlines = cached_fetch_deadlines(d.strftime("%Y%m%d"), jcd)
-        except Exception:
-            deadlines = {}
+        deadlines = schedule_by_jcd.get(jcd, {}).get("deadlines") or {}
+        if not deadlines:
+            try:
+                deadlines = cached_fetch_deadlines(d.strftime("%Y%m%d"), jcd)
+            except Exception:
+                deadlines = {}
 
         # R選択と締切表示を一体化。
         # カードをタップした時点で、そのRの公式データ取得まで実行する。
@@ -3431,12 +3444,7 @@ with tab1:
     # ページ最上部である必要はない。選択中会場・予想結果は維持する。
     def _refresh_venues_from_long_pull():
         _date_key = d.strftime("%Y%m%d")
-        for _key in (
-            f"schedule_once_{_date_key}",
-            f"meeting_badges_{_date_key}",
-            f"meeting_deadlines_{_date_key}",
-        ):
-            st.session_state.pop(_key, None)
+        st.session_state.pop(f"daily_schedule_{_date_key}", None)
 
     st.markdown(
         """
