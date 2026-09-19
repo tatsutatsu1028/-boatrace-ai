@@ -81,9 +81,41 @@ _result_tracker.save_settings = _boat_ai_save_settings
 
 # 学習データは本番固定では常に sample_history.csv を使う。
 # 管理画面のCSVアップロードは確認・研究用として残すが、本番固定の学習器は自動固定と同一にする。
-def _boat_ai_train(_history):
+#
+# train()自体はsample_history.csv（約3.1万行）に加え、内部でhistory_full.csv
+# （約8.6万行）も読んで2着・3着モデル等を学習するため、予想のたびに毎回
+# 全量再学習すると重い。学習に使うCSVの更新日時・サイズが変わっていなければ
+# st.cache_resourceでプロセス全体に共有されたモデルを再利用し、変わった
+# ときだけ再学習する。train()自体の挙動・出力は変えず、呼ばれる頻度だけを
+# 最適化する。
+_TRAIN_DATA_FILES = ("sample_history.csv", "history_full.csv")
+
+
+def _boat_ai_train_cache_key():
+    """学習に使う各CSVの更新日時とサイズからキャッシュキーを作る。
+
+    ファイル内容のハッシュ計算は約8.6万行のCSVを毎回読み直すことになり
+    本末転倒なので、mtime+size（1回のstat呼び出し）で更新検知する。
+    """
+    key = []
+    for name in _TRAIN_DATA_FILES:
+        path = Path(__file__).with_name(name)
+        try:
+            stat = path.stat()
+            key.append((name, stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            key.append((name, None, None))
+    return tuple(key)
+
+
+@st.cache_resource(show_spinner=False)
+def _boat_ai_train_cached(cache_key):
     canonical = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
     return _prediction._boat_ai_original_train(canonical)
+
+
+def _boat_ai_train(_history):
+    return _boat_ai_train_cached(_boat_ai_train_cache_key())
 
 
 _prediction.train = _boat_ai_train
