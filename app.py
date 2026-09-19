@@ -247,25 +247,6 @@ def _boat_ai_confidence(first, race):
     return label
 
 
-def _fixed_research_rule_status(final, tickets):
-    """固定時点で確定できるAだけ保存。B/C/Dは追跡オッズが必要なのでNone。"""
-    try:
-        p1_prob = float(pd.to_numeric(final["p_first"], errors="coerce").max())
-    except Exception:
-        p1_prob = 0.0
-
-    try:
-        t = tickets.copy()
-        t["stake"] = pd.to_numeric(t.get("stake", 0), errors="coerce").fillna(0)
-        purchased = t[t["stake"] > 0]
-        mainline = purchased[purchased["group"].astype(str).str.strip().eq("本線")]
-        a_ok = bool(p1_prob >= 0.80 and len(mainline))
-    except Exception:
-        a_ok = False
-
-    return {"A": a_ok, "B": None, "C": None, "D": None}
-
-
 def _boat_ai_snapshot_payload(
     final,
     tickets,
@@ -284,7 +265,6 @@ def _boat_ai_snapshot_payload(
         label = ""
     if label in {"A", "B", "C"}:
         payload["confidence"] = label
-    payload["research_rules"] = _fixed_research_rule_status(final, tickets)
     return payload
 
 

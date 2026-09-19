@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
-from official_fetcher import VENUES, fetch_odds3t, fetch_race_result
+from official_fetcher import VENUES, fetch_race_result
 from odds_rollup import rollup_and_prune, DEFAULT_RETENTION_DAYS
 # スレッズ投稿は任意機能。threads_poster.py を置いていない場合でも
 # オッズ追跡・結果確定・集約は動くようにしておく。
@@ -35,7 +35,6 @@ WATCHLIST_TABLE = "odds_watchlist"
 SNAPSHOT_TABLE = "odds_snapshots"
 PREDICTION_SNAPSHOT_TABLE = "prediction_snapshots"
 RESULT_TABLE = "prediction_results"
-RESEARCH_RULE_TABLE = "research_rule_results"
 
 # 締切時刻を取得できない場合の旧来の安全停止。
 MAX_TRACK_MINUTES = 180
@@ -199,51 +198,6 @@ def _fetch_deadline(race_date, jcd, rno):
             flush=True,
         )
         return None
-
-
-def _save_odds(race_date, jcd, rno, odds_df):
-    if odds_df is None or len(odds_df) == 0:
-        return 0
-
-    fetched_at = datetime.now(timezone.utc).isoformat()
-
-    payload = []
-    for _, row in odds_df.iterrows():
-        combo = str(row.get("combo", "")).strip()
-
-        try:
-            odd = float(row.get("odds"))
-        except Exception:
-            continue
-
-        if not combo or odd < 1:
-            continue
-
-        payload.append(
-            {
-                "race_date": str(race_date),
-                "jcd": str(jcd).zfill(2),
-                "rno": int(rno),
-                "combo": combo,
-                "odds": odd,
-                "fetched_at": fetched_at,
-            }
-        )
-
-    if not payload:
-        return 0
-
-    endpoint = f"{SUPABASE_URL}/rest/v1/{SNAPSHOT_TABLE}"
-
-    r = requests.post(
-        endpoint,
-        headers=_headers("return=minimal"),
-        json=payload,
-        timeout=30,
-    )
-    r.raise_for_status()
-
-    return len(payload)
 
 
 # -------------------------------------------------
@@ -537,239 +491,6 @@ def _insert_result(record):
 
 
 
-def _tracked_odds_bounds(race_date, jcd, rno):
-    """
-    対象レースの各comboについて、
-    first_odds / last_odds / snapshots を返す。
-    研究ルールB/C専用で、本番予想・購入には影響しない。
-    """
-    endpoint = (
-        f"{SUPABASE_URL}/rest/v1/{SNAPSHOT_TABLE}"
-        f"?race_date=eq.{_normalize_race_date(race_date)}"
-        f"&jcd=eq.{str(jcd).zfill(2)}"
-        f"&rno=eq.{int(rno)}"
-        "&select=combo,odds,fetched_at"
-        "&order=fetched_at.asc"
-    )
-    r = requests.get(endpoint, headers=_headers(), timeout=30)
-    r.raise_for_status()
-    rows = r.json() or []
-
-    out = {}
-    for row in rows:
-        combo = str(row.get("combo", "")).strip()
-        odd = _safe_float(row.get("odds"), None)
-        fetched_at = str(row.get("fetched_at", "") or "")
-        if not combo or odd is None:
-            continue
-
-        item = out.setdefault(
-            combo,
-            {
-                "first_odds": odd,
-                "last_odds": odd,
-                "first_fetched_at": fetched_at,
-                "last_fetched_at": fetched_at,
-                "snapshots": 0,
-            },
-        )
-        item["last_odds"] = odd
-        item["last_fetched_at"] = fetched_at
-        item["snapshots"] += 1
-
-    return out
-
-
-def _rule_ticket_metrics(snapshot, official_result, odds_bounds):
-    """
-    研究ルールA/B/C/Dを仮想精算する。
-    実際の購入・予想・資金配分は一切変更しない。
-
-    A: 本命80%以上 + 本線のみ
-    B: 本命70%以上 + 本線 + 最終追跡EV>=1.2
-    C: 全購入買い目のうち、
-       初回追跡EV>=1.2 かつ オッズ変動 -10%以上 +10%未満
-    """
-    payload = _snapshot_payload(snapshot)
-    final = [x for x in (payload.get("final", []) or []) if isinstance(x, dict)]
-    tickets = [x for x in (payload.get("tickets", []) or []) if isinstance(x, dict)]
-
-    if not final:
-        raise ValueError("研究判定用の final がありません。")
-
-    ranked = sorted(
-        final,
-        key=lambda x: _safe_float(x.get("p_first"), -1.0),
-        reverse=True,
-    )
-    p1_prob = _safe_float(ranked[0].get("p_first"), 0.0)
-
-    actual_combo = str(official_result["trifecta"])
-    payout100 = _safe_int(official_result["trifecta_payout_per_100"], 0)
-
-    def settle(selected):
-        stake = sum(max(0, _safe_int(x.get("stake"), 0)) for x in selected)
-        hit_stake = sum(
-            max(0, _safe_int(x.get("stake"), 0))
-            for x in selected
-            if str(x.get("combo", "")).strip() == actual_combo
-        )
-        payout = int(payout100 * hit_stake / 100) if hit_stake > 0 else 0
-        return {
-            "stake": int(stake),
-            "payout": int(payout),
-            "profit": int(payout - stake),
-            "hit": bool(hit_stake > 0),
-        }
-
-    purchased = [
-        x for x in tickets
-        if _safe_int(x.get("stake"), 0) > 0
-    ]
-
-    mainline = [
-        x for x in purchased
-        if str(x.get("group", "")).strip() == "本線"
-    ]
-
-    # A: 本命80%以上 + 本線のみ
-    rule_a_eligible = p1_prob >= 0.80 and bool(mainline)
-    a = settle(mainline) if rule_a_eligible else {
-        "stake": 0, "payout": 0, "profit": 0, "hit": False
-    }
-
-    # B: 本命70%以上 + 本線 + 最終追跡EV>=1.2
-    rule_b_tickets = []
-    if p1_prob >= 0.70:
-        for x in mainline:
-            combo = str(x.get("combo", "")).strip()
-            ai_prob = _safe_float(x.get("prob"), 0.0)
-            bound = odds_bounds.get(combo, {})
-            last_odd = bound.get("last_odds")
-            if last_odd is not None and ai_prob * last_odd >= 1.20:
-                rule_b_tickets.append(x)
-
-    rule_b_eligible = bool(rule_b_tickets)
-    b = settle(rule_b_tickets) if rule_b_eligible else {
-        "stake": 0, "payout": 0, "profit": 0, "hit": False
-    }
-
-    # C: 初回追跡EV>=1.2 + オッズ変動 -10%〜+10%
-    # 「本線のみ」ではなく、実際にstake>0だった全購入買い目を対象にする。
-    rule_c_tickets = []
-    for x in purchased:
-        combo = str(x.get("combo", "")).strip()
-        ai_prob = _safe_float(x.get("prob"), 0.0)
-        bound = odds_bounds.get(combo, {})
-        first_odd = bound.get("first_odds")
-        last_odd = bound.get("last_odds")
-        snapshots = _safe_int(bound.get("snapshots"), 0)
-
-        if first_odd is None or last_odd is None or snapshots < 2 or first_odd <= 0:
-            continue
-
-        first_ev = ai_prob * first_odd
-        change_pct = (last_odd - first_odd) / first_odd * 100.0
-
-        if first_ev >= 1.20 and -10.0 <= change_pct < 10.0:
-            rule_c_tickets.append(x)
-
-    rule_c_eligible = bool(rule_c_tickets)
-    c = settle(rule_c_tickets) if rule_c_eligible else {
-        "stake": 0, "payout": 0, "profit": 0, "hit": False
-    }
-
-    # D: BとCが同時に成立したレースで、C方式の買い目を仮想精算する。
-    # A/B/Cおよび本番予想・購入ロジックは変更しない。
-    rule_d_eligible = bool(rule_b_eligible and rule_c_eligible)
-    d = settle(rule_c_tickets) if rule_d_eligible else {
-        "stake": 0, "payout": 0, "profit": 0, "hit": False
-    }
-
-    return (
-        p1_prob,
-        rule_a_eligible, a,
-        rule_b_eligible, b,
-        rule_c_eligible, c,
-        rule_d_eligible, d,
-    )
-
-
-def _upsert_research_rules(snapshot, race_date, jcd, rno, official_result):
-    """研究ルールA/B/C/Dの結果を別テーブルへ保存する。"""
-    ctx = _race_key(race_date, jcd, rno)
-    odds_bounds = _tracked_odds_bounds(race_date, jcd, rno)
-
-    (
-        p1_prob,
-        a_ok, a,
-        b_ok, b,
-        c_ok, c,
-        d_ok, d,
-    ) = _rule_ticket_metrics(
-        snapshot,
-        official_result,
-        odds_bounds,
-    )
-
-    record = {
-        "race_key": ctx,
-        "race_date": _iso_race_date(race_date),
-        "venue": str(VENUES.get(str(jcd).zfill(2), str(jcd).zfill(2))),
-        "race_no": int(rno),
-        "evaluated_at": datetime.now(JST).isoformat(timespec="seconds"),
-        "p1_prob": p1_prob,
-
-        "rule_a_eligible": bool(a_ok),
-        "rule_a_stake": a["stake"],
-        "rule_a_payout": a["payout"],
-        "rule_a_profit": a["profit"],
-        "rule_a_hit": a["hit"],
-
-        "rule_b_eligible": bool(b_ok),
-        "rule_b_stake": b["stake"],
-        "rule_b_payout": b["payout"],
-        "rule_b_profit": b["profit"],
-        "rule_b_hit": b["hit"],
-
-        "rule_c_eligible": bool(c_ok),
-        "rule_c_stake": c["stake"],
-        "rule_c_payout": c["payout"],
-        "rule_c_profit": c["profit"],
-        "rule_c_hit": c["hit"],
-
-        "rule_d_eligible": bool(d_ok),
-        "rule_d_stake": d["stake"],
-        "rule_d_payout": d["payout"],
-        "rule_d_profit": d["profit"],
-        "rule_d_hit": d["hit"],
-
-        "last_odds_available": bool(odds_bounds),
-    }
-
-    endpoint = (
-        f"{SUPABASE_URL}/rest/v1/{RESEARCH_RULE_TABLE}"
-        "?on_conflict=race_key"
-    )
-    r = requests.post(
-        endpoint,
-        headers=_headers("resolution=merge-duplicates,return=minimal"),
-        json=record,
-        timeout=30,
-    )
-    r.raise_for_status()
-
-    print(
-        "[RESEARCH] saved:",
-        ctx,
-        "A=", a_ok, a["profit"],
-        "B=", b_ok, b["profit"],
-        "C=", c_ok, c["profit"],
-        "D=", d_ok, d["profit"],
-        flush=True,
-    )
-
-
 def _try_finalize_result(race_date, jcd, rno):
     """
     結果確定済みなら prediction_results へ保存して True。
@@ -824,24 +545,6 @@ def _try_finalize_result(race_date, jcd, rno):
     )
 
     _insert_result(record)
-
-    # 研究ルールA/B/C/Dは本番購入ロジックとは完全に分離して仮想精算する。
-    try:
-        _upsert_research_rules(
-            snapshot,
-            race_date,
-            jcd,
-            rno,
-            official_result,
-        )
-    except Exception as e:
-        print(
-            "[RESEARCH] save skipped:",
-            ctx,
-            type(e).__name__,
-            str(e),
-            flush=True,
-        )
 
     # 保存成功後だけwatchlistを止める。
     _deactivate(race_date, jcd, rno)
@@ -980,46 +683,6 @@ def main():
                     flush=True,
                 )
             continue
-
-        # 締切前だけオッズを保存。
-        try:
-            # 他の呼び出し（締切取得・結果取得・race_key生成）は全て
-            # 正規化済みの日付を渡している。ここだけ生の値を渡していたため、
-            # Supabase側の列型によっては "2026-08-22" が返ってきて
-            # 不正なURLになり、エラーも出さずに0行のまま
-            # 追跡が機能しなくなる可能性があった。
-            hd = _normalize_race_date(race_date)
-
-            odds = fetch_odds3t(hd, jcd, rno)
-
-            count = _save_odds(
-                hd,
-                jcd,
-                rno,
-                odds,
-            )
-
-            print(
-                "[TRACK_ODDS] saved:",
-                race_date,
-                jcd,
-                rno,
-                "rows=",
-                count,
-                flush=True,
-            )
-
-        except Exception as e:
-            # 1レース失敗しても他の追跡対象は続行する。
-            print(
-                "[TRACK_ODDS] error:",
-                race_date,
-                jcd,
-                rno,
-                type(e).__name__,
-                str(e),
-                flush=True,
-            )
 
     # -------------------------------------------------
     # 古いオッズ生データの集約とクリーンアップ

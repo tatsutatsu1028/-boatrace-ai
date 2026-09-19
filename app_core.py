@@ -115,54 +115,6 @@ def _secret_text(name):
 AUTH_COOKIE_NAME = "boat_ai_auth_v2"
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _research_rule_status_map():
-    """保存済みレース用に、研究ルールA/B/C/Dの確定判定だけを取得する。"""
-    try:
-        url, key = supabase_config()
-        if not url or not key:
-            return {}
-
-        endpoint = f"{url.rstrip('/')}/rest/v1/rpc/get_research_rule_statuses"
-        headers = {
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-        r = requests.post(endpoint, headers=headers, json={}, timeout=15)
-        r.raise_for_status()
-        rows = r.json() or []
-
-        out = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            race_key = str(row.get("race_key", "") or "").strip()
-            if not race_key:
-                continue
-
-            active = []
-            if bool(row.get("rule_a_eligible")):
-                active.append("A")
-            if bool(row.get("rule_b_eligible")):
-                active.append("B")
-            if bool(row.get("rule_c_eligible")):
-                active.append("C")
-            if bool(row.get("rule_d_eligible")):
-                active.append("D")
-
-            out[race_key] = {
-                "label": "・".join(active) if active else "—",
-                "A": bool(row.get("rule_a_eligible")),
-                "B": bool(row.get("rule_b_eligible")),
-                "C": bool(row.get("rule_c_eligible")),
-                "D": bool(row.get("rule_d_eligible")),
-            }
-        return out
-    except Exception:
-        return {}
-
-
 @st.cache_data(ttl=30, show_spinner=False)
 def _auto_random_progress():
     """自動固定処理と同じ条件で、本日の固定件数と設定を取得する。"""
@@ -224,32 +176,6 @@ def _auto_random_progress():
         return None
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _research_rule_d_progress():
-    """Supabase RPCからD対象数だけを取得する。研究テーブル本体は公開しない。"""
-    try:
-        url, key = supabase_config()
-        if not url or not key:
-            return None
-        endpoint = f"{url.rstrip('/')}/rest/v1/rpc/get_rule_d_progress"
-        headers = {
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-        r = requests.post(endpoint, headers=headers, json={}, timeout=10)
-        r.raise_for_status()
-        value = r.json()
-        # scalar RPC は数値そのもの、環境によっては1要素配列で返る場合にも対応。
-        if isinstance(value, list) and value:
-            value = value[0]
-        if isinstance(value, dict):
-            value = value.get("get_rule_d_progress", value.get("count"))
-        return int(value) if value is not None else None
-    except Exception:
-        return None
-
-
 def _complete_adaptive_tickets(tickets, tri, odds, main_points, cover_points):
     """予定点数に足りない買い目を、未採用の確率上位から補充する。"""
     out = tickets.copy().drop_duplicates("combo", keep="first").reset_index(drop=True)
@@ -286,67 +212,6 @@ def _complete_adaptive_tickets(tickets, tri, odds, main_points, cover_points):
     return out
 
 
-def _current_research_rule_status(final, tickets, odds_history):
-    """
-    AI予想画面用の研究ルール判定。
-    Aは予想時点で確定可能。B/C/Dは追跡中オッズの現時点値による暫定判定。
-    本番予想・買い目・資金配分は変更しない。
-    """
-    try:
-        f = final.copy()
-        f["p_first"] = pd.to_numeric(f["p_first"], errors="coerce")
-        p1_prob = float(f["p_first"].max()) if len(f) else 0.0
-    except Exception:
-        p1_prob = 0.0
-
-    t = tickets.copy() if tickets is not None else pd.DataFrame()
-    if len(t):
-        t["stake"] = pd.to_numeric(t.get("stake", 0), errors="coerce").fillna(0).astype(int)
-        t["prob"] = pd.to_numeric(t.get("prob", 0), errors="coerce").fillna(0.0)
-        purchased = t[t["stake"] > 0].copy()
-    else:
-        purchased = pd.DataFrame()
-
-    mainline = purchased[purchased.get("group", pd.Series(index=purchased.index, dtype=str)).astype(str).str.strip() == "本線"] if len(purchased) else purchased
-    a_ok = bool(p1_prob >= 0.80 and len(mainline))
-
-    bounds = {}
-    if odds_history is not None and len(odds_history):
-        h = odds_history.copy()
-        if "fetched_at" in h.columns:
-            h = h.sort_values("fetched_at")
-        for combo, g in h.groupby("combo", sort=False):
-            vals = pd.to_numeric(g["odds"], errors="coerce").dropna()
-            if len(vals):
-                bounds[str(combo).strip()] = {
-                    "first": float(vals.iloc[0]),
-                    "last": float(vals.iloc[-1]),
-                    "snapshots": int(len(vals)),
-                }
-
-    b_tickets = []
-    if p1_prob >= 0.70:
-        for _, row in mainline.iterrows():
-            combo = str(row.get("combo", "")).strip()
-            bound = bounds.get(combo)
-            if bound and float(row.get("prob", 0) or 0) * bound["last"] >= 1.20:
-                b_tickets.append(combo)
-    b_ok = bool(b_tickets)
-
-    c_tickets = []
-    for _, row in purchased.iterrows():
-        combo = str(row.get("combo", "")).strip()
-        bound = bounds.get(combo)
-        if not bound or bound["snapshots"] < 2 or bound["first"] <= 0:
-            continue
-        first_ev = float(row.get("prob", 0) or 0) * bound["first"]
-        change_pct = (bound["last"] - bound["first"]) / bound["first"] * 100.0
-        if first_ev >= 1.20 and -10.0 <= change_pct < 10.0:
-            c_tickets.append(combo)
-    c_ok = bool(c_tickets)
-    d_ok = bool(b_ok and c_ok)
-
-    return {"A": a_ok, "B": b_ok, "C": c_ok, "D": d_ok, "p1_prob": p1_prob, "snapshots": int(odds_history["fetched_at"].nunique()) if odds_history is not None and len(odds_history) and "fetched_at" in odds_history.columns else 0}
 AUTH_TTL_SECONDS = 24 * 60 * 60
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -1521,10 +1386,6 @@ with tab4:
 
         st.markdown("#### 保存済みレース")
 
-        # 研究ルールは結果確定後に research_rule_results へ保存された
-        # A/B/C/D の確定判定を表示する。予想画面の「暫定判定」とは別物。
-        _rule_status_map = _research_rule_status_map()
-
         show_cols = [
             "race_date","venue","race_no","trifecta_actual","p1_lane","p1_prob",
             "candidate_count","candidate_hit","candidate_hit_rank",
@@ -1532,15 +1393,6 @@ with tab4:
         ]
         show_cols = [c for c in show_cols if c in results_df.columns]
         show = results_df[show_cols].copy()
-
-        if "race_key" in results_df.columns:
-            show["研究ルール"] = (
-                results_df["race_key"]
-                .astype(str)
-                .map(lambda k: _rule_status_map.get(k, {}).get("label", "未判定"))
-            )
-        else:
-            show["研究ルール"] = "未判定"
 
         show = show.rename(columns={
             "race_date":"日付",
@@ -1558,14 +1410,12 @@ with tab4:
             "roi":"回収倍率",
         })
 
-        # スマホで最初に見えるよう、研究ルールをRのすぐ後ろへ移動。
         _preferred_show_cols = [
-            "日付", "場", "R", "研究ルール", "実3連単", "AI本命", "本命確率",
+            "日付", "場", "R", "実3連単", "AI本命", "本命確率",
             "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
         ]
         show = show[[c for c in _preferred_show_cols if c in show.columns]]
 
-        st.caption("研究ルールはレース終了後に確定したA/B/C/D判定です。『—』はどのルールにも非該当、『未判定』は研究結果がまだ保存されていないレースです。")
         st.dataframe(
             show.sort_values(["日付","場","R"], ascending=False),
             use_container_width=True,
@@ -1733,13 +1583,6 @@ with tab4:
             actual_lanes = actual_combo.split("-") if "-" in actual_combo else []
 
             st.markdown(f"##### {sel['race_date']} {sel['venue']} {int(sel['race_no'])}R")
-
-            _detail_rule = "未判定"
-            if "race_key" in sel.index:
-                _detail_rule = _rule_status_map.get(
-                    str(sel.get("race_key", "")), {}
-                ).get("label", "未判定")
-            st.caption(f"🧪 確定研究ルール：{_detail_rule}")
 
             dc1, dc2, dc3 = st.columns(3)
             with dc1:
@@ -2680,40 +2523,6 @@ with tab1:
                         "1着確率1位と2位の差が40ポイント未満のため、"
                         "買い目は検証用予想として表示し、推奨投資額を0円としています。"
                     )
-
-                # -------------------------------------------------
-                # 研究ルール A/B/C/D の現在判定（表示専用）
-                # -------------------------------------------------
-                _rule_hist = load_odds_history(d.strftime("%Y%m%d"), jcd, rno)
-                _rule_status = _current_research_rule_status(final, tickets, _rule_hist)
-                with st.expander("🧪 研究ルール判定（補助研究）", expanded=False):
-                    _a_mark = "✅ 該当" if _rule_status["A"] else "❌ 非該当"
-                    _b_mark = "✅ 暫定該当" if _rule_status["B"] else "❌ 暫定非該当"
-                    _c_mark = "✅ 暫定該当" if _rule_status["C"] else "❌ 暫定非該当"
-                    _d_mark = "🔥 暫定該当" if _rule_status["D"] else "❌ 暫定非該当"
-                    st.markdown(
-                        f"**A：{_a_mark}**  — 本命80%以上＋本線  \n"
-                        f"**B：{_b_mark}**  — 本命70%以上＋本線＋現在の追跡EV 1.20以上  \n"
-                        f"**C：{_c_mark}**  — 初回EV 1.20以上＋オッズ変動 -10%〜+10%  \n"
-                        f"**D：{_d_mark}**  — BとCが両方成立"
-                    )
-                    st.caption(
-                        f"現在の本命確率：{_rule_status['p1_prob']:.1%} ／ "
-                        f"オッズ記録：{_rule_status['snapshots']}時点。"
-                        "B/C/Dは締切までオッズが動くため暫定判定です。研究表示のみで、本番予想・買い目・資金配分は変更しません。"
-                    )
-
-                    _d_count = _research_rule_d_progress()
-                    if _d_count is not None:
-                        _goal = 50
-                        _remain = max(0, _goal - _d_count)
-                        st.progress(min(_d_count / _goal, 1.0))
-                        if _d_count < _goal:
-                            st.info(f"📈 ルールD進捗：{_d_count} / {_goal}R　あと{_remain}R")
-                        else:
-                            st.success(f"🎯 ルールDが{_d_count}Rに到達しました。第1回・未来データ耐久検証のタイミングです。")
-                    else:
-                        st.caption("ルールDの累計件数は現在取得できませんでした。")
 
                 # -------------------------------------------------
                 # note投稿管理（オーナー専用）
