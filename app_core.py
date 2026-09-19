@@ -2546,8 +2546,14 @@ with tab1:
                             original_display_scale=0.0,
                         )
 
-                        # 本番予想を先に表示する。研究用比較は「検証用に固定」する時だけ計算する。
-                        research_variants = {}
+                        # 研究用の比較は別計算。final（本番予想）は一切変更しない。
+                        research_variants = research_prediction_variants(
+                            model,
+                            work,
+                            display_weight=display_weight,
+                            weather_weight=weather_weight,
+                            venue_course_weight=venue_course_weight,
+                        )
                         tri = trifecta(final)
                         ticket_plan = adaptive_ticket_plan(final)
                         target_points = int(ticket_plan["point_count"])
@@ -2840,6 +2846,7 @@ with tab1:
                                       <button id="copy-title" style="padding:9px 14px;cursor:pointer;">📋 タイトルをコピー</button>
                                       <button id="copy-body" style="padding:9px 14px;cursor:pointer;">📋 本文をコピー</button>
                                       <button id="copy-all" style="padding:9px 14px;cursor:pointer;">📋 タイトル＋本文をコピー</button>
+                                      <button id="copy-tags" style="padding:9px 14px;cursor:pointer;">📋 ハッシュタグをコピー</button>
                                       <span id="copy-status" style="align-self:center;font-size:13px;"></span>
                                     </div>
                                     <script>
@@ -2857,6 +2864,7 @@ with tab1:
                                     document.getElementById("copy-title").onclick = () => copyText(data.title);
                                     document.getElementById("copy-body").onclick = () => copyText(data.body);
                                     document.getElementById("copy-all").onclick = () => copyText(data.title + "\\n\\n" + data.body);
+                                    document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
                                     </script>
                                     """,
                                     height=58,
@@ -3010,20 +3018,6 @@ with tab1:
                                         "締切時刻を過ぎているため、本番検証用の予想は固定できません。"
                                     )
 
-                            _research_for_snapshot = st.session_state["result"].get(
-                                "research_variants", {}
-                            )
-                            if not _research_for_snapshot:
-                                with st.spinner("研究用データを保存中…"):
-                                    _research_for_snapshot = research_prediction_variants(
-                                        model,
-                                        work_result,
-                                        display_weight=display_weight,
-                                        weather_weight=weather_weight,
-                                        venue_course_weight=venue_course_weight,
-                                    )
-                                st.session_state["result"]["research_variants"] = _research_for_snapshot
-
                             snap = save_prediction_snapshot(
                                 race_key=ctx,
                                 race_date=d.isoformat(),
@@ -3031,7 +3025,10 @@ with tab1:
                                 race_no=rno,
                                 final=final,
                                 tickets=tickets,
-                                research_variants=_research_for_snapshot,
+                                research_variants=st.session_state["result"].get(
+                                    "research_variants",
+                                    {},
+                                ),
                                 race_features=work_result,
                                 snapshot_kind=snapshot_kind,
                                 collector_name=COLLECTOR_NAME,
