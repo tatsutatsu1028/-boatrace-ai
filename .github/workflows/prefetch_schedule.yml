@@ -6,7 +6,10 @@ on:
     # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
     # 評価される（指定しても無視される）。JST 07:00 に実行するため、
     # 9時間分ずらしたUTC 22:00（前日）で指定する。
-    - cron: "0 22 * * *"
+    # 毎時0分ちょうどはGitHub Actions全体でscheduleイベントが集中し、
+    # 実行が数時間単位で遅延・欠落することがあるため（GitHub公式ドキュメント
+    # も0/15/30/45分ちょうどを避けるよう推奨）、5分ずらして実行する。
+    - cron: "5 22 * * *"
 
 jobs:
   prefetch-schedule:
