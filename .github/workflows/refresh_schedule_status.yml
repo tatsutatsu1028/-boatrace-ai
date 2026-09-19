@@ -3,8 +3,12 @@ name: Refresh Schedule Status
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 8-22 * * *"
-      timezone: "Asia/Tokyo"
+    # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
+    # 評価される（指定しても無視される）。JST 8:00〜22:30 の30分おきにするため、
+    # 9時間分ずらしたUTC 23:00（前日）〜13:30で指定する
+    # （UTC日付をまたぐため2行に分割）。
+    - cron: "*/30 0-13 * * *"
+    - cron: "*/30 23 * * *"
 
 jobs:
   refresh-schedule-status:

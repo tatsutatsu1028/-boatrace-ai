@@ -3,8 +3,10 @@ name: Prefetch Daily Schedule
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 7 * * *"
-      timezone: "Asia/Tokyo"
+    # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
+    # 評価される（指定しても無視される）。JST 07:00 に実行するため、
+    # 9時間分ずらしたUTC 22:00（前日）で指定する。
+    - cron: "0 22 * * *"
 
 jobs:
   prefetch-schedule:
