@@ -46,6 +46,17 @@ RESULT_WAIT_MINUTES = 120
 
 JST = ZoneInfo("Asia/Tokyo")
 
+# 今節成績・当地コース別成績・水面のコース別特性。
+# prediction_snapshots.payload_json の final 行にそのまま入っているので、
+# prediction_results.lane_probs_json へもここで転記する。
+LANE_CONTEXT_COLUMNS = (
+    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_st", "current_meet_races",
+    "course_top3_rate", "course_avg_st", "course_start_rank",
+    "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
+    "venue_course_4th", "venue_course_5th", "venue_course_6th",
+)
+
 
 def _headers(prefer=None):
     h = {
@@ -402,7 +413,7 @@ def _build_result_record(
     lane_payload = []
     for row in sorted(valid_final, key=lambda x: _safe_int(x.get("lane"), 99)):
         item = {}
-        for c in ("lane", "racer_name", "p_first", "reason"):
+        for c in ("lane", "racer_name", "p_first", "reason", *LANE_CONTEXT_COLUMNS):
             if c in row:
                 item[c] = _clean_json_value(row.get(c))
         lane_payload.append(item)
