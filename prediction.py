@@ -409,7 +409,22 @@ def _rank_score_higher_better(series):
     return -_rank_score_lower_better(series)
 
 
-CHALLENGER_VERSION = "conditional-challenger-v1-20260917"
+CHALLENGER_VERSION = "conditional-challenger-v2-20260919"
+
+# 各分類（選手・展示・コース・今節）で「本命艇を上回る」と判定する
+# rankスコア差のしきい値。rankスコアは同一レース内の順位だけで決まる
+# z値（6艇なら隣接順位の差は概ね0.4）なので、0.05という旧しきい値は
+# 1ランクにも満たない僅差でも成立してしまい、「複数根拠が一致」という
+# 設計意図に対して判定が緩すぎた。実データ（2026-09シャドー検証、
+# 発火13件）でも、この緩い判定だけでは対抗艇が実際に1着になった
+# 割合は本命艇がそのまま1着だった割合を下回っており、根拠として
+# 弱いことを裏付けている。
+_CHALLENGER_CATEGORY_THRESHOLD = 0.20
+
+# 4分類の重み付き合計スコア（challenger_score）での最小優位幅。
+# 旧実装は `advantage > 0` と実質しきい値なしだったため、僅差でも
+# 補正対象になっていた。分類別しきい値と整合する水準に引き上げる。
+_CHALLENGER_ADVANTAGE_FLOOR = 0.15
 
 
 def _conditional_challenger_components(race):
@@ -479,11 +494,13 @@ def conditional_challenger_prediction(
     strength=1.50,
     max_probability_shift=0.10,
 ):
-    """外艇の複数根拠が一致するときだけ1着確率を試験補正する。
+    """外艇の複数根拠が明確に一致するときだけ1着確率を試験補正する。
 
     現時点では保存・比較用のシャドー予想として使用する。1号艇本命が
     45〜70%のときに限り、選手・展示・コース・今節のうち3分類以上で
-    本命艇を上回る外艇だけを補正する。確率変化は1艇10ポイント以内。
+    本命艇を明確に（rankスコア差0.20超）上回り、かつ重み付き合計
+    スコアでも十分な優位（0.15超）がある外艇だけを補正する。
+    確率変化は1艇10ポイント以内。
     """
     if final is None:
         return final
@@ -539,7 +556,8 @@ def conditional_challenger_prediction(
     evidence = np.zeros(len(out), dtype=int)
     for col in category_cols:
         evidence += (
-            out[col].to_numpy(dtype=float) - float(favorite_row[col]) > 0.05
+            out[col].to_numpy(dtype=float) - float(favorite_row[col])
+            > _CHALLENGER_CATEGORY_THRESHOLD
         ).astype(int)
 
     score = out["challenger_score_new"].to_numpy(dtype=float)
@@ -548,7 +566,7 @@ def conditional_challenger_prediction(
     eligible = (
         out["lane"].ne(favorite_lane).to_numpy()
         & (evidence >= 3)
-        & (advantage > 0)
+        & (advantage >= _CHALLENGER_ADVANTAGE_FLOOR)
     )
     log_bonus = np.where(eligible, float(strength) * advantage, 0.0)
     if not np.any(log_bonus > 0):
