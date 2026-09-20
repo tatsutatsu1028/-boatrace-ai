@@ -1813,6 +1813,7 @@ def rank_tickets(
     close_third_gap=0.03,
     close_third_coverage=4,
     include_nonrecommended=False,
+    second_favorite_n=0,
 ):
     """
     3連単の確率表から購入候補を選ぶ。
@@ -1833,6 +1834,13 @@ def rank_tickets(
     広げる。買い目総数は増やさず、重複する低確率買い目と入れ替える。
     include_nonrecommended=True なら、見送り判定でも予想買い目を返し、
     recommended=False を付ける。
+
+    second_favorite_n（既定0＝従来通り）を1以上にすると、1着確率2位の艇
+    （2番手候補）を1着に据えた買い目を最低その点数だけ確保する。本命1着
+    固定に偏ると、本命以外が1着になったレースで買い目が一度も的中しない
+    という弱点があるための対応。確保のために、既存候補のうち2番手候補を
+    1着に含まない買い目の中で最も確率が低いものから順に差し替える
+    （本線/抑え/穴の点数と保険買い目は維持する）。
     """
     x = tri.copy()
     x["prob"] = pd.to_numeric(x["prob"], errors="coerce").fillna(0.0)
@@ -1847,6 +1855,7 @@ def rank_tickets(
     x["expected_return"] = x["prob"] * x["odds"]
 
     favorite_lane = None
+    second_favorite_lane = None
     recommended = True
     if first is not None and len(first) and "p_first" in first.columns:
         ranked_first = first[["lane", "p_first"]].copy()
@@ -1858,6 +1867,8 @@ def rank_tickets(
         )
         if len(ranked_first):
             favorite_lane = int(ranked_first.iloc[0]["lane"])
+        if len(ranked_first) >= 2:
+            second_favorite_lane = int(ranked_first.iloc[1]["lane"])
         if min_first_margin is not None and len(ranked_first) >= 2:
             margin = float(
                 ranked_first.iloc[0]["p_first"] - ranked_first.iloc[1]["p_first"]
@@ -2117,6 +2128,37 @@ def rank_tickets(
 
             if not replacement_done:
                 break
+
+    # 2番手候補（1着確率2位の艇）を1着とした買い目を最低点数確保する。
+    # 本命1着固定への偏りを緩和するための任意オプション（既定0で無効）。
+    # 差し替え対象は、2番手候補を含まない買い目のうち確率が最も低いもの。
+    # 1:1の差し替えなので本線/抑え/穴の点数と保険買い目は維持される。
+    if second_favorite_lane is not None and second_favorite_n > 0 and len(result):
+        target_n = max(0, min(int(second_favorite_n), 5))
+        while True:
+            result_heads, _, _ = _combo_lanes(result)
+            current = int(result_heads.eq(second_favorite_lane).sum())
+            if current >= target_n:
+                break
+
+            pool_heads, _, _ = _combo_lanes(x)
+            pool = x[
+                pool_heads.eq(second_favorite_lane)
+                & ~x["combo"].isin(set(result["combo"]))
+            ].sort_values("prob", ascending=False)
+            if not len(pool):
+                break
+
+            replaceable = result[~result_heads.eq(second_favorite_lane)]
+            if not len(replaceable):
+                break
+
+            replace_idx = replaceable.sort_values("prob").index[0]
+            replacement = pool.iloc[0].copy()
+            replacement["group"] = result.loc[replace_idx, "group"]
+            for col in result.columns:
+                if col in replacement.index:
+                    result.loc[replace_idx, col] = replacement[col]
 
     keep = ["combo", "prob", "odds", "expected_return", "group"]
     if include_nonrecommended:
