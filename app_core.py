@@ -148,7 +148,8 @@ def _auto_random_progress():
 
         settings = settings_rows[0]
         target = int(settings.get("random_auto_daily_count", 3) or 3)
-        target = max(1, min(target, 10))
+        # auto_random_fix.py側のMAX_DAILY_COUNTと合わせること。
+        target = max(1, min(target, 60))
         snapshot_params = {
             "select": "race_key",
             "race_date": f"eq.{_today_jst().isoformat()}",
