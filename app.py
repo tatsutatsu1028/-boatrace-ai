@@ -350,10 +350,11 @@ def _render_random_auto_settings():
         value=enabled,
         key="random_auto_enabled_owner",
     )
+    _count_options = [1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 40, 50, 60]
     new_count = st.selectbox(
         "1回の自動固定数",
-        options=[1, 2, 3, 4, 5, 6, 8, 10],
-        index=[1, 2, 3, 4, 5, 6, 8, 10].index(daily_count) if daily_count in [1, 2, 3, 4, 5, 6, 8, 10] else 2,
+        options=_count_options,
+        index=_count_options.index(daily_count) if daily_count in _count_options else 2,
         key="random_auto_daily_count_owner",
         disabled=not new_enabled,
     )

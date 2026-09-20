@@ -3,8 +3,12 @@ name: Random Auto Fix
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15,45 8-20 * * *"
-      timezone: "Asia/Tokyo"
+    # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
+    # 評価される（指定しても無視される）。JST 8:00〜20:45の間15,45分に実行する
+    # ため、9時間分ずらしたUTC 23:00（前日）〜11:45で指定する
+    # （UTC日付をまたぐため2行に分割）。
+    - cron: "15,45 0-11 * * *"
+    - cron: "15,45 23 * * *"
 
 concurrency:
   group: random-auto-fix
@@ -13,6 +17,9 @@ concurrency:
 jobs:
   auto-random-fix:
     runs-on: ubuntu-latest
+    # 候補探索が長引いても concurrency グループを長時間占有し続けないよう、
+    # 次回のcron発火（30分後）を大きく超える前にタイムアウトさせる。
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository

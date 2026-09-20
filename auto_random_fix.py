@@ -30,6 +30,11 @@ JST = ZoneInfo("Asia/Tokyo")
 COLLECTOR = "auto_random"
 SNAPSHOT_KIND = "auto_random"
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+# 1日の自動固定数の上限。app_core.py・app.pyの同名の上限と合わせて変更すること。
+MAX_DAILY_COUNT = 60
+# cronの実行間隔を変えずに1日40〜50件へ対応するため、1回の実行で複数レースを
+# まとめて処理する。公式サイトへの1回あたりのアクセス集中を避けるため上限を設ける。
+MAX_FIXES_PER_RUN = 3
 CONDITIONAL_THIRD_COLUMNS = [
     f"p_third_given_{first_lane}_{second_lane}"
     for first_lane in range(1, 7)
@@ -384,11 +389,16 @@ def _save_odds_snapshot_now(race_date, jcd, rno, odds_df):
     return len(payload)
 
 
-def _deadline_is_safe(today, hhmm, margin_minutes=15):
+def _deadline_is_safe(today, hhmm, margin_minutes=15, max_margin_minutes=None):
     try:
         hour, minute = [int(x) for x in str(hhmm).split(":")]
         deadline = datetime(today.year, today.month, today.day, hour, minute, tzinfo=JST)
-        return (deadline - datetime.now(JST)).total_seconds() >= margin_minutes * 60
+        remaining = (deadline - datetime.now(JST)).total_seconds()
+        if remaining < margin_minutes * 60:
+            return False
+        if max_margin_minutes is not None and remaining > max_margin_minutes * 60:
+            return False
+        return True
     except Exception:
         return False
 
@@ -404,13 +414,17 @@ def _exhibition_ready(race):
     return bool(valid.sum() == 6 and lanes[valid].nunique() == 6)
 
 
-def _pick_candidate(today):
+def _list_candidates(today):
     """
-    締切15分以上前かつ未固定の候補をランダムに確認し、
-    公式展示タイムが6艇分そろったレースだけを返す。
+    締切15〜45分前かつ未固定の候補一覧を、開催中の全会場から集める。
 
-    展示未公開の候補は固定せずスキップする。候補確認時に取得した
-    race DataFrame をそのまま予想に使い、同じレースの再取得を避ける。
+    公式展示タイムは締切のかなり手前（1時間以上前）では公開されないため、
+    展示公開が見込めない締切too-far先のレースまで候補に含めると、
+    fetch_official_race のリクエストを無駄打ちすることになる
+    （実運用で1候補あたり約20秒・全て0/6という無駄打ちが多数発生する
+    ことを確認済み）。締切45分以内に絞ることでこの無駄打ちを減らす。
+
+    会場・レースの並びはランダムにシャッフルする。
     """
     date_key = today.strftime("%Y%m%d")
     schedule = fetch_today_schedule(date_key)
@@ -427,7 +441,7 @@ def _pick_candidate(today):
             continue
 
         for rno, hhmm in deadlines.items():
-            if not _deadline_is_safe(today, hhmm, margin_minutes=15):
+            if not _deadline_is_safe(today, hhmm, margin_minutes=15, max_margin_minutes=45):
                 continue
             race_key = f"{date_key}_{jcd}_{int(rno)}"
             if _snapshot_exists(race_key):
@@ -435,8 +449,24 @@ def _pick_candidate(today):
             candidates.append((jcd, int(rno), race_key))
 
     random.shuffle(candidates)
+    return candidates
+
+
+def _pick_ready_candidates(today, candidates, max_needed):
+    """
+    候補を順に確認し、公式展示タイムが6艇分そろったレースを
+    最大max_needed件返す。展示未公開の候補は固定せずスキップする。
+
+    確認時に取得したrace DataFrameをそのまま予想に使い、
+    同じレースの再取得を避ける。
+    """
+    date_key = today.strftime("%Y%m%d")
+    ready = []
 
     for jcd, rno, race_key in candidates:
+        if len(ready) >= max_needed:
+            break
+
         try:
             race = fetch_official_race(date_key, jcd, rno)
         except Exception as e:
@@ -458,51 +488,26 @@ def _pick_candidate(today):
             continue
 
         print(f"[AUTO_RANDOM] exhibition ready: {race_key} (6/6)")
-        return jcd, rno, race_key, race
+        ready.append((jcd, rno, race_key, race))
 
-    return None
+    return ready
 
 
-def main():
-    settings = _load_settings()
-    runtime = _runtime_settings(settings)
-    enabled = bool(settings.get("random_auto_enabled", False))
-    target = int(settings.get("random_auto_daily_count", 3) or 3)
-    target = max(1, min(target, 10))
-    started_at = settings.get("random_auto_started_at")
-
-    if not enabled:
-        print("[AUTO_RANDOM] OFF")
-        return
-
-    now = datetime.now(JST)
-    today = now.date()
-    date_text = today.isoformat()
-    current = _run_auto_count(date_text, started_at)
-    if current >= target:
-        _set_enabled(False)
-        print(f"[AUTO_RANDOM] target reached: {current}/{target}; switched OFF")
-        return
-
-    candidate = _pick_candidate(today)
-    if candidate is None:
-        print("[AUTO_RANDOM] no unfixed race with complete exhibition data found")
-        return
-
-    jcd, rno, race_key, race = candidate
-    venue = VENUES.get(jcd, jcd)
+def _process_candidate(model, runtime, today, jcd, rno, race_key, race):
+    """
+    展示情報つきで確認済みの1レースを予想・買い目生成し、スナップショットとして
+    保存する。データ不備など回収可能な問題はFalseを返してスキップし、
+    他の候補の処理を止めない。
+    """
     date_key = today.strftime("%Y%m%d")
+    date_text = today.isoformat()
+    venue = VENUES.get(jcd, jcd)
     print("[AUTO_RANDOM] selected", race_key, venue, f"{rno}R", "exhibition=6/6")
 
     odds = fetch_odds3t(date_key, jcd, rno)
-    if race is None or len(race) != 6 or not _exhibition_ready(race):
-        raise RuntimeError("展示タイム6艇分を含む公式レースデータを取得できませんでした。")
     if odds is None or len(odds) < 100:
-        raise RuntimeError("3連単オッズを十分に取得できませんでした。")
-
-    # 本番学習データは手動固定と共通の sample_history.csv に固定。
-    history = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
-    model = train(history)
+        print(f"[AUTO_RANDOM] insufficient odds data: {race_key}; skip")
+        return False
 
     final = predict(
         model,
@@ -572,7 +577,7 @@ def main():
         tickets["stake"] = 0
         tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
 
-    if _save_snapshot(
+    if not _save_snapshot(
         race_key,
         date_text,
         venue,
@@ -584,28 +589,82 @@ def main():
         ticket_plan=ticket_plan,
         race_features=race,
     ):
-        # 手動固定と同じく、固定直後からオッズ追跡を開始し、初回値も保存する。
+        return False
+
+    # 手動固定と同じく、固定直後からオッズ追跡を開始し、初回値も保存する。
+    try:
+        _add_to_odds_watchlist(date_key, jcd, rno)
+        saved_odds = _save_odds_snapshot_now(date_key, jcd, rno, odds)
+        print(f"[AUTO_RANDOM] odds tracking started: {race_key}; first={saved_odds}")
+    except Exception as e:
+        # 固定自体は成功しているため、追跡失敗で固定を取り消さない。
+        print(
+            "[AUTO_RANDOM] odds tracking start error",
+            race_key,
+            type(e).__name__,
+            str(e),
+        )
+
+    print(f"[AUTO_RANDOM] saved {race_key}; confidence={confidence_label}")
+    return True
+
+
+def main():
+    settings = _load_settings()
+    runtime = _runtime_settings(settings)
+    enabled = bool(settings.get("random_auto_enabled", False))
+    target = int(settings.get("random_auto_daily_count", 3) or 3)
+    target = max(1, min(target, MAX_DAILY_COUNT))
+    started_at = settings.get("random_auto_started_at")
+
+    if not enabled:
+        print("[AUTO_RANDOM] OFF")
+        return
+
+    now = datetime.now(JST)
+    today = now.date()
+    date_text = today.isoformat()
+    current = _run_auto_count(date_text, started_at)
+    if current >= target:
+        _set_enabled(False)
+        print(f"[AUTO_RANDOM] target reached: {current}/{target}; switched OFF")
+        return
+
+    # cronの実行間隔を増やさずに1日の目標件数へ近づけるため、1回の実行で
+    # 残り件数とMAX_FIXES_PER_RUNの小さい方まで複数レースをまとめて処理する。
+    run_cap = min(target - current, MAX_FIXES_PER_RUN)
+    candidates = _list_candidates(today)
+    ready = _pick_ready_candidates(today, candidates, run_cap)
+    if not ready:
+        print("[AUTO_RANDOM] no unfixed race with complete exhibition data found")
+        return
+
+    # 本番学習データは手動固定と共通の sample_history.csv に固定。学習は
+    # このプロセス内で1回だけ行い、今回処理する候補すべてで使い回す。
+    history = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
+    model = train(history)
+
+    saved = 0
+    for jcd, rno, race_key, race in ready:
         try:
-            _add_to_odds_watchlist(date_key, jcd, rno)
-            saved_odds = _save_odds_snapshot_now(date_key, jcd, rno, odds)
-            print(f"[AUTO_RANDOM] odds tracking started: {race_key}; first={saved_odds}")
+            if _process_candidate(model, runtime, today, jcd, rno, race_key, race):
+                saved += 1
         except Exception as e:
-            # 固定自体は成功しているため、追跡失敗で固定を取り消さない。
             print(
-                "[AUTO_RANDOM] odds tracking start error",
+                "[AUTO_RANDOM] process error",
                 race_key,
                 type(e).__name__,
                 str(e),
             )
 
-        new_count = current + 1
-        print(
-            f"[AUTO_RANDOM] saved {race_key}; confidence={confidence_label}; "
-            f"run {new_count}/{target}"
-        )
-        if new_count >= target:
-            _set_enabled(False)
-            print("[AUTO_RANDOM] run completed; switched OFF")
+    new_count = current + saved
+    print(
+        f"[AUTO_RANDOM] run finished; saved {saved}/{len(ready)} this run; "
+        f"{new_count}/{target}"
+    )
+    if new_count >= target:
+        _set_enabled(False)
+        print("[AUTO_RANDOM] run completed; switched OFF")
 
 
 if __name__ == "__main__":
