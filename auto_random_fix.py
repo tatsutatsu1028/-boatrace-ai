@@ -389,11 +389,16 @@ def _save_odds_snapshot_now(race_date, jcd, rno, odds_df):
     return len(payload)
 
 
-def _deadline_is_safe(today, hhmm, margin_minutes=15):
+def _deadline_is_safe(today, hhmm, margin_minutes=15, max_margin_minutes=None):
     try:
         hour, minute = [int(x) for x in str(hhmm).split(":")]
         deadline = datetime(today.year, today.month, today.day, hour, minute, tzinfo=JST)
-        return (deadline - datetime.now(JST)).total_seconds() >= margin_minutes * 60
+        remaining = (deadline - datetime.now(JST)).total_seconds()
+        if remaining < margin_minutes * 60:
+            return False
+        if max_margin_minutes is not None and remaining > max_margin_minutes * 60:
+            return False
+        return True
     except Exception:
         return False
 
@@ -411,7 +416,13 @@ def _exhibition_ready(race):
 
 def _list_candidates(today):
     """
-    締切15分以上前かつ未固定の候補一覧を、開催中の全会場から集める。
+    締切15〜45分前かつ未固定の候補一覧を、開催中の全会場から集める。
+
+    公式展示タイムは締切のかなり手前（1時間以上前）では公開されないため、
+    展示公開が見込めない締切too-far先のレースまで候補に含めると、
+    fetch_official_race のリクエストを無駄打ちすることになる
+    （実運用で1候補あたり約20秒・全て0/6という無駄打ちが多数発生する
+    ことを確認済み）。締切45分以内に絞ることでこの無駄打ちを減らす。
 
     会場・レースの並びはランダムにシャッフルする。
     """
@@ -430,7 +441,7 @@ def _list_candidates(today):
             continue
 
         for rno, hhmm in deadlines.items():
-            if not _deadline_is_safe(today, hhmm, margin_minutes=15):
+            if not _deadline_is_safe(today, hhmm, margin_minutes=15, max_margin_minutes=45):
                 continue
             race_key = f"{date_key}_{jcd}_{int(rno)}"
             if _snapshot_exists(race_key):
