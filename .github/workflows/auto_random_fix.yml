@@ -15,15 +15,13 @@ on:
     - cron: "20,50 0-11 * * *"
     - cron: "20,50 23 * * *"
 
-concurrency:
-  group: random-auto-fix
-  cancel-in-progress: false
-
 jobs:
   auto-random-fix:
     runs-on: ubuntu-latest
-    # 候補探索が長引いても concurrency グループを長時間占有し続けないよう、
-    # 次回のcron発火（30分後）を大きく超える前にタイムアウトさせる。
+    # 候補探索が長引いても次回のcron発火（30分後）を大きく超えて居座らない
+    # よう、タイムアウトさせる（concurrencyブロックはschedule実行の発火
+    # 自体を大幅に間引く不具合があったため削除。重複実行はauto_random_fix.py
+    # 側のSupabase _snapshot_exists チェックで防止する）。
     timeout-minutes: 15
 
     steps:
