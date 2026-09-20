@@ -166,17 +166,6 @@ def _run_auto_count(date_text, started_at):
     return len(r.json() or [])
 
 
-def _set_enabled(enabled):
-    url, _ = _cfg()
-    _request(
-        "PATCH",
-        f"{url}/rest/v1/app_settings?id=eq.1",
-        headers=_headers("return=minimal"),
-        json={"random_auto_enabled": bool(enabled)},
-        timeout=15,
-    )
-
-
 def _snapshot_exists(race_key):
     url, _ = _cfg()
     r = _request(
@@ -626,8 +615,11 @@ def main():
     date_text = today.isoformat()
     current = _run_auto_count(date_text, started_at)
     if current >= target:
-        _set_enabled(False)
-        print(f"[AUTO_RANDOM] target reached: {current}/{target}; switched OFF")
+        # ONのまま据え置く。race_dateで日付ごとに数えているため、
+        # 日付が変わればcurrentは自動的に0に戻り、翌日また自動固定を再開する。
+        # ここでOFFに戻すと、翌日以降のcron実行がずっと[AUTO_RANDOM] OFFのまま
+        # 何もせず終わり続け、手動でONに戻すまでデータが止まってしまう。
+        print(f"[AUTO_RANDOM] target reached for today: {current}/{target}; wait for next day")
         return
 
     # cronの実行間隔を増やさずに1日の目標件数へ近づけるため、1回の実行で
@@ -663,8 +655,7 @@ def main():
         f"{new_count}/{target}"
     )
     if new_count >= target:
-        _set_enabled(False)
-        print("[AUTO_RANDOM] run completed; switched OFF")
+        print(f"[AUTO_RANDOM] target reached for today: {new_count}/{target}; wait for next day")
 
 
 if __name__ == "__main__":
