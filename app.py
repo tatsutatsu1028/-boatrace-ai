@@ -336,8 +336,9 @@ def _render_random_auto_settings():
     enabled, daily_count = _load_random_auto_settings()
     st.markdown("#### 🎲 ランダム自動固定")
     st.caption(
-        "ONにするたび、締切前の開催レースからランダムに選び、設定したR数だけ予想→固定します。"
-        "完了すると自動でOFFになります。舟券購入はしません。"
+        "ONの間、締切前の開催レースからランダムに選び、1日あたり設定したR数だけ予想→固定します。"
+        "その日の分が終わると翌日まで待機し、日付が変わると自動的に再開します"
+        "（OFFにするまで毎日続きます）。舟券購入はしません。"
     )
 
     is_owner = st.session_state.get("auth_role") == "admin"
@@ -363,7 +364,7 @@ def _render_random_auto_settings():
         try:
             _save_random_auto_settings(new_enabled, new_count, previous_enabled=enabled)
             if new_enabled and not enabled:
-                st.success(f"ランダム自動固定をONにしました。今回は {int(new_count)}R 固定すると自動でOFFになります。")
+                st.success(f"ランダム自動固定をONにしました。1日 {int(new_count)}R を上限に、OFFにするまで毎日自動固定します。")
             elif not new_enabled and enabled:
                 st.success("ランダム自動固定をOFFにしました。")
             else:

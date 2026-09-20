@@ -288,8 +288,19 @@ def fetch_beforeinfo(date_yyyymmdd, jcd, rno):
 
     records = {}
     if table is not None:
-        for ln, row in _before_rows(table).items():
+        before_rows = _before_rows(table)
+        for ln, row in before_rows.items():
             records[ln] = _parse_before_row(ln, row)
+        ex_count = sum(1 for r in records.values() if "exhibition_time" in r)
+        if ex_count < 6:
+            # 展示タイムが0/6になる原因（テーブル未検出／行フィルタ漏れ／
+            # 名前列の検出失敗のどこで落ちているか）を切り分けるための診断ログ。
+            print(
+                f"[BEFOREINFO_DEBUG] {date_yyyymmdd}_{jcd}_{rno} "
+                f"rows_matched={len(before_rows)} exhibition_time_parsed={ex_count}/6"
+            )
+    else:
+        print(f"[BEFOREINFO_DEBUG] {date_yyyymmdd}_{jcd}_{rno} table_not_found")
 
     stmap = _parse_start_exhibition(soup)
     page_text = _norm(soup.get_text(" ", strip=True))
