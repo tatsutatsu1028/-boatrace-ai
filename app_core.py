@@ -2434,6 +2434,7 @@ with tab1:
                             close_third_gap=None,
                             close_third_coverage=4,
                             include_nonrecommended=True,
+                            second_favorite_n=2,
                         )
                         tickets = _complete_adaptive_tickets(
                             tickets,
