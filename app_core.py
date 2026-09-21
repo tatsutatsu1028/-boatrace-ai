@@ -698,13 +698,38 @@ def fetch_daily_schedule(date_str):
     daily_scheduleテーブルへ事前保存しているため、通常はそれを読むだけで
     済み、会場選択のたびに公式サイトへ問い合わせることはない。
     バッチが未実行・失敗している等でSupabase側にその日のデータが
-    無い場合だけ、従来どおり公式サイトから直接取得する（フォールバック）。
+    無い場合は、従来どおり公式サイトから直接取得する（フォールバック）。
 
-    戻り値: {jcd: {"jcd", "holding", "day_label", "status",
-                    "next_race_no", "next_race_time", "deadlines"}}
+    行自体は存在していても、締切一覧の取得だけ失敗している（deadlinesが
+    空のまま保存されている）開催中の会場がある場合は、その会場分だけ
+    公式サイトから締切一覧を取り直して補う。
     """
     from_supabase = fetch_daily_schedule_supabase(date_str)
     if from_supabase:
+        missing_codes = [
+            code for code, info in from_supabase.items()
+            if info["holding"]
+            and info["status"] not in {"開催終了", "中止"}
+            and not info["deadlines"]
+        ]
+        if not missing_codes:
+            return from_supabase
+
+        print(
+            "[SCHEDULE] Supabase daily_schedule has holding venues without "
+            "deadlines, fetching live for:", missing_codes, date_str, flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=min(8, len(missing_codes))) as executor:
+            future_codes = {
+                executor.submit(fetch_venue_deadlines, date_str, code): code
+                for code in missing_codes
+            }
+            for future in as_completed(future_codes):
+                code = future_codes[future]
+                try:
+                    from_supabase[code]["deadlines"] = future.result()
+                except Exception:
+                    pass
         return from_supabase
 
     print(
