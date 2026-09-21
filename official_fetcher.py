@@ -293,12 +293,25 @@ def fetch_beforeinfo(date_yyyymmdd, jcd, rno):
             records[ln] = _parse_before_row(ln, row)
         ex_count = sum(1 for r in records.values() if "exhibition_time" in r)
         if ex_count < 6:
-            # 展示タイムが0/6になる原因（テーブル未検出／行フィルタ漏れ／
-            # 名前列の検出失敗のどこで落ちているか）を切り分けるための診断ログ。
+            # 展示タイムが0/6になる原因を切り分けるための診断ログ。
+            # name_parsedが0なら選手名列(name_i)の検出自体に失敗しており、
+            # weight/exhibition_timeもまとめて取れていないはず。
+            # name_parsedは取れているのにexhibition_timeだけ0なら、
+            # 展示タイムの列位置・値域（name_i+1〜+5列、6.0〜8.5）が
+            # 公式サイト側のテーブル構成とずれている可能性が高い。
+            name_count = sum(1 for r in records.values() if "racer_name_beforeinfo" in r)
+            weight_count = sum(1 for r in records.values() if "weight" in r)
             print(
                 f"[BEFOREINFO_DEBUG] {date_yyyymmdd}_{jcd}_{rno} "
-                f"rows_matched={len(before_rows)} exhibition_time_parsed={ex_count}/6"
+                f"rows_matched={len(before_rows)} name_parsed={name_count}/6 "
+                f"weight_parsed={weight_count}/6 exhibition_time_parsed={ex_count}/6"
             )
+            sample_ln = next(iter(before_rows), None)
+            if sample_ln is not None:
+                print(
+                    f"[BEFOREINFO_DEBUG_ROW] lane={sample_ln} "
+                    f"cells={before_rows[sample_ln][:14]!r}"
+                )
     else:
         print(f"[BEFOREINFO_DEBUG] {date_yyyymmdd}_{jcd}_{rno} table_not_found")
 
