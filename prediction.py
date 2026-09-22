@@ -27,7 +27,8 @@ BASE_CAT = ["venue"]
 # 今節成績・当地コース別成績・水面のコース別特性は学習には使わず補正のみに
 # 使うが、後日の検証用に predict() の出力 (final) へもそのまま持ち出す。
 LANE_CONTEXT_COLUMNS = [
-    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_finish", "current_meet_avg_finish_adjusted",
+    "current_meet_top2_rate",
     "current_meet_avg_st", "current_meet_races",
     "course_top3_rate", "course_avg_st", "course_start_rank",
     "venue_course_1st", "venue_course_2nd", "venue_course_3rd",

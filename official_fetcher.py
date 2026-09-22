@@ -823,6 +823,7 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
                     [
                         "lane",
                         "current_meet_avg_finish",
+                        "current_meet_avg_finish_adjusted",
                         "current_meet_top2_rate",
                         "current_meet_avg_st",
                         "current_meet_races",
@@ -838,6 +839,7 @@ def fetch_official_race(date_yyyymmdd, jcd, rno):
                 flush=True,
             )
             base["current_meet_avg_finish"] = np.nan
+            base["current_meet_avg_finish_adjusted"] = np.nan
             base["current_meet_top2_rate"] = np.nan
             base["current_meet_avg_st"] = np.nan
             base["current_meet_races"] = 0

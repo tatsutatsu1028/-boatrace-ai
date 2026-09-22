@@ -50,7 +50,8 @@ JST = ZoneInfo("Asia/Tokyo")
 # prediction_snapshots.payload_json の final 行にそのまま入っているので、
 # prediction_results.lane_probs_json へもここで転記する。
 LANE_CONTEXT_COLUMNS = (
-    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_finish", "current_meet_avg_finish_adjusted",
+    "current_meet_top2_rate",
     "current_meet_avg_st", "current_meet_races",
     "course_top3_rate", "course_avg_st", "course_start_rank",
     "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
