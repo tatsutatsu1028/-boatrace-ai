@@ -7,6 +7,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+from course_baseline import get_course_baseline_finish
+
 BASE = "https://www.boatrace.jp/owpc/pc/race"
 UA = {
     "User-Agent": "Mozilla/5.0 (compatible; BoatraceAIMobile/3.0; personal-analysis-tool)"
@@ -198,10 +200,11 @@ def _lane_row_groups(grid):
     return groups
 
 
-def _parse_lane_meet(rows, lane):
+def _parse_lane_meet(rows, lane, course_baseline=None):
     rec = {
         "lane": int(lane),
         "current_meet_avg_finish": np.nan,
+        "current_meet_avg_finish_adjusted": np.nan,
         "current_meet_top2_rate": np.nan,
         "current_meet_avg_st": np.nan,
         "current_meet_races": 0,
@@ -238,6 +241,10 @@ def _parse_lane_meet(rows, lane):
 
     sts = []
     finishes = []
+    finish_diffs = []
+
+    if course_baseline is None:
+        course_baseline = get_course_baseline_finish()
 
     # 「早見」等の末尾セルを誤採用しないよう、
     # course/ST/finish の3行が同じ位置で有効な場合だけ採用。
@@ -252,6 +259,9 @@ def _parse_lane_meet(rows, lane):
         sts.append(float(st))
         if pd.notna(finish):
             finishes.append(float(finish))
+            baseline = course_baseline.get(course)
+            if baseline is not None:
+                finish_diffs.append(float(finish) - float(baseline))
 
     rec["current_meet_races"] = len(sts)
 
@@ -264,6 +274,9 @@ def _parse_lane_meet(rows, lane):
             np.mean([f <= 2 for f in finishes]) * 100.0
         )
 
+    if finish_diffs:
+        rec["current_meet_avg_finish_adjusted"] = float(np.mean(finish_diffs))
+
     return rec
 
 
@@ -273,15 +286,26 @@ def fetch_current_meet(date_yyyymmdd, jcd, rno):
 
     返す列:
       lane
-      current_meet_avg_finish  今節平均着順
-      current_meet_top2_rate   今節2連対率(%)
-      current_meet_avg_st      今節平均ST
-      current_meet_races       今節出走数
+      current_meet_avg_finish           今節平均着順（単純平均）
+      current_meet_avg_finish_adjusted  今節平均着順（コース基準補正）
+                                         各走の「実着順 − そのコースの基準着順
+                                         (course_baseline.py)」を今節走数分
+                                         平均したもの。マイナスが大きいほど
+                                         コース基準より好走、プラスが大きい
+                                         ほど苦戦していることを表す。
+                                         current_meet_avg_finish は比較検証の
+                                         ため従来どおり残す（本番の予想ロジック
+                                         では未使用）。
+      current_meet_top2_rate            今節2連対率(%)
+      current_meet_avg_st               今節平均ST
+      current_meet_races                今節出走数
 
-    初日は過去走が無いため races=0、他3項目は NaN になる。
+    初日は過去走が無いため races=0、他4項目は NaN になる。
     """
     html, url = _get(date_yyyymmdd, jcd, rno)
     soup = BeautifulSoup(html, "lxml")
+
+    course_baseline = get_course_baseline_finish()
 
     table = _find_racelist_table(soup)
     if table is None:
@@ -289,6 +313,7 @@ def fetch_current_meet(date_yyyymmdd, jcd, rno):
             {
                 "lane": range(1, 7),
                 "current_meet_avg_finish": [np.nan] * 6,
+                "current_meet_avg_finish_adjusted": [np.nan] * 6,
                 "current_meet_top2_rate": [np.nan] * 6,
                 "current_meet_avg_st": [np.nan] * 6,
                 "current_meet_races": [0] * 6,
@@ -301,7 +326,7 @@ def fetch_current_meet(date_yyyymmdd, jcd, rno):
     groups = _lane_row_groups(grid)
 
     rows = [
-        _parse_lane_meet(groups.get(lane, []), lane)
+        _parse_lane_meet(groups.get(lane, []), lane, course_baseline)
         for lane in range(1, 7)
     ]
 

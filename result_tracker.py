@@ -30,7 +30,8 @@ CONDITIONAL_THIRD_COLUMNS = [
 # 今節成績・当地コース別成績・水面のコース別特性。prediction.predict() が
 # final に複製して返すので、そのまま lane_probs_json にも保存する。
 LANE_CONTEXT_COLUMNS = [
-    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_finish", "current_meet_avg_finish_adjusted",
+    "current_meet_top2_rate",
     "current_meet_avg_st", "current_meet_races",
     "course_top3_rate", "course_avg_st", "course_start_rank",
     "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
@@ -42,7 +43,8 @@ SNAPSHOT_FEATURE_COLUMNS = [
     "racer_win_rate", "local_win_rate", "motor_2ren", "boat_2ren",
     "weight", "tilt", "exhibition_time", "exhibition_st",
     "original_straight", "original_turn", "original_lap",
-    "current_meet_avg_finish", "current_meet_top2_rate",
+    "current_meet_avg_finish", "current_meet_avg_finish_adjusted",
+    "current_meet_top2_rate",
     "current_meet_avg_st", "current_meet_races",
     "course_top3_rate", "course_avg_st", "course_start_rank",
     "venue_course_1st", "venue_course_2nd", "venue_course_3rd",
