@@ -9,7 +9,15 @@ on:
     # 毎時0分ちょうどはGitHub Actions全体でscheduleイベントが集中し、
     # 実行が数時間単位で遅延・欠落することがあるため（GitHub公式ドキュメント
     # も0/15/30/45分ちょうどを避けるよう推奨）、5分ずらして実行する。
-    - cron: "5 22 * * *"
+    #
+    # 実績として、本リポジトリのschedule実行は数時間単位の遅延・欠落が常態化
+    # している（9/21は9:09、9/22は9:43 JSTに発火、9/23は8:55時点で未発火）。
+    # 1回だけのcronでは朝に間に合わないため、JST 6:05〜8:35の30分おき
+    # （UTC 21:05〜23:35）に複数回チャンスを設ける。schedule実行は
+    # --mode ensure で動き、既に当日分が埋まっていれば何もせず終了する。
+    # さらに refresh_schedule_status（--mode status）も当日分が未取得なら
+    # 全量取得へ切り替えるため、どちらかが先に発火した時点で埋まる。
+    - cron: "5,35 21-23 * * *"
 
 jobs:
   prefetch-schedule:
@@ -31,4 +39,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python schedule_prefetcher.py --mode full
+          # 手動実行は常に全量取得し直す。schedule実行は当日分が
+          # 埋まっていれば何もしない（複数回のcronで重複取得しない）。
+          PREFETCH_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'ensure' }}
+        run: python schedule_prefetcher.py --mode "$PREFETCH_MODE"

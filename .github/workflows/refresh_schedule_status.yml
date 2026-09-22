@@ -30,7 +30,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Refresh schedule status only
+      # 当日分の全量取得（締切一覧込み）がまだ無い・欠けている場合は、
+      # schedule_prefetcher.py側で自動的に全量取得へ切り替える
+      # （prefetch_scheduleの朝の実行が遅延・欠落した場合の保険）。
+      - name: Refresh schedule status (full prefetch if missing)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

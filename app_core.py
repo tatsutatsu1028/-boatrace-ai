@@ -705,6 +705,16 @@ def fetch_daily_schedule(date_str):
     公式サイトから締切一覧を取り直して補う。
     """
     from_supabase = fetch_daily_schedule_supabase(date_str)
+    if from_supabase and not any(
+        info["holding"] for info in from_supabase.values()
+    ):
+        # 公式サイトの取得失敗時に保存された「全場休み」の行しか無い場合は、
+        # 行が無い場合と同じく公式サイトからの直接取得にフォールバックする。
+        print(
+            "[SCHEDULE] Supabase daily_schedule has no holding venues, "
+            "treating as miss:", date_str, flush=True,
+        )
+        from_supabase = None
     if from_supabase:
         missing_codes = [
             code for code, info in from_supabase.items()
@@ -1759,10 +1769,15 @@ with tab1:
     try:
         _date_key = d.strftime("%Y%m%d")
         _schedule_key = f"daily_schedule_{_date_key}"
-        if _schedule_key not in st.session_state:
-            st.session_state[_schedule_key] = fetch_daily_schedule(_date_key)
-
-        schedule_by_jcd = st.session_state[_schedule_key]
+        if _schedule_key in st.session_state:
+            schedule_by_jcd = st.session_state[_schedule_key]
+        else:
+            schedule_by_jcd = fetch_daily_schedule(_date_key)
+            # 公式サイトへの直接取得が失敗すると全場holding=Falseが返る。
+            # それをセッションに固定すると再取得(長押しプル)まで会場が
+            # 一つも出ないままになるため、開催会場がある時だけ保持する。
+            if any(_i.get("holding") for _i in schedule_by_jcd.values()):
+                st.session_state[_schedule_key] = schedule_by_jcd
 
         # 朝/昼/夜表示と「締切15分以内の次レース」判定は、
         # 事前取得済みの締切一覧(deadlines)からその場で計算する。
