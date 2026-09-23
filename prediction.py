@@ -2166,6 +2166,16 @@ def rank_tickets(
         result["recommended"] = bool(recommended)
         keep.append("recommended")
 
+    # 2番手候補1着の買い目に印を付け、資金配分側で最低購入額を保証できる
+    # ようにする（allocate_stakes_smart の guarantee_col）。確率比例の配分
+    # だけだと確率0.3〜1%程度のこれらの買い目は丸めで0円になり、候補に
+    # 入れた意味が無くなるため。既定（second_favorite_n=0）では列を出さない。
+    add_second_favorite_flag = (
+        second_favorite_lane is not None and int(second_favorite_n) > 0
+    )
+    if add_second_favorite_flag:
+        keep.append("second_favorite")
+
     # オッズ側に同じ組み合わせが重複していても、指定した本線・抑え・穴の
     # 点数を必ず維持する。各候補選択後にも区分別の不足を最終確認し、
     # 未採用の確率上位から補充する。
@@ -2202,6 +2212,13 @@ def rank_tickets(
             if include_nonrecommended:
                 pool["recommended"] = bool(recommended)
             result = pd.concat([result, pool], ignore_index=True)
+
+    if add_second_favorite_flag:
+        if len(result):
+            result_heads, _, _ = _combo_lanes(result)
+            result["second_favorite"] = result_heads.eq(second_favorite_lane).to_numpy()
+        else:
+            result["second_favorite"] = pd.Series(dtype=bool)
 
     for c in keep:
         if c not in result:

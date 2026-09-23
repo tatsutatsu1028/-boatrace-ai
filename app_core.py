@@ -2497,6 +2497,7 @@ with tab1:
                             max_longshot_share=0.15,
                             max_ticket_share=0.35,
                             value_bias=float(value_bias),
+                            guarantee_col="second_favorite",
                         )
                         if (
                             "recommended" in tickets.columns
@@ -2532,6 +2533,7 @@ with tab1:
                         max_longshot_share=0.15,
                         max_ticket_share=0.35,
                         value_bias=float(value_bias),
+                        guarantee_col="second_favorite",
                     )
                     st.session_state["result"]["tickets"] = tickets
 
