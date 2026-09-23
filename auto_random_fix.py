@@ -546,6 +546,7 @@ def _process_candidate(model, runtime, today, jcd, rno, race_key, race):
         close_third_gap=None,
         close_third_coverage=4,
         include_nonrecommended=True,
+        second_favorite_n=2,
     )
     if len(tickets) != target_points:
         raise RuntimeError(
@@ -560,6 +561,7 @@ def _process_candidate(model, runtime, today, jcd, rno, race_key, race):
         max_ticket_share=0.35,
         value_bias=runtime["value_bias"],
         use_odds=False,
+        guarantee_col="second_favorite",
     )
     if (
         "recommended" in tickets.columns
