@@ -403,8 +403,12 @@ def _build_result_record(
         "expected_return",
         "stake",
     )
+    # 資金配分と予想精度を分離するため、購入額0円の候補も保存する
+    # （result_tracker.save_race_result / auto_result_collect と同じ扱い）。
+    # 購入分だけに絞ると、保存済みレース画面で見送り候補が消え、
+    # 「候補には入っていたが0円だった」ことが確認できなくなる。
     ticket_payload = []
-    for row in purchased:
+    for row in valid_tickets:
         item = {}
         for c in ticket_keep:
             if c in row:

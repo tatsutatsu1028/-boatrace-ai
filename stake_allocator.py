@@ -45,6 +45,7 @@ def allocate_stakes_smart(
     very_low_prob=0.003,
     value_bias=0.0,
     use_odds=False,
+    guarantee_col=None,
 ):
     """
     実戦寄りの資金配分。
@@ -86,6 +87,15 @@ def allocate_stakes_smart(
         「EV2.0以上を除外」のような条件は通算では回収率121%に見えるが、
         前半152.6% / 後半48.5% と期間で全く再現せず、ノイズを拾って
         いるだけだった。
+
+    guarantee_col : str or None
+        指定した列が True の買い目に min_bet を保証する（既定Noneで無効）。
+        rank_tickets(second_favorite_n>0) が付ける "second_favorite" 列を
+        渡す想定。2番手候補1着の買い目は確率が構造的に低く（0.3〜1%程度）、
+        確率比例の配分では丸めで0円になり、候補に入れた意味が無くなる。
+        不足分は保証対象外の買い目から unit ずつ移す。削る順は本線→抑え→穴、
+        同区分内では購入額の多い順で、削られる側も min_bet は下回らせない。
+        総額は変えないので、移せる余地が無ければ保証しきれずに終わる。
     """
     if tickets is None or len(tickets) == 0:
         out = pd.DataFrame(columns=["combo", "group", "prob", "odds", "expected_return", "stake"])
@@ -299,12 +309,43 @@ def allocate_stakes_smart(
         if not added:
             break
 
+    # 保証対象の買い目に min_bet を確保（総額は変えずに他から移す）
+    guaranteed_idx = set()
+    if guarantee_col is not None and guarantee_col in df.columns:
+        guarantee_mask = df[guarantee_col].map(lambda v: v is True or v is np.True_)
+        donor_rank = {"本線": 0, "抑え": 1, "穴": 2}
+
+        def spare_units(j):
+            return max(0, (int(df.at[j, "stake"]) - min_bet) // unit)
+
+        for i in df[guarantee_mask].sort_values("prob", ascending=False).index:
+            need = min_bet - int(df.at[i, "stake"])
+            if need <= 0:
+                continue
+            donors = [j for j in df.index if not guarantee_mask.at[j]]
+            # min_bet 未満の半端な額にはできないので、全額移せる時だけ移す
+            if sum(spare_units(j) for j in donors) * unit < need:
+                continue
+            while need > 0:
+                j = min(
+                    (j for j in donors if spare_units(j) > 0),
+                    key=lambda j: (
+                        donor_rank.get(str(df.at[j, "group"]), 1),
+                        -int(df.at[j, "stake"]),
+                        float(df.at[j, "prob"]),
+                    ),
+                )
+                df.at[j, "stake"] = int(df.at[j, "stake"]) - unit
+                df.at[i, "stake"] = int(df.at[i, "stake"]) + unit
+                need -= unit
+            guaranteed_idx.add(i)
+
     # 最終チェック
     df["stake"] = pd.to_numeric(df["stake"], errors="coerce").fillna(0).astype(int)
 
     # 表示用の理由
     reasons = []
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         group = str(row.get("group", ""))
         prob = _safe_num(row.get("prob"), 0.0)
         ev = _safe_num(row.get("expected_return"), np.nan)
@@ -312,6 +353,8 @@ def allocate_stakes_smart(
 
         if stake <= 0:
             reason = "見送り"
+        elif idx in guaranteed_idx:
+            reason = "2番手1着のため最低額を保証"
         elif group == "穴" and prob < very_low_prob:
             reason = "超低確率のため少額"
         elif not math.isnan(ev) and ev < 1.0:
