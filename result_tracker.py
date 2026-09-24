@@ -228,6 +228,16 @@ def _load_supabase():
     return _normalize_df(pd.DataFrame(data))
 
 
+# Streamlitは画面操作のたびにスクリプト全体（非表示のタブ含む）を再実行するため、
+# キャッシュなしだと操作ごとにprediction_resultsを全件（lane_probs_json込みで
+# 1回十数MB）再取得し、Supabaseのegressを大きく消費していた。
+# アプリからの保存・削除時はclear()で即時反映し、GitHub Actions側で
+# 保存された結果は最大TTL分遅れて反映される。
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_supabase_cached():
+    return _load_supabase()
+
+
 def _upsert_supabase(record):
     url, _ = _supabase_config()
 
@@ -539,7 +549,7 @@ def _write_local(df):
 def _load_raw():
     if _use_supabase():
         try:
-            return _load_supabase()
+            return _load_supabase_cached()
         except Exception as e:
             print(
                 "[RESULT_TRACKER] Supabase load error:",
@@ -949,6 +959,7 @@ def save_race_result(
             _upsert_supabase(
                 record
             )
+            _load_supabase_cached.clear()
             record["_used_snapshot"] = bool(snapshot_used)
             record["_snapshot_saved_at"] = snapshot_used.get("saved_at", "") if snapshot_used else ""
             record["_snapshot_kind"] = snapshot_used.get("snapshot_kind", "") if snapshot_used else ""
@@ -994,9 +1005,11 @@ def save_race_result(
 def delete_result(race_key):
     if _use_supabase():
         try:
-            return _delete_supabase(
+            deleted = _delete_supabase(
                 race_key
             )
+            _load_supabase_cached.clear()
+            return deleted
         except Exception as e:
             print(
                 "[RESULT_TRACKER] Supabase delete error:",
