@@ -484,3 +484,184 @@ def build_post_text(
     text = "\n\n".join(parts)
     return text[:TEXT_LIMIT]
 
+
+
+# -------------------------------------------------
+# 1日の発信まとめ
+# -------------------------------------------------
+_PUBLICATIONS_TABLE = "note_publications"
+_RESULTS_TABLE = "prediction_results"
+_RESULT_FIELDS = (
+    "race_key,trifecta_actual,top_ticket,"
+    "hit_top_ticket,hit_any_ticket,candidate_hit,candidate_hit_rank"
+)
+
+
+def _date_text(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value or "").strip()[:10]
+
+
+def _short_date(value):
+    s = _date_text(value)
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d")
+        return f"{d.month}/{d.day}"
+    except Exception:
+        return s
+
+
+def _race_label(venue, race_no):
+    venue = _clean(venue)
+    try:
+        return f"{venue}{int(race_no)}R"
+    except Exception:
+        return f"{venue}{_clean(race_no)}"
+
+
+def _is_hit(result):
+    """note記事に載せた買い目のどれかが的中したか。
+
+    note記事・スレッズには購入額0円の候補も含めた全買い目を載せているため、
+    候補全体での的中（candidate_hit）を基準にする。古い行で未計算なら
+    hit_any_ticket で代用する。
+    """
+    value = result.get("candidate_hit")
+    if value is None:
+        value = result.get("hit_any_ticket")
+    return bool(value)
+
+
+def fetch_daily_publication_results(sb_url, sb_key, publication_date):
+    """指定日のnote確定レースと、確定済みなら的中結果を突き合わせて返す。
+
+    戻り値は sequence_no 順の dict のリスト。結果がまだ prediction_results に
+    無いレース（レース前・レース中・結果未取得）は ``settled=False`` になる。
+    """
+    sb_url = str(sb_url or "").strip().rstrip("/")
+    sb_key = str(sb_key or "").strip()
+    if not sb_url or not sb_key:
+        raise RuntimeError("Supabaseの接続情報が設定されていません。")
+
+    r = requests.get(
+        f"{sb_url}/rest/v1/{_PUBLICATIONS_TABLE}",
+        headers=_headers(sb_key),
+        params={
+            "select": "race_key,venue,race_no,sequence_no,publication_type",
+            "publication_date": f"eq.{_date_text(publication_date)}",
+            "order": "sequence_no.asc",
+        },
+        timeout=TIMEOUT,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(
+            f"note確定レースの取得に失敗しました（HTTP {r.status_code}）: {r.text[:300]}"
+        )
+    publications = r.json() or []
+
+    race_keys = [str(p.get("race_key") or "").strip() for p in publications]
+    race_keys = [k for k in race_keys if k]
+    results = {}
+    if race_keys:
+        r2 = requests.get(
+            f"{sb_url}/rest/v1/{_RESULTS_TABLE}",
+            headers=_headers(sb_key),
+            params={
+                "select": _RESULT_FIELDS,
+                "race_key": f"in.({','.join(race_keys)})",
+            },
+            timeout=TIMEOUT,
+        )
+        if r2.status_code >= 400:
+            raise RuntimeError(
+                f"的中結果の取得に失敗しました（HTTP {r2.status_code}）: {r2.text[:300]}"
+            )
+        results = {str(row.get("race_key")): row for row in (r2.json() or [])}
+
+    records = []
+    for pub in publications:
+        key = str(pub.get("race_key") or "").strip()
+        result = results.get(key)
+        settled = bool(result and _clean(result.get("trifecta_actual")))
+        records.append({
+            "race_key": key,
+            "venue": _clean(pub.get("venue")),
+            "race_no": pub.get("race_no"),
+            "sequence_no": pub.get("sequence_no"),
+            "publication_type": str(pub.get("publication_type") or "FREE").upper(),
+            "settled": settled,
+            "trifecta_actual": _clean(result.get("trifecta_actual")) if settled else "",
+            "hit": _is_hit(result) if settled else False,
+            "hit_top_ticket": bool(result.get("hit_top_ticket")) if settled else False,
+        })
+    return records
+
+
+def build_daily_summary_text(
+    race_date,
+    records,
+    payouts=None,
+    include_pending=True,
+    note_url="https://note.com/tenji_kara",
+):
+    """「今日も展示から。」用の1日まとめThreads下書き。投稿前にアプリ上で編集できる。
+
+    records は fetch_daily_publication_results() の戻り値。payouts は
+    {race_key: 3連単100円払戻} があれば的中レースに払戻を添える。
+    結果待ちのレースは的中率の分母に入れず、include_pending=True なら
+    「結果待ち」として一覧に残す（False なら一覧から外し、見出しの件数だけ示す）。
+    """
+    records = list(records or [])
+    payouts = payouts or {}
+    settled = [r for r in records if r.get("settled")]
+    pending = [r for r in records if not r.get("settled")]
+    hits = [r for r in settled if r.get("hit")]
+    top_hits = [r for r in settled if r.get("hit_top_ticket")]
+
+    title = f"【{_short_date(race_date)}｜本日の予想まとめ】"
+
+    if not records:
+        return ("📊 " + title + "\n\n本日のnote発信はありませんでした。")[:TEXT_LIMIT]
+
+    result_text = f"{len(hits)}レース的中🎯" if hits else "的中なし"
+    if not pending:
+        headline = f"本日発信した{len(records)}レース中、{result_text}"
+    elif not settled:
+        headline = f"本日発信した{len(records)}レースは、まだ結果待ちです。"
+    else:
+        headline = (
+            f"本日発信した{len(records)}レースのうち、"
+            f"結果確定{len(settled)}レース中、{result_text}"
+        )
+    if top_hits:
+        headline += f"\n（うち本線◎ズバリ{len(top_hits)}レース）"
+
+    lines = []
+    for r in records:
+        if not r.get("settled"):
+            if include_pending:
+                lines.append(f"⏳ {_race_label(r.get('venue'), r.get('race_no'))} 結果待ち")
+            continue
+        mark = "⭕" if r.get("hit") else "❌"
+        line = f"{mark} {_race_label(r.get('venue'), r.get('race_no'))} {r.get('trifecta_actual')}"
+        payout = _num(payouts.get(r.get("race_key")), 0.0)
+        if r.get("hit") and payout > 0:
+            line += f"（{int(payout):,}円）"
+        lines.append(line)
+
+    parts = ["📊 " + title, headline]
+    if lines:
+        parts.append("\n".join(lines))
+    if pending:
+        parts.append("残りのレースは結果が出たらお知らせします。")
+    elif hits:
+        parts.append("明日も展示データを反映して予想します。")
+    else:
+        parts.append("悔しい結果でした。明日も展示から巻き返します。")
+    link = str(note_url or "").strip()
+    if link:
+        parts.append("予想はプロフィールのnoteから☝️")
+
+    text = "\n\n".join(parts)
+    return text[:TEXT_LIMIT]
