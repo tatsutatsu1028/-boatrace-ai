@@ -55,6 +55,8 @@ from result_tracker import (
 try:
     from threads_poster import (
         build_post_text as threads_build_post_text,
+        build_daily_summary_text as threads_build_daily_summary_text,
+        fetch_daily_publication_results as threads_fetch_daily_publication_results,
         post_text as threads_post_text,
         load_config as threads_load_config,
         save_config as threads_save_config,
@@ -72,6 +74,12 @@ except Exception:
 
     def threads_build_post_text(*args, **kwargs):
         return ""
+
+    def threads_build_daily_summary_text(*args, **kwargs):
+        return ""
+
+    def threads_fetch_daily_publication_results(*args, **kwargs):
+        raise RuntimeError("threads_poster.py が未導入です。")
 
     def threads_post_text(*args, **kwargs):
         raise RuntimeError("threads_poster.py が未導入です。")
@@ -1242,6 +1250,147 @@ with tab3:
                         except Exception as e:
                             st.error("保存に失敗しました。")
                             st.code(str(e))
+
+            # -------------------------------------------------
+            # 1日の発信まとめ
+            # -------------------------------------------------
+            # note記事用に確定したレースの的中結果を集計し、その日の締めくくり
+            # 投稿を下書きする。送信は個別レース投稿と同じく手動ボタンで行う。
+            st.markdown("#### 📊 本日のまとめ投稿")
+            _sum_date = st.date_input(
+                "まとめる日付",
+                value=_today_jst(),
+                key="threads_summary_date",
+            )
+            _sum_date_str = _sum_date.strftime("%Y-%m-%d")
+            _sum_state_key = f"threads_summary_records_{_sum_date_str}"
+
+            if st.button("📊 まとめを作成・更新", key="threads_summary_build"):
+                try:
+                    with st.spinner("note確定レースと結果を照合しています…"):
+                        _sum_records = threads_fetch_daily_publication_results(
+                            _sb_url, _sb_key, _sum_date
+                        )
+                        # 払戻は的中レースの会場だけ公式結果一覧から引く。
+                        # 取れなくてもまとめ自体は作れるので失敗は無視する。
+                        _sum_payouts = {}
+                        _sum_codes = {
+                            str(r["race_key"]).split("_")[1]
+                            for r in _sum_records
+                            if r.get("hit") and str(r.get("race_key", "")).count("_") == 2
+                        }
+                        for _code in sorted(_sum_codes):
+                            try:
+                                _pay_df = fetch_venue_result_list(
+                                    _sum_date.strftime("%Y%m%d"), _code
+                                )
+                            except Exception:
+                                continue
+                            if _pay_df is None or not len(_pay_df):
+                                continue
+                            for _, _pay_row in _pay_df.iterrows():
+                                try:
+                                    _pay_key = (
+                                        f"{_sum_date.strftime('%Y%m%d')}_{_code}_"
+                                        f"{int(float(_pay_row.get('race_no')))}"
+                                    )
+                                    _sum_payouts[_pay_key] = int(
+                                        float(_pay_row.get("payout_per_100") or 0)
+                                    )
+                                except Exception:
+                                    continue
+                    st.session_state[_sum_state_key] = {
+                        "records": _sum_records,
+                        "payouts": _sum_payouts,
+                    }
+                    # 再作成時は下書きも作り直す。
+                    for _flag in (0, 1):
+                        st.session_state.pop(
+                            f"threads_summary_text_{_sum_date_str}_{_flag}", None
+                        )
+                except Exception as e:
+                    st.error("まとめの作成に失敗しました。")
+                    st.code(str(e))
+
+            _sum_loaded = st.session_state.get(_sum_state_key)
+            if _sum_loaded is not None:
+                _sum_records = _sum_loaded["records"]
+                _sum_pending = [r for r in _sum_records if not r.get("settled")]
+                _sum_settled = [r for r in _sum_records if r.get("settled")]
+                _sum_hits = [r for r in _sum_settled if r.get("hit")]
+
+                _c1, _c2, _c3 = st.columns(3)
+                with _c1:
+                    st.metric("発信", f"{len(_sum_records)}R")
+                with _c2:
+                    st.metric("的中", f"{len(_sum_hits)} / {len(_sum_settled)}R")
+                with _c3:
+                    st.metric("結果待ち", f"{len(_sum_pending)}R")
+
+                _include_pending = True
+                if _sum_pending:
+                    st.warning(
+                        "⏳ 結果がまだ確定していないレースがあります（"
+                        + "、".join(
+                            f"{r.get('venue')}{r.get('race_no')}R" for r in _sum_pending
+                        )
+                        + "）。全レース確定後に「まとめを作成・更新」を押し直すのがおすすめです。"
+                    )
+                    _include_pending = st.checkbox(
+                        "結果待ちのレースも「結果待ち」として載せる",
+                        value=True,
+                        key=f"threads_summary_pending_{_sum_date_str}",
+                    )
+
+                _sum_default = threads_build_daily_summary_text(
+                    race_date=_sum_date,
+                    records=_sum_records,
+                    payouts=_sum_loaded.get("payouts"),
+                    include_pending=_include_pending,
+                )
+                # 結果待ちの表示切替で下書きを作り直せるよう、キーに含める。
+                _sum_text = st.text_area(
+                    "まとめ投稿内容（送信前に編集できます）",
+                    value=_sum_default,
+                    height=280,
+                    key=f"threads_summary_text_{_sum_date_str}_{int(_include_pending)}",
+                )
+                _sum_len = len(_sum_text)
+                if _sum_len > THREADS_TEXT_LIMIT:
+                    st.error(f"{_sum_len} / {THREADS_TEXT_LIMIT}文字（超過しています）")
+                else:
+                    st.caption(f"{_sum_len} / {THREADS_TEXT_LIMIT}文字")
+
+                _sum_posted_key = f"threads_summary_posted_{_sum_date_str}"
+                if st.session_state.get(_sum_posted_key):
+                    st.success(
+                        "✅ この日のまとめは投稿済みです。"
+                        f" 投稿ID: {st.session_state[_sum_posted_key]}"
+                    )
+
+                if not _threads_cfg:
+                    st.caption("スレッズ連携を登録すると、ここから投稿できます。")
+                elif st.button(
+                    "🧵 このまとめをスレッズに投稿",
+                    key=f"post_threads_summary_{_sum_date_str}",
+                    disabled=_sum_len > THREADS_TEXT_LIMIT or not _sum_records,
+                ):
+                    try:
+                        _sum_post_id = threads_post_text(
+                            _threads_cfg["user_id"],
+                            _threads_cfg["access_token"],
+                            _sum_text,
+                        )
+                        st.session_state[_sum_posted_key] = _sum_post_id
+                        st.success(f"投稿しました。（投稿ID: {_sum_post_id}）")
+                        st.rerun()
+                    except Exception as e:
+                        st.error("スレッズへの投稿に失敗しました。")
+                        st.code(str(e))
+                        st.caption(
+                            "トークンが失効している可能性があります。"
+                            "上から再登録してください。"
+                        )
 
 
 # 収集スタッフは画面上の一時操作で予想条件を変えられないよう、
