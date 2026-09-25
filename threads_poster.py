@@ -656,11 +656,11 @@ def build_daily_summary_text(
         # 締めの一言は結果確定分の的中率（hits / settled）で分岐する。
         # 浮動小数の誤差を避けるため 50% 判定は整数比較で行う。
         if len(hits) * 2 > len(settled):
-            parts.append("明日にも期待")
+            parts.append("明日の予想もお楽しみに✨")
         elif len(hits) * 2 == len(settled):
-            parts.append("五分五分でした、明日に繋げます")
+            parts.append("五分五分でした、明日に繋げます🙏")
         else:
-            parts.append("もっと予想精度上げれる様に頑張ります")
+            parts.append("もっと予想精度上げれる様に頑張ります💪")
     link = str(note_url or "").strip()
     if link:
         parts.append("予想はプロフィールのnoteから☝️")
