@@ -617,7 +617,6 @@ def build_daily_summary_text(
     settled = [r for r in records if r.get("settled")]
     pending = [r for r in records if not r.get("settled")]
     hits = [r for r in settled if r.get("hit")]
-    top_hits = [r for r in settled if r.get("hit_top_ticket")]
 
     title = f"【{_short_date(race_date)}｜本日の予想まとめ】"
 
@@ -634,8 +633,6 @@ def build_daily_summary_text(
             f"本日発信した{len(records)}レースのうち、"
             f"結果確定{len(settled)}レース中、{result_text}"
         )
-    if top_hits:
-        headline += f"\n（うち本線◎ズバリ{len(top_hits)}レース）"
 
     lines = []
     for r in records:
@@ -655,10 +652,15 @@ def build_daily_summary_text(
         parts.append("\n".join(lines))
     if pending:
         parts.append("残りのレースは結果が出たらお知らせします。")
-    elif hits:
-        parts.append("明日も展示データを反映して予想します。")
-    else:
-        parts.append("悔しい結果でした。明日も展示から巻き返します。")
+    if settled:
+        # 締めの一言は結果確定分の的中率（hits / settled）で分岐する。
+        # 浮動小数の誤差を避けるため 50% 判定は整数比較で行う。
+        if len(hits) * 2 > len(settled):
+            parts.append("明日にも期待")
+        elif len(hits) * 2 == len(settled):
+            parts.append("五分五分でした、明日に繋げます")
+        else:
+            parts.append("もっと予想精度上げれる様に頑張ります")
     link = str(note_url or "").strip()
     if link:
         parts.append("予想はプロフィールのnoteから☝️")
