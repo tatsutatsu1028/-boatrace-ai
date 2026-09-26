@@ -11,6 +11,12 @@ on:
     # 集中し、実行が数時間単位で遅延・欠落することがあるため
     # （GitHub公式ドキュメントも0/15/30/45分ちょうどを避けるよう推奨）、
     # 5分・35分にずらして実行する。
+    #
+    # それでも実際には1日30回の予定に対し3〜4回しか発火しない日が続いた
+    # （9/26はJST 0:31を最後にJST 10時過ぎまで発火なし）ため、同じ時刻に
+    # Supabaseのpg_cronからworkflow_dispatchで起動している（track_odds.ymlと
+    # 同じ仕組み。supabase/migrations/20260926010500_trigger_refresh_schedule_status_via_pg_cron.sql）。
+    # このscheduleは保険として残す。
     - cron: "5,35 0-13 * * *"
     - cron: "5,35 23 * * *"
 
