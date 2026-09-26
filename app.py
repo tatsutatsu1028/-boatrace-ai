@@ -120,6 +120,24 @@ def _boat_ai_train(_history):
 
 _prediction.train = _boat_ai_train
 
+
+# 艇番なし1着モデル（表示・検証専用）も本番train()と同じキーでキャッシュし、
+# 予想のたびに再学習しない。学習データも本番1着モデルと同じ sample_history.csv。
+@st.cache_resource(show_spinner=False)
+def _boat_ai_train_lane_agnostic_cached(cache_key):
+    canonical = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
+    return _prediction.train_lane_agnostic(canonical)
+
+
+def _boat_ai_lane_agnostic(race):
+    """艇番なしモデルの最強艇を求める。失敗しても本番予想には影響させない。"""
+    try:
+        model = _boat_ai_train_lane_agnostic_cached(_boat_ai_train_cache_key())
+        return _prediction.lane_agnostic_strongest(model, race)
+    except Exception:
+        return None
+
+
 # 直近の本番final/raceを保持し、買い目選定時の保険判定も保存設定に統一する。
 _LAST_PRODUCTION_RACE = None
 _LAST_PRODUCTION_FINAL = None
@@ -148,6 +166,13 @@ def _boat_ai_predict(model, race, *args, **kwargs):
     out = _prediction._boat_ai_original_predict(model, race, *args, **kwargs)
 
     if not is_research_variant and float(kwargs.get("display_weight", 0.0)) != 0.0:
+        # 艇番なしモデルの判定は attrs に載せるだけで、確率列には一切触れない。
+        lane_agnostic = _boat_ai_lane_agnostic(race)
+        if lane_agnostic:
+            try:
+                out.attrs["_boat_ai_lane_agnostic"] = lane_agnostic
+            except Exception:
+                pass
         try:
             _LAST_PRODUCTION_RACE = race.copy()
             _LAST_PRODUCTION_FINAL = out.copy()
@@ -265,6 +290,16 @@ def _boat_ai_snapshot_payload(
         label = ""
     if label in {"A", "B", "C"}:
         payload["confidence"] = label
+    # 艇番なしモデルの最強艇（表示専用の判定）を後日の効果検証用に保存する。
+    try:
+        lane_agnostic = _prediction.lane_agnostic_snapshot(
+            final,
+            final.attrs.get("_boat_ai_lane_agnostic"),
+        )
+    except Exception:
+        lane_agnostic = None
+    if lane_agnostic:
+        payload["lane_agnostic"] = lane_agnostic
     return payload
 
 
@@ -414,6 +449,21 @@ def _boat_ai_subheader(body, *args, **kwargs):
                         "直近バックテストで注目している本命80%以上のレースです。"
                         "表示のみで、予想・買い目・購入額は変更しません。"
                     )
+
+            lane_agnostic = (
+                final.attrs.get("_boat_ai_lane_agnostic")
+                if final is not None
+                else None
+            )
+            if _prediction.lane1_strongest_badge(final, lane_agnostic):
+                st.success(
+                    "💪 1号艇は選手としても最強"
+                    f"（艇番なしモデル {float(lane_agnostic['strongest_prob']):.1%}）"
+                )
+                st.caption(
+                    "艇番を除いた特徴量で学習した別モデルでも1号艇が1着確率トップです。"
+                    "表示のみで、予想・買い目・購入額は変更しません。"
+                )
     except Exception:
         pass
 

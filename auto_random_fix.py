@@ -22,6 +22,9 @@ from prediction import (
     confidence,
     assess_favorite_risk,
     research_prediction_variants,
+    train_lane_agnostic,
+    lane_agnostic_strongest,
+    lane_agnostic_snapshot,
 )
 from stake_allocator import allocate_stakes_smart
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
@@ -205,6 +208,7 @@ def _snapshot_payload(
     confidence_label=None,
     ticket_plan=None,
     race_features=None,
+    lane_agnostic=None,
 ):
     final_cols = [
         "lane", "racer_name", "p_first", "p_second", "p_third",
@@ -270,6 +274,8 @@ def _snapshot_payload(
         payload["ticket_plan"] = {
             str(key): _json_safe(value) for key, value in ticket_plan.items()
         }
+    if lane_agnostic:
+        payload["lane_agnostic"] = lane_agnostic
     return payload
 
 
@@ -284,6 +290,7 @@ def _save_snapshot(
     confidence_label=None,
     ticket_plan=None,
     race_features=None,
+    lane_agnostic=None,
 ):
     if _snapshot_exists(race_key):
         print("[AUTO_RANDOM] already fixed:", race_key)
@@ -306,6 +313,7 @@ def _save_snapshot(
                 confidence_label=confidence_label,
                 ticket_plan=ticket_plan,
                 race_features=race_features,
+                lane_agnostic=lane_agnostic,
             ),
             ensure_ascii=False,
         ),
@@ -484,7 +492,9 @@ def _pick_ready_candidates(today, candidates, max_needed):
     return ready
 
 
-def _process_candidate(model, runtime, today, jcd, rno, race_key, race):
+def _process_candidate(
+    model, runtime, today, jcd, rno, race_key, race, lane_agnostic_model=None
+):
     """
     展示情報つきで確認済みの1レースを予想・買い目生成し、スナップショットとして
     保存する。データ不備など回収可能な問題はFalseを返してスキップし、
@@ -570,6 +580,16 @@ def _process_candidate(model, runtime, today, jcd, rno, race_key, race):
         tickets["stake"] = 0
         tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
 
+    # 艇番なしモデルの最強艇は検証用に保存するだけで、予想・買い目には使わない。
+    lane_agnostic = None
+    try:
+        lane_agnostic = lane_agnostic_snapshot(
+            final,
+            lane_agnostic_strongest(lane_agnostic_model, race),
+        )
+    except Exception as e:
+        print("[AUTO_RANDOM] lane-agnostic error", race_key, type(e).__name__, str(e))
+
     if not _save_snapshot(
         race_key,
         date_text,
@@ -581,6 +601,7 @@ def _process_candidate(model, runtime, today, jcd, rno, race_key, race):
         confidence_label=confidence_label,
         ticket_plan=ticket_plan,
         race_features=race,
+        lane_agnostic=lane_agnostic,
     ):
         return False
 
@@ -639,11 +660,19 @@ def main():
     # このプロセス内で1回だけ行い、今回処理する候補すべてで使い回す。
     history = pd.read_csv(Path(__file__).with_name("sample_history.csv"))
     model = train(history)
+    try:
+        lane_agnostic_model = train_lane_agnostic(history)
+    except Exception as e:
+        print("[AUTO_RANDOM] lane-agnostic train error", type(e).__name__, str(e))
+        lane_agnostic_model = None
 
     saved = 0
     for jcd, rno, race_key, race in ready:
         try:
-            if _process_candidate(model, runtime, today, jcd, rno, race_key, race):
+            if _process_candidate(
+                model, runtime, today, jcd, rno, race_key, race,
+                lane_agnostic_model=lane_agnostic_model,
+            ):
                 saved += 1
         except Exception as e:
             print(

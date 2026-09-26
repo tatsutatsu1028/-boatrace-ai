@@ -403,6 +403,96 @@ def train(history):
     return m
 
 
+# 艇番なし1着モデル（表示・検証専用）。
+# 本番1着モデルから lane だけを除いた特徴量で別途学習し、
+# 「艇番を無視しても選手・機力として最も1着に近い艇」を求める。
+# 本番の確率・買い目・資金配分には一切使わない。
+LANE_AGNOSTIC_NUM = [col for col in BASE_NUM if col != "lane"]
+LANE_AGNOSTIC_CAT = list(BASE_CAT)
+LANE_AGNOSTIC_VERSION = "lane-agnostic-v1-20260926"
+
+
+def train_lane_agnostic(history):
+    need = set(LANE_AGNOSTIC_NUM + LANE_AGNOSTIC_CAT + ["finish"])
+    missing = need - set(history.columns)
+
+    if missing:
+        raise ValueError(
+            "学習CSVに不足列: " + ", ".join(sorted(missing))
+        )
+
+    m = _pipeline(num_cols=LANE_AGNOSTIC_NUM, cat_cols=LANE_AGNOSTIC_CAT)
+    y_first = (
+        pd.to_numeric(history["finish"], errors="coerce") == 1
+    ).astype(int)
+    m.fit(history[LANE_AGNOSTIC_NUM + LANE_AGNOSTIC_CAT], y_first)
+    return m
+
+
+def lane_agnostic_strongest(model, race):
+    """艇番なしモデルでレース内の1着確率を正規化し、最強艇を返す。
+
+    失敗時は None を返す（表示・保存を諦めるだけで本番予想には影響しない）。
+    """
+    if model is None or race is None or len(race) == 0 or "lane" not in race:
+        return None
+
+    x = race.copy()
+    for c in LANE_AGNOSTIC_NUM + LANE_AGNOSTIC_CAT:
+        if c not in x:
+            x[c] = np.nan
+
+    lanes = pd.to_numeric(x["lane"], errors="coerce")
+    valid = lanes.between(1, 6)
+    if not valid.any():
+        return None
+    x = x.loc[valid]
+    lanes = lanes.loc[valid].astype(int)
+
+    raw = model.predict_proba(x[LANE_AGNOSTIC_NUM + LANE_AGNOSTIC_CAT])[:, 1]
+    raw = np.clip(np.asarray(raw, dtype=float), 1e-6, None)
+    probs = raw / raw.sum()
+
+    top = int(np.argmax(probs))
+    return {
+        "version": LANE_AGNOSTIC_VERSION,
+        "strongest_lane": int(lanes.iloc[top]),
+        "strongest_prob": float(probs[top]),
+        "probs": {
+            str(int(lane)): float(p) for lane, p in zip(lanes, probs)
+        },
+    }
+
+
+def lane1_strongest_badge(final, lane_agnostic):
+    """本命（p_first最大）が1号艇かつ艇番なしモデルでも1号艇が最強か。"""
+    if not lane_agnostic or final is None or len(final) == 0:
+        return False
+    if "p_first" not in final.columns or "lane" not in final.columns:
+        return False
+    probs = pd.to_numeric(final["p_first"], errors="coerce")
+    if probs.isna().all():
+        return False
+    favorite_lane = int(final.loc[probs.idxmax(), "lane"])
+    return favorite_lane == 1 and int(lane_agnostic.get("strongest_lane", 0)) == 1
+
+
+def lane_agnostic_snapshot(final, lane_agnostic):
+    """prediction_snapshots.payload_json へ保存する検証用の判定結果。"""
+    if not lane_agnostic:
+        return None
+    favorite_lane = None
+    try:
+        probs = pd.to_numeric(final["p_first"], errors="coerce")
+        favorite_lane = int(final.loc[probs.idxmax(), "lane"])
+    except Exception:
+        favorite_lane = None
+    out = dict(lane_agnostic)
+    out["favorite_lane"] = favorite_lane
+    out["lane1_badge"] = bool(lane1_strongest_badge(final, lane_agnostic))
+    return out
+
+
 def _rank_score_lower_better(series):
     s = pd.to_numeric(series, errors="coerce")
 
