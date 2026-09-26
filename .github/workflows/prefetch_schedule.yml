@@ -2,6 +2,17 @@ name: Prefetch Daily Schedule
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        # 手動実行は既定で全量取得し直す。Supabaseのpg_cronからの起動
+        # （supabase/migrations/20260926011000_trigger_prefetch_schedule_via_pg_cron.sql）
+        # は ensure を渡し、当日分が埋まっていれば何もしない。
+        description: "full: 全量取得し直す / ensure: 当日分が未取得のときだけ取得"
+        type: choice
+        options:
+          - full
+          - ensure
+        default: full
   schedule:
     # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
     # 評価される（指定しても無視される）。JST 07:00 に実行するため、
@@ -17,6 +28,10 @@ on:
     # --mode ensure で動き、既に当日分が埋まっていれば何もせず終了する。
     # さらに refresh_schedule_status（--mode status）も当日分が未取得なら
     # 全量取得へ切り替えるため、どちらかが先に発火した時点で埋まる。
+    #
+    # それでも欠落するため、同じ時刻にSupabaseのpg_cronからも
+    # workflow_dispatch（inputs.mode=ensure）で起動している（track_odds.ymlと
+    # 同じ仕組み）。このscheduleは保険として残す。
     - cron: "5,35 21-23 * * *"
 
 jobs:
@@ -39,7 +54,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # 手動実行は常に全量取得し直す。schedule実行は当日分が
-          # 埋まっていれば何もしない（複数回のcronで重複取得しない）。
-          PREFETCH_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'ensure' }}
+          # workflow_dispatchは inputs.mode に従う（手動実行の既定はfull、
+          # pg_cronからはensure）。schedule実行は当日分が埋まっていれば
+          # 何もしない（複数回のcronで重複取得しない）。
+          PREFETCH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'ensure' }}
         run: python schedule_prefetcher.py --mode "$PREFETCH_MODE"
