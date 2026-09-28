@@ -59,7 +59,9 @@ jobs:
             python build_history_full.py --start "${{ inputs.start }}" --end "${{ inputs.end }}" \
               || echo "::warning::空白補完は行いませんでした（上のメッセージ参照）"
             # 補完した行にも finish_full が入っているか確認のため、もう一度集計だけ出す
-            [ "${{ inputs.fill_finish_full }}" = "true" ] && python build_history_full.py --fill-finish-full
+            if [ "${{ inputs.fill_finish_full }}" = "true" ]; then
+              python build_history_full.py --fill-finish-full
+            fi
           fi
       - name: Commit
         working-directory: _data
