@@ -55,8 +55,8 @@ Codeタブのセッションを新しいリポジトリで開き直した場合�
 | 1 | trigger-track-odds-every-5-minutes | 動かしたまま |
 | 4 | trigger-refresh-schedule-status | 動かしたまま |
 | 5 | trigger-prefetch-schedule | 動かしたまま |
-| 6 | trigger-history-backfill-night（22:40 JST） | **停止中**（2026-09-28 11時頃に停止） |
-| 7 | trigger-history-backfill-morning（04:40 JST） | **停止中** |
+| 6 | trigger-history-backfill-night（22:40 JST） | 11時頃に停止 → 14時頃に再開 |
+| 7 | trigger-history-backfill-morning（04:40 JST） | 11時頃に停止 → 14時頃に再開 |
 
 再開（CHECKLIST G-1、今夜 22:40 JST より前に）:
 
@@ -72,8 +72,12 @@ select cron.alter_job(job_id := 7, active := true);
 
 CHECKLIST.md のチェック欄を参照。Codeタブが最後に更新した時点:
 
-- A（事前準備）: 完了
-- B 以降: ユーザー作業待ち
+- A〜F: 完了（2026-09-28 14時頃に切り替え済み）
+  - 公開 `-boatrace-ai`（新・履歴なし）/ 非公開 `-boatrace-ai-data` / 非公開・アーカイブ `-boatrace-ai-archive`
+  - pg_cron の Vault トークンは T3（旧・新両方の Actions 権限）に入れ替え済み。
+    旧リポジトリはアーカイブ済みなので、次に作り直すときは新リポジトリだけでよい
+  - 過去データ収集の pg_cron（jobid 6・7）は再開済み（`active = true`）
+- G（確認）: CHECKLIST の G 参照。翌朝に 00:30 の日次収集・夜間の過去データ収集・朝のスケジュール取得を確認する
 
 ## 注意
 
