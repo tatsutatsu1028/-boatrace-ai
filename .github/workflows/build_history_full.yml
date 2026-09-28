@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       start:
-        description: "補完の開始日 (YYYYMMDD)。空欄なら補完しない"
+        description: "補完の開始日 (YYYYMMDD)。「-」なら補完しない"
         required: false
         default: "20260625"
       end:
@@ -48,12 +48,19 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install requests beautifulsoup4 lxml pandas numpy
+      # finish_full の後付けを先に行い、空白補完はページが揃っていなければ
+      # 中止メッセージだけ出して続ける（後付け分はコミットする）。
       - name: Build
         run: |
-          ARGS=""
-          [ -n "${{ inputs.start }}" ] && ARGS="$ARGS --start ${{ inputs.start }} --end ${{ inputs.end }}"
-          [ "${{ inputs.fill_finish_full }}" = "true" ] && ARGS="$ARGS --fill-finish-full"
-          python build_history_full.py $ARGS
+          if [ "${{ inputs.fill_finish_full }}" = "true" ]; then
+            python build_history_full.py --fill-finish-full
+          fi
+          if [ -n "${{ inputs.start }}" ] && [ "${{ inputs.start }}" != "-" ]; then
+            python build_history_full.py --start "${{ inputs.start }}" --end "${{ inputs.end }}" \
+              || echo "::warning::空白補完は行いませんでした（上のメッセージ参照）"
+            # 補完した行にも finish_full が入っているか確認のため、もう一度集計だけ出す
+            [ "${{ inputs.fill_finish_full }}" = "true" ] && python build_history_full.py --fill-finish-full
+          fi
       - name: Commit
         working-directory: _data
         run: |
