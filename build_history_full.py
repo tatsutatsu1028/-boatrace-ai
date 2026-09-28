@@ -77,7 +77,19 @@ def build_rows(start, end):
     return out[out["race_key"].isin(ok)].sort_values(["race_date", "jcd", "race_no", "lane"])
 
 
-def append_range(start, end):
+def coverage(start, end):
+    """期間内の競走成績のレースのうち、ページ取得済みのレース数。"""
+    k = store.read_kind("k_results", start, end, columns=["race_key"])
+    races = set(k["race_key"])
+    have = store.existing_race_keys("pages") & races
+    return len(races), len(have)
+
+
+def append_range(start, end, allow_partial=False):
+    total, have = coverage(start, end)
+    print(f"[BUILD] {start}〜{end}: 競走成績 {total}レース / ページ取得済み {have}レース")
+    if have < total and not allow_partial:
+        raise SystemExit(f"[BUILD] ページ未取得が {total - have}レースあるため中止（--allow-partial で強行）")
     rows = build_rows(start, end)
     have = set(pd.read_csv(HIST, usecols=["race_key"], dtype=str)["race_key"]) if HIST.exists() else set()
     rows = rows[~rows["race_key"].isin(have)]
@@ -115,9 +127,10 @@ def main():
     ap.add_argument("--start")
     ap.add_argument("--end")
     ap.add_argument("--fill-finish-full", action="store_true")
+    ap.add_argument("--allow-partial", action="store_true")
     a = ap.parse_args()
     if a.start and a.end:
-        append_range(a.start, a.end)
+        append_range(a.start, a.end, allow_partial=a.allow_partial)
     if a.fill_finish_full:
         fill_finish_full()
 
