@@ -31,6 +31,11 @@ from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 # 固定保存は旧スナップショット形式との互換性を維持する。
 from result_tracker import (
     load_results,
+    load_results_full,
+    load_research_payloads,
+    load_ticket_payloads,
+    load_result_detail,
+    ResultsLoadError,
     load_analysis_view,
     save_race_result,
     delete_result,
@@ -1414,7 +1419,12 @@ with tab4:
     st.subheader("📊 予想検証")
     if not IS_ADMIN:
         st.caption("🔒 収集スタッフは検証画面を閲覧のみで利用します。")
-    results_df = load_results()
+    results_load_error = None
+    try:
+        results_df = load_results()
+    except ResultsLoadError as e:
+        results_df = None
+        results_load_error = str(e)
     st.markdown("### 📈 AI成績分析")
 
     # Supabaseの分析ビューをまとめて表示
@@ -1439,9 +1449,16 @@ with tab4:
                     use_container_width=True,
                     hide_index=True,
                 )
-    vm = validation_metrics(results_df)
+    vm = validation_metrics(results_df) if results_df is not None else None
 
-    if vm["races"] == 0:
+    if results_load_error is not None:
+        st.error(
+            "⚠️ 検証データをSupabaseから取得できませんでした。"
+            "保存済みのデータが消えたわけではありません。"
+            "しばらく待ってから画面を再読み込みしてください。"
+        )
+        st.caption(f"エラー内容: {results_load_error}")
+    elif vm["races"] == 0:
         st.info("まだ検証データがありません。AI予想後に実着順と払戻を登録すると、ここへ蓄積されます。")
     else:
         m1, m2 = st.columns(2)
@@ -1496,73 +1513,90 @@ with tab4:
             "を再計算します。実際の予想ロジック・設定・保存データは変更しません。"
         )
 
-        virtual_compare = _virtual_backtest_table(results_df)
-        virtual_show = virtual_compare.copy()
-        virtual_show["的中率"] = (
-            pd.to_numeric(virtual_show["的中率"], errors="coerce") * 100
+        # 仮想バックテストには全レースの tickets_json（全件で約2MB）が必要なため、
+        # 一覧には含めず、表示を選んだ時だけ追加取得する。
+        show_virtual_backtest = st.checkbox(
+            "🧪 仮想バックテストを表示（買い目データを追加で読み込みます）",
+            value=False,
+            key="show_virtual_backtest",
         )
-        virtual_show["回収率"] = (
-            pd.to_numeric(virtual_show["回収率"], errors="coerce") * 100
-        )
+        backtest_df = None
+        if show_virtual_backtest:
+            try:
+                backtest_df = results_df.merge(
+                    load_ticket_payloads(), on="race_key", how="left"
+                )
+            except ResultsLoadError as e:
+                st.error(f"⚠️ 仮想バックテスト用の買い目データを取得できませんでした。（{e}）")
 
-        st.dataframe(
-            virtual_show,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                "回収率": st.column_config.NumberColumn(format="%.1f%%"),
-                "投資": st.column_config.NumberColumn(format="%d円"),
-                "払戻": st.column_config.NumberColumn(format="%d円"),
-                "収支": st.column_config.NumberColumn(format="%+d円"),
-            },
-        )
-
-        with st.expander("🔬 条件を変えて試す", expanded=False):
-            custom_prob_pct = st.slider(
-                "AI本命確率の最低ライン",
-                min_value=0,
-                max_value=90,
-                value=80,
-                step=5,
-                format="%d%%",
-                key="virtual_bt_min_prob",
+        if backtest_df is not None:
+            virtual_compare = _virtual_backtest_table(backtest_df)
+            virtual_show = virtual_compare.copy()
+            virtual_show["的中率"] = (
+                pd.to_numeric(virtual_show["的中率"], errors="coerce") * 100
             )
-            custom_groups = st.multiselect(
-                "残す買い目区分",
-                ["本線", "抑え", "穴"],
-                default=["本線"],
-                key="virtual_bt_groups",
+            virtual_show["回収率"] = (
+                pd.to_numeric(virtual_show["回収率"], errors="coerce") * 100
             )
 
-            if custom_groups:
-                custom_bt = _virtual_backtest(
-                    results_df,
-                    min_p1_prob=custom_prob_pct / 100.0 if custom_prob_pct > 0 else None,
-                    groups=set(custom_groups),
+            st.dataframe(
+                virtual_show,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "回収率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "投資": st.column_config.NumberColumn(format="%d円"),
+                    "払戻": st.column_config.NumberColumn(format="%d円"),
+                    "収支": st.column_config.NumberColumn(format="%+d円"),
+                },
+            )
+
+            with st.expander("🔬 条件を変えて試す", expanded=False):
+                custom_prob_pct = st.slider(
+                    "AI本命確率の最低ライン",
+                    min_value=0,
+                    max_value=90,
+                    value=80,
+                    step=5,
+                    format="%d%%",
+                    key="virtual_bt_min_prob",
+                )
+                custom_groups = st.multiselect(
+                    "残す買い目区分",
+                    ["本線", "抑え", "穴"],
+                    default=["本線"],
+                    key="virtual_bt_groups",
                 )
 
-                bc1, bc2 = st.columns(2)
-                with bc1:
-                    st.metric("対象レース", f"{custom_bt['対象R']}R")
-                    st.metric("的中レース", f"{custom_bt['的中R']}R")
-                    st.metric(
-                        "的中率",
-                        f"{custom_bt['的中率']*100:.1f}%"
-                        if pd.notna(custom_bt["的中率"])
-                        else "-",
+                if custom_groups:
+                    custom_bt = _virtual_backtest(
+                        backtest_df,
+                        min_p1_prob=custom_prob_pct / 100.0 if custom_prob_pct > 0 else None,
+                        groups=set(custom_groups),
                     )
-                with bc2:
-                    st.metric("仮想収支", f"{custom_bt['収支']:+,}円")
-                    st.metric(
-                        "仮想回収率",
-                        f"{custom_bt['回収率']*100:.1f}%"
-                        if pd.notna(custom_bt["回収率"])
-                        else "-",
-                    )
-                    st.metric("仮想投資", f"{custom_bt['投資']:,}円")
-            else:
-                st.info("少なくとも1つの買い目区分を選んでください。")
+
+                    bc1, bc2 = st.columns(2)
+                    with bc1:
+                        st.metric("対象レース", f"{custom_bt['対象R']}R")
+                        st.metric("的中レース", f"{custom_bt['的中R']}R")
+                        st.metric(
+                            "的中率",
+                            f"{custom_bt['的中率']*100:.1f}%"
+                            if pd.notna(custom_bt["的中率"])
+                            else "-",
+                        )
+                    with bc2:
+                        st.metric("仮想収支", f"{custom_bt['収支']:+,}円")
+                        st.metric(
+                            "仮想回収率",
+                            f"{custom_bt['回収率']*100:.1f}%"
+                            if pd.notna(custom_bt["回収率"])
+                            else "-",
+                        )
+                        st.metric("仮想投資", f"{custom_bt['投資']:,}円")
+                else:
+                    st.info("少なくとも1つの買い目区分を選んでください。")
 
         st.caption(
             "※ この仮想バックテストは『保存済み買い目を削る／レースを見送る』比較専用です。"
@@ -1607,7 +1641,19 @@ with tab4:
             hide_index=True,
         )
 
+        # 買い目詳細(tickets_json)・6艇予測詳細(lane_probs_json)は全件で十数MBになるため、
+        # 必要な時だけ追加取得してCSVへ含める。
+        csv_include_lane_probs = st.checkbox(
+            "CSVに買い目詳細・6艇予測詳細も含める（Supabaseの転送量が大きくなります）",
+            value=False,
+            key="csv_include_lane_probs",
+        )
         csv_export_results = results_df.copy()
+        if csv_include_lane_probs:
+            try:
+                csv_export_results = load_results_full().copy()
+            except ResultsLoadError as e:
+                st.error(f"⚠️ 詳細データを取得できなかったため、詳細列なしのCSVになります。（{e}）")
         for _c in ("trifecta_actual", "top_ticket"):
             if _c in csv_export_results.columns:
                 # combo表記("3-1-4"等)をExcelが日付だと誤解釈するのを防ぐ
@@ -1657,8 +1703,23 @@ with tab4:
         # -------------------------------------------------
         # 研究用：補正を1段ずつ足したときの長期成績比較
         # -------------------------------------------------
+        # 補正別比較には全レースの lane_probs_json が必要で、全件取得すると
+        # 十数MBの転送になる。画面を開くたびに取得しないよう、表示を選んだ時だけ読む。
+        show_research_compare = st.checkbox(
+            "🧪 研究用・補正別の長期比較を表示（Supabaseの転送量が大きくなります）",
+            value=False,
+            key="show_research_compare",
+        )
+        research_source = pd.DataFrame(columns=["first_actual", "lane_probs_json"])
+        if show_research_compare:
+            try:
+                research_source = load_research_payloads()
+            except ResultsLoadError as e:
+                st.error(f"⚠️ 補正別比較データを取得できませんでした。（{e}）")
+                show_research_compare = False
+
         research_rows = []
-        for _, _rr in results_df.iterrows():
+        for _, _rr in research_source.iterrows():
             raw = _rr.get("lane_probs_json", "")
             if not raw or pd.isna(raw):
                 continue
@@ -1741,7 +1802,7 @@ with tab4:
                     "実1着平均確率": st.column_config.NumberColumn(format="%.1f%%"),
                 },
             )
-        else:
+        elif show_research_compare:
             st.info(
                 "🧪 補正別比較データはまだありません。研究比較機能追加後に保存したレースから自動で蓄積されます。"
             )
@@ -1779,7 +1840,15 @@ with tab4:
                 profit_v = sel.get("profit", 0)
                 st.metric("払戻 / 収支", f"{int(payout_v or 0):,}円", delta=f"{int(profit_v or 0):+,}円")
 
-            lane_probs_raw = sel.get("lane_probs_json", "")
+            # 一覧には重いlane_probs_jsonを含めていないため、
+            # 選んだ1レース分だけ詳細データを取得する。
+            try:
+                sel_detail = load_result_detail(sel.get("race_key")) or {}
+            except ResultsLoadError as e:
+                sel_detail = {}
+                st.error(f"⚠️ このレースの詳細データを取得できませんでした。（{e}）")
+
+            lane_probs_raw = sel_detail.get("lane_probs_json", "")
             try:
                 lane_probs_parsed = json.loads(lane_probs_raw) if lane_probs_raw and pd.notna(lane_probs_raw) else []
             except Exception:
@@ -1824,7 +1893,7 @@ with tab4:
                         "AI1着予測確率": st.column_config.NumberColumn(format="%.1f%%"),
                     },
                 )
-            else:
+            elif sel_detail:
                 st.info("このレースは6艇分の予測確率データが保存される前に記録されたため、詳細比較はできません。")
 
             if detail_research:
@@ -1866,7 +1935,7 @@ with tab4:
                         },
                     )
 
-            tickets_raw = sel.get("tickets_json", "")
+            tickets_raw = sel_detail.get("tickets_json", "")
             try:
                 tickets_saved = json.loads(tickets_raw) if tickets_raw and pd.notna(tickets_raw) else []
             except Exception:
@@ -1884,7 +1953,7 @@ with tab4:
                 })
                 cols = [c for c in ["買い目", "区分", "的中確率(%)", "オッズ", "期待値", "購入額", "的中"] if c in tv.columns]
                 st.dataframe(tv[cols], use_container_width=True, hide_index=True)
-            else:
+            elif sel_detail:
                 st.caption("このレースは購入した買い目の記録がありません。")
 
 

@@ -92,6 +92,26 @@ RESULT_COLUMNS = [
     "lane_probs_json",
 ]
 
+# 一覧・集計用に取得する列。lane_probs_json（1行平均約10KB、全体の約8割）と
+# tickets_json（同約1.2KB）は一覧では使わないため除外する。
+# レース詳細を開いた時は1件分だけ、仮想バックテストや補正別比較は
+# 表示を選んだ時だけ、必要な列を追加取得する。
+DETAIL_ONLY_COLUMNS = ["tickets_json", "lane_probs_json"]
+LIST_COLUMNS = [c for c in RESULT_COLUMNS if c not in DETAIL_ONLY_COLUMNS]
+
+# PostgRESTは1リクエストあたり最大1,000行（max_rows）で打ち切るため、
+# 一覧はこの件数ずつ分割して取得する。
+SUPABASE_PAGE_SIZE = 1000
+
+
+class ResultsLoadError(RuntimeError):
+    """Supabaseから検証データを取得できなかったことを表す。
+
+    取得失敗を空データとして扱うと「検証データがありません」と誤表示されるため、
+    呼び出し側で通常の空状態と区別して表示できるよう専用の例外にしている。
+    """
+
+
 PAYOUT_COLUMNS = [
     "race_key",
     "race_date",
@@ -189,55 +209,121 @@ def _json_safe(v):
     return v
 
 
-def _normalize_df(df):
+def _normalize_df(df, columns=RESULT_COLUMNS):
     if df is None or len(df) == 0:
-        return pd.DataFrame(columns=RESULT_COLUMNS)
+        return pd.DataFrame(columns=columns)
 
     out = df.copy()
 
-    for c in RESULT_COLUMNS:
+    for c in columns:
         if c not in out.columns:
             out[c] = np.nan
 
-    return out[RESULT_COLUMNS]
+    return out[columns]
 
 
 # -----------------------------
 # Supabase
 # -----------------------------
 
-def _load_supabase():
-    url, _ = _supabase_config()
+def _fetch_all_pages(columns, page_size=SUPABASE_PAGE_SIZE):
+    """prediction_results を page_size 件ずつ分割取得して全件返す。
 
-    endpoint = (
-        f"{url}/rest/v1/{SUPABASE_TABLE}"
-        "?select=*"
-        "&order=race_date.desc,venue.asc,race_no.desc"
+    ページ間で行が重複・欠落しないよう、一意な race_key を最後の並び順に含める。
+    """
+    url, _ = _supabase_config()
+    endpoint = f"{url}/rest/v1/{SUPABASE_TABLE}"
+
+    rows = []
+    offset = 0
+    while True:
+        r = requests.get(
+            endpoint,
+            params={
+                "select": ",".join(columns),
+                "order": "race_date.desc,venue.asc,race_no.desc,race_key.asc",
+                "limit": str(page_size),
+                "offset": str(offset),
+            },
+            headers=_headers(),
+            timeout=30,
+        )
+        r.raise_for_status()
+        page = r.json() or []
+        rows.extend(page)
+        # サーバー側のmax_rowsがpage_sizeより小さくても取りこぼさないよう、
+        # 空ページが返るまで実際に受け取った件数だけ進める。
+        if not page:
+            break
+        offset += len(page)
+
+    return rows
+
+
+def _load_supabase():
+    rows = _fetch_all_pages(LIST_COLUMNS)
+    return _normalize_df(pd.DataFrame(rows), LIST_COLUMNS)
+
+
+def _load_supabase_full():
+    rows = _fetch_all_pages(RESULT_COLUMNS)
+    return _normalize_df(pd.DataFrame(rows))
+
+
+# Streamlitは画面操作のたびにスクリプト全体（非表示のタブ含む）を再実行するため、
+# キャッシュなしだと操作ごとにprediction_resultsを全件再取得し、
+# Supabaseのegressを大きく消費していた。
+# アプリからの保存・削除時はclear()で即時反映し、GitHub Actions側で
+# 保存された結果は最大TTL分遅れて反映される。
+# 例外はキャッシュされないため、取得失敗時は次回の再実行で再試行される。
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_supabase_cached():
+    return _load_supabase()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_supabase_full_cached():
+    return _load_supabase_full()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_supabase_research_cached():
+    rows = _fetch_all_pages(["race_key", "first_actual", "lane_probs_json"])
+    return pd.DataFrame(
+        rows, columns=["race_key", "first_actual", "lane_probs_json"]
     )
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_supabase_tickets_cached():
+    rows = _fetch_all_pages(["race_key", "tickets_json"])
+    return pd.DataFrame(rows, columns=["race_key", "tickets_json"])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_supabase_detail_cached(race_key):
+    url, _ = _supabase_config()
     r = requests.get(
-        endpoint,
+        f"{url}/rest/v1/{SUPABASE_TABLE}",
+        params={
+            "select": ",".join(RESULT_COLUMNS),
+            "race_key": f"eq.{race_key}",
+            "limit": "1",
+        },
         headers=_headers(),
         timeout=20,
     )
     r.raise_for_status()
-
-    data = r.json()
-
-    if not data:
-        return pd.DataFrame(columns=RESULT_COLUMNS)
-
-    return _normalize_df(pd.DataFrame(data))
+    data = r.json() or []
+    return dict(data[0]) if data else None
 
 
-# Streamlitは画面操作のたびにスクリプト全体（非表示のタブ含む）を再実行するため、
-# キャッシュなしだと操作ごとにprediction_resultsを全件（lane_probs_json込みで
-# 1回十数MB）再取得し、Supabaseのegressを大きく消費していた。
-# アプリからの保存・削除時はclear()で即時反映し、GitHub Actions側で
-# 保存された結果は最大TTL分遅れて反映される。
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_supabase_cached():
-    return _load_supabase()
+def _clear_result_caches():
+    _load_supabase_cached.clear()
+    _load_supabase_full_cached.clear()
+    _load_supabase_research_cached.clear()
+    _load_supabase_tickets_cached.clear()
+    _load_supabase_detail_cached.clear()
 
 
 def _upsert_supabase(record):
@@ -548,23 +634,83 @@ def _write_local(df):
 # 共通I/O
 # -----------------------------
 
+def _raise_load_error(label, e):
+    print(
+        f"[RESULT_TRACKER] Supabase {label} error:",
+        type(e).__name__,
+        str(e),
+        flush=True,
+    )
+    raise ResultsLoadError(
+        f"{type(e).__name__}: {e}"
+    ) from e
+
+
 def _load_raw():
+    """一覧・集計用の検証データ（lane_probs_jsonを除く全件）を返す。
+
+    Supabase設定時に取得に失敗した場合は ResultsLoadError を送出する。
+    以前はローカルCSV（Streamlit Cloudでは存在しない）へ黙って戻り、
+    空データとして「検証データがありません」と表示してしまっていた。
+    """
     if _use_supabase():
         try:
             return _load_supabase_cached()
         except Exception as e:
-            print(
-                "[RESULT_TRACKER] Supabase load error:",
-                type(e).__name__,
-                str(e),
-                flush=True,
-            )
+            _raise_load_error("load", e)
 
-    return _load_local()
+    return _load_local()[LIST_COLUMNS]
 
 
 def load_results():
     return _load_raw()
+
+
+def load_results_full():
+    """CSV出力用。lane_probs_jsonを含む全列・全件を返す（転送量が大きい）。"""
+    if _use_supabase():
+        try:
+            return _load_supabase_full_cached()
+        except Exception as e:
+            _raise_load_error("full load", e)
+
+    return _load_local()
+
+
+def load_research_payloads():
+    """補正別比較用に race_key, first_actual, lane_probs_json を全件返す。"""
+    columns = ["race_key", "first_actual", "lane_probs_json"]
+    if _use_supabase():
+        try:
+            return _load_supabase_research_cached()
+        except Exception as e:
+            _raise_load_error("research load", e)
+
+    return _load_local()[columns]
+
+
+def load_ticket_payloads():
+    """仮想バックテスト用に race_key, tickets_json を全件返す。"""
+    if _use_supabase():
+        try:
+            return _load_supabase_tickets_cached()
+        except Exception as e:
+            _raise_load_error("tickets load", e)
+
+    return _load_local()[["race_key", "tickets_json"]]
+
+
+def load_result_detail(race_key):
+    """1レース分の全列（lane_probs_json・tickets_json含む）を dict で返す。"""
+    if _use_supabase():
+        try:
+            return _load_supabase_detail_cached(str(race_key))
+        except Exception as e:
+            _raise_load_error("detail load", e)
+
+    df = _load_local()
+    hit = df[df["race_key"].astype(str).eq(str(race_key))]
+    return hit.iloc[0].to_dict() if len(hit) else None
 
 
 def load_payouts_for_date(race_date):
@@ -609,7 +755,32 @@ def load_payouts_for_date(race_date):
 
 
 def result_exists(race_key):
-    df = _load_raw()
+    if _use_supabase():
+        # 一覧全件を取らず、該当race_keyの1行だけを確認する。
+        url, _ = _supabase_config()
+        try:
+            r = requests.get(
+                f"{url}/rest/v1/{SUPABASE_TABLE}",
+                params={
+                    "select": "race_key",
+                    "race_key": f"eq.{race_key}",
+                    "limit": "1",
+                },
+                headers=_headers(),
+                timeout=15,
+            )
+            r.raise_for_status()
+            return bool(r.json())
+        except Exception as e:
+            print(
+                "[RESULT_TRACKER] result_exists error:",
+                type(e).__name__,
+                str(e),
+                flush=True,
+            )
+            return False
+
+    df = _load_local()
 
     if len(df) == 0:
         return False
@@ -961,7 +1132,7 @@ def save_race_result(
             _upsert_supabase(
                 record
             )
-            _load_supabase_cached.clear()
+            _clear_result_caches()
             record["_used_snapshot"] = bool(snapshot_used)
             record["_snapshot_saved_at"] = snapshot_used.get("saved_at", "") if snapshot_used else ""
             record["_snapshot_kind"] = snapshot_used.get("snapshot_kind", "") if snapshot_used else ""
@@ -1010,7 +1181,7 @@ def delete_result(race_key):
             deleted = _delete_supabase(
                 race_key
             )
-            _load_supabase_cached.clear()
+            _clear_result_caches()
             return deleted
         except Exception as e:
             print(
