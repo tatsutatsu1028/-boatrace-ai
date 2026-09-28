@@ -1,0 +1,65 @@
+name: Build history_full (gap fill)
+
+# 過去データ（data/history/）から history_full.csv の行を作って足す（手動実行のみ）。
+#   - 空白期間の補完: start/end を指定（既定 2026-06-25〜09-07）
+#   - 既存行への finish_full（実際の1〜6着）の後付け: fill_finish_full=true
+# 期間内のページが全レース取得済みでなければ中止する。
+# history_full.csv は日次収集（Collect History）も書くので、同じ concurrency グループで直列にする。
+# 予想・学習のロジックは変えない（finish 列は従来どおり、finish_full は新しい列）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "補完の開始日 (YYYYMMDD)。空欄なら補完しない"
+        required: false
+        default: "20260625"
+      end:
+        description: "補完の終了日 (YYYYMMDD)"
+        required: false
+        default: "20260907"
+      fill_finish_full:
+        description: "既存行に finish_full を後付けする"
+        type: boolean
+        default: true
+
+concurrency:
+  group: collect-history
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install requests beautifulsoup4 lxml pandas numpy
+      - name: Build
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.start }}" ] && ARGS="$ARGS --start ${{ inputs.start }} --end ${{ inputs.end }}"
+          [ "${{ inputs.fill_finish_full }}" = "true" ] && ARGS="$ARGS --fill-finish-full"
+          python build_history_full.py $ARGS
+      - name: Commit
+        working-directory: _data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add history_full.csv
+          git diff --staged --quiet && { echo "変更なし"; exit 0; }
+          git commit -q -m "history_full: 空白期間の補完・finish_full の後付け"
+          git pull -q --rebase && git push -q
