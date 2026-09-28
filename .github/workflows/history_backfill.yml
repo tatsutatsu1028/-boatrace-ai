@@ -1,0 +1,100 @@
+name: History Backfill
+
+# モデル作り直し用の過去データ収集（予想・学習には使っていない）。
+#   1) 公式ダウンロードファイル（競走成績K・番組表B）を取得して解析 … official_download.py
+#   2) K/Bに無い項目を出走表・直前情報ページから取得 …………………… history_pages.py
+# 保存先は非公開のデータ用リポジトリ（tatsutatsu1028/-boatrace-ai-data）の
+# data/history/（月別、集め終わった月は .csv.gz）。_data/ に取り出して使う。
+#
+# 起動: Supabaseのpg_cronから workflow_dispatch で夜間に2回
+#   （supabase/migrations/20260928000000_trigger_history_backfill_via_pg_cron.sql）
+#   - 22:40 JST 起動 → 03:50 JST に停止（公式サイトのメンテナンス 4:00〜4:30 の前）
+#   - 04:40 JST 起動 → 08:00 JST に停止（朝の開催前）
+# 取得間隔は全体で3.4秒以上（毎秒0.3リクエスト以下）。止まっても次回は続きから。
+# 取得分はどちらの段階でも30分ごとに data/history/ をpushする（途中で止まっても失わない）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      stop_at:
+        description: "停止時刻 (JST HH:MM)"
+        required: true
+        default: "03:50"
+      start:
+        description: "収集範囲の開始日 (YYYYMMDD)。新しい日付から順に取る"
+        required: true
+        default: "20240927"
+      end:
+        description: "収集範囲の終了日 (YYYYMMDD)。空欄なら昨日"
+        required: false
+        default: ""
+      mode:
+        description: "all / download / pages"
+        required: true
+        default: "all"
+
+concurrency:
+  group: history-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    # このリポジトリへは書き込まない（データは _data/ の非公開リポジトリへpush）。
+    # actions: read は日次収集の実行中チェック（history_pages.py）用。
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+    steps:
+      - uses: actions/checkout@v4
+
+      # 学習・過去データは非公開リポジトリにある（公式データを公開リポジトリで
+      # 再配布しないため）。_data/ に取り出し、BOATRACE_DATA_DIR で各スクリプトへ渡す。
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas numpy lhafile
+
+      - name: Resolve settings
+        id: cfg
+        shell: bash
+        run: |
+          echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          echo "start=${{ inputs.start }}" >> "$GITHUB_OUTPUT"
+          echo "end=${{ inputs.end }}" >> "$GITHUB_OUTPUT"
+          echo "stop_at=${{ inputs.stop_at }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download official K/B files
+        if: steps.cfg.outputs.mode != 'pages'
+        run: |
+          python official_download.py --start "${{ steps.cfg.outputs.start }}" \
+            --end "${{ steps.cfg.outputs.end }}" --max-minutes 150 \
+            --checkpoint-cmd 'bash tools/commit_history_data.sh' --checkpoint-minutes 30 \
+            ${{ steps.cfg.outputs.stop_at && format('--stop-at {0}', steps.cfg.outputs.stop_at) || '' }}
+          bash tools/commit_history_data.sh
+
+      - name: Collect pages
+        if: steps.cfg.outputs.mode != 'download'
+        run: |
+          ARGS="--start ${{ steps.cfg.outputs.start }} --checkpoint-cmd 'bash tools/commit_history_data.sh' --checkpoint-minutes 30"
+          [ -n "${{ steps.cfg.outputs.end }}" ] && ARGS="$ARGS --end ${{ steps.cfg.outputs.end }}"
+          [ -n "${{ steps.cfg.outputs.stop_at }}" ] && ARGS="$ARGS --stop-at ${{ steps.cfg.outputs.stop_at }}"
+          eval python history_pages.py $ARGS
+
+      - name: Commit collected data
+        if: always()
+        run: bash tools/commit_history_data.sh

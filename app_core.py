@@ -1,0 +1,3567 @@
+import json
+import hmac
+import time
+import re
+import base64
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import extra_streamlit_components as stx
+from datetime import date
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
+import requests
+
+from official_fetcher import (
+    VENUES,
+    fetch_official_race,
+    fetch_odds3t,
+    fetch_race_result,
+    fetch_venue_result_list,
+)
+from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
+from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants
+from stake_allocator import allocate_stakes_smart
+from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
+# 固定保存は旧スナップショット形式との互換性を維持する。
+from result_tracker import (
+    load_results,
+    load_analysis_view,
+    save_race_result,
+    delete_result,
+    result_exists,
+    metrics as validation_metrics,
+    calibration_table,
+    load_settings,
+    save_settings,
+    odds_tracking_available,
+    add_to_odds_watchlist,
+    save_odds_snapshot_now,
+    load_odds_history,
+    snapshot_payout_from_official,
+    deactivate_odds_watchlist,
+    load_prediction_snapshot,
+    save_prediction_snapshot,
+    supabase_config,
+    fetch_daily_schedule_supabase,
+)
+# スレッズ投稿は任意機能。threads_poster.py を置いていない場合でも
+# アプリ本体は動くようにしておく（未導入で全体が落ちるのを防ぐ）。
+try:
+    from threads_poster import (
+        build_post_text as threads_build_post_text,
+        build_daily_summary_text as threads_build_daily_summary_text,
+        fetch_daily_publication_results as threads_fetch_daily_publication_results,
+        post_text as threads_post_text,
+        load_config as threads_load_config,
+        save_config as threads_save_config,
+        token_age_days as threads_token_age_days,
+        fetch_user_id as threads_fetch_user_id,
+        TEXT_LIMIT as THREADS_TEXT_LIMIT,
+    )
+    THREADS_AVAILABLE = True
+except Exception:
+    THREADS_AVAILABLE = False
+    THREADS_TEXT_LIMIT = 500
+
+    def threads_fetch_user_id(*args, **kwargs):
+        raise RuntimeError("threads_poster.py が未導入です。")
+
+    def threads_build_post_text(*args, **kwargs):
+        return ""
+
+    def threads_build_daily_summary_text(*args, **kwargs):
+        return ""
+
+    def threads_fetch_daily_publication_results(*args, **kwargs):
+        raise RuntimeError("threads_poster.py が未導入です。")
+
+    def threads_post_text(*args, **kwargs):
+        raise RuntimeError("threads_poster.py が未導入です。")
+
+    def threads_load_config(*args, **kwargs):
+        return None
+
+    def threads_save_config(*args, **kwargs):
+        raise RuntimeError("threads_poster.py が未導入です。")
+
+    def threads_token_age_days(*args, **kwargs):
+        return None
+st.set_page_config(page_title="BOAT AI Mobile", page_icon="🚤", layout="centered", initial_sidebar_state="collapsed")
+st.markdown("""
+<style>
+.block-container{max-width:760px;padding-top:.8rem;padding-bottom:5rem}
+.stButton>button{width:100%;min-height:3rem;border-radius:14px;font-weight:700}
+.ticket{padding:.8rem 1rem;border:1px solid rgba(150,150,150,.28);border-radius:14px;margin:.45rem 0}
+.small{opacity:.72;font-size:.86rem}
+.money{margin-top:.45rem;font-size:1.02rem;font-weight:700}
+/* 会場グリッドはスマホ幅でもStreamlit標準の縦積みにせず、
+   横4列のまま表示する（狭い画面でも横スクロールなしで一覧できるように）。 */
+div[class*="st-key-venue_grid"] [data-testid="stHorizontalBlock"]{flex-wrap:nowrap!important;gap:.35rem!important}
+div[class*="st-key-venue_grid"] [data-testid="column"],
+div[class*="st-key-venue_grid"] [data-testid="stColumn"]{min-width:0!important;flex:1 1 0!important;width:auto!important;padding:0 .15rem!important}
+div[class*="st-key-venue_grid"] .stButton>button{min-height:2.7rem;font-size:.76rem;padding:.3rem .15rem;white-space:normal;line-height:1.15}
+div[class*="st-key-venue_grid"] .stCaption{text-align:center;font-size:.68rem}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🚤 BOAT AI Mobile")
+st.caption("公式情報＋展示データを合わせて、3連単を『本線・抑え・穴』に整理")
+
+def _secret_text(name):
+    try:
+        return str(st.secrets.get(name, "") or "").strip()
+    except Exception:
+        return ""
+
+
+AUTH_COOKIE_NAME = "boat_ai_auth_v2"
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _auto_random_progress():
+    """自動固定処理と同じ条件で、本日の固定件数と設定を取得する。"""
+    try:
+        url, key = supabase_config()
+        if not url or not key:
+            return None
+
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        settings_response = requests.get(
+            f"{url.rstrip('/')}/rest/v1/app_settings",
+            params={
+                "select": (
+                    "random_auto_enabled,random_auto_daily_count,"
+                    "random_auto_started_at"
+                ),
+                "id": "eq.1",
+                "limit": "1",
+            },
+            headers=headers,
+            timeout=10,
+        )
+        settings_response.raise_for_status()
+        settings_rows = settings_response.json() or []
+        if not settings_rows:
+            return None
+
+        settings = settings_rows[0]
+        target = int(settings.get("random_auto_daily_count", 3) or 3)
+        # auto_random_fix.py側のMAX_DAILY_COUNTと合わせること。
+        target = max(1, min(target, 60))
+        snapshot_params = {
+            "select": "race_key",
+            "race_date": f"eq.{_today_jst().isoformat()}",
+            "collector_name": "eq.auto_random",
+        }
+        started_at = settings.get("random_auto_started_at")
+        if started_at:
+            snapshot_params["saved_at"] = f"gte.{started_at}"
+
+        snapshots_response = requests.get(
+            f"{url.rstrip('/')}/rest/v1/prediction_snapshots",
+            params=snapshot_params,
+            headers=headers,
+            timeout=10,
+        )
+        snapshots_response.raise_for_status()
+        current = len(snapshots_response.json() or [])
+
+        return {
+            "current": current,
+            "target": target,
+            "enabled": bool(settings.get("random_auto_enabled", False)),
+        }
+    except Exception:
+        return None
+
+
+def _complete_adaptive_tickets(tickets, tri, odds, main_points, cover_points):
+    """予定点数に足りない買い目を、未採用の確率上位から補充する。"""
+    out = tickets.copy().drop_duplicates("combo", keep="first").reset_index(drop=True)
+    pool = tri.copy().drop_duplicates("combo", keep="first")
+    pool["prob"] = pd.to_numeric(pool["prob"], errors="coerce").fillna(0.0)
+
+    if odds is not None and len(odds) and {"combo", "odds"}.issubset(odds.columns):
+        odds_unique = odds[["combo", "odds"]].drop_duplicates("combo", keep="last")
+        pool = pool.merge(odds_unique, on="combo", how="left")
+    else:
+        pool["odds"] = np.nan
+    pool["odds"] = pd.to_numeric(pool["odds"], errors="coerce")
+    pool["expected_return"] = pool["prob"] * pool["odds"]
+
+    recommended = True
+    if "recommended" in out.columns and len(out):
+        recommended = bool(out["recommended"].fillna(True).all())
+
+    for group, target in (("本線", int(main_points)), ("抑え", int(cover_points))):
+        missing = target - int(out["group"].eq(group).sum())
+        if missing <= 0:
+            continue
+        picks = (
+            pool[~pool["combo"].isin(set(out["combo"]))]
+            .sort_values("prob", ascending=False)
+            .head(missing)
+            .copy()
+        )
+        picks["group"] = group
+        if "recommended" in out.columns:
+            picks["recommended"] = recommended
+        out = pd.concat([out, picks], ignore_index=True)
+
+    return out
+
+
+AUTH_TTL_SECONDS = 24 * 60 * 60
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def _today_jst():
+    """Streamlit Cloudのサーバー時刻に依存せず、日本時間の今日を返す。"""
+    return datetime.now(JST).date()
+
+
+
+def _staff_accounts():
+    """Secrets の STAFF_<ID>_PIN を自動収集する。"""
+    accounts = {}
+
+    try:
+        items = dict(st.secrets).items()
+    except Exception:
+        items = []
+
+    for key, value in items:
+        m = re.fullmatch(r"STAFF_([A-Za-z0-9_]+)_PIN", str(key))
+        if not m:
+            continue
+
+        pin = str(value or "").strip()
+        if not pin:
+            continue
+
+        staff_id = m.group(1)
+        accounts[staff_id] = {
+            "pin": pin,
+            "collector_name": f"{staff_id}さん",
+        }
+
+    return accounts
+
+
+def _auth_secret():
+    explicit = _secret_text("AUTH_COOKIE_SECRET")
+    if explicit:
+        return explicit.encode("utf-8")
+
+    staff_part = "|".join(
+        sorted(
+            f"{staff_id}:{info['pin']}"
+            for staff_id, info in _staff_accounts().items()
+        )
+    )
+    fallback = _secret_text("ADMIN_PIN") + "|" + staff_part
+    return hashlib.sha256(fallback.encode("utf-8")).digest()
+
+
+def _encode_field(value):
+    return base64.urlsafe_b64encode(
+        str(value).encode("utf-8")
+    ).decode("ascii")
+
+
+def _decode_field(value):
+    return base64.urlsafe_b64decode(
+        str(value).encode("ascii")
+    ).decode("utf-8")
+
+
+def _sign_auth(role, collector_name, expires_at):
+    collector_enc = _encode_field(collector_name)
+    payload = f"{role}|{collector_enc}|{int(expires_at)}"
+    sig = hmac.new(
+        _auth_secret(),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    raw = f"{payload}|{sig}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _verify_auth(token):
+    if not token:
+        return None
+
+    try:
+        raw = base64.urlsafe_b64decode(
+            str(token).encode("ascii")
+        ).decode("utf-8")
+
+        role, collector_enc, expires_s, sig = raw.split("|", 3)
+
+        if role not in {"admin", "staff"}:
+            return None
+
+        expires_at = int(expires_s)
+        if expires_at <= int(time.time()):
+            return None
+
+        payload = f"{role}|{collector_enc}|{expires_at}"
+        expected = hmac.new(
+            _auth_secret(),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(sig, expected):
+            return None
+
+        collector_name = _decode_field(collector_enc)
+
+        if role == "admin":
+            collector_name = "owner"
+        else:
+            valid_names = {
+                info["collector_name"]
+                for info in _staff_accounts().values()
+            }
+            if collector_name not in valid_names:
+                return None
+
+        return {
+            "role": role,
+            "collector_name": collector_name,
+        }
+    except Exception:
+        return None
+
+
+def _get_cookie_manager():
+    if "_cookie_manager" not in st.session_state:
+        st.session_state["_cookie_manager"] = stx.CookieManager(
+            key="boat_ai_cookie_manager"
+        )
+    return st.session_state["_cookie_manager"]
+
+
+def _login_gate():
+    admin_pin = _secret_text("ADMIN_PIN")
+    staff_accounts = _staff_accounts()
+
+    if not admin_pin:
+        st.error(
+            "ログイン設定が未完了です。Streamlit Secrets に "
+            "ADMIN_PIN を登録してください。"
+        )
+        st.stop()
+
+    if not staff_accounts:
+        st.warning(
+            "スタッフPINが未登録です。"
+            "STAFF_A_PIN のような形式でSecretsに追加できます。"
+        )
+
+    cookie_manager = _get_cookie_manager()
+
+    if not st.session_state.get("_cookie_bootstrap_done"):
+        st.session_state["_cookie_bootstrap_done"] = True
+        with st.spinner("ログイン状態を確認しています…"):
+            time.sleep(1.5)
+
+    if st.session_state.get("auth_role") not in {"admin", "staff"}:
+        cookies = cookie_manager.get_all(key="boat_ai_auth_read")
+        token = (cookies or {}).get(AUTH_COOKIE_NAME)
+        restored = _verify_auth(token)
+
+        if restored:
+            st.session_state["auth_role"] = restored["role"]
+            st.session_state["collector_name"] = restored["collector_name"]
+
+    if st.session_state.get("auth_role") not in {"admin", "staff"}:
+        st.subheader("🔐 ログイン")
+        pin = st.text_input("PIN", type="password", key="login_pin")
+
+        if st.button("ログイン", key="login_button"):
+            role = None
+            collector_name = None
+
+            if hmac.compare_digest(pin, admin_pin):
+                role = "admin"
+                collector_name = "owner"
+            else:
+                for info in staff_accounts.values():
+                    if hmac.compare_digest(pin, info["pin"]):
+                        role = "staff"
+                        collector_name = info["collector_name"]
+                        break
+
+            if role is None:
+                st.error("PINが違います。")
+                st.stop()
+
+            expires_ts = int(time.time()) + AUTH_TTL_SECONDS
+            token = _sign_auth(role, collector_name, expires_ts)
+
+            cookie_manager.set(
+                AUTH_COOKIE_NAME,
+                token,
+                key=f"boat_ai_auth_set_{int(time.time() * 1000)}",
+                path="/",
+                expires_at=datetime.now() + timedelta(hours=24),
+                max_age=AUTH_TTL_SECONDS,
+                secure=True,
+                same_site="strict",
+            )
+
+            st.session_state["auth_role"] = role
+            st.session_state["collector_name"] = collector_name
+            # ログイン直後は会場を未選択にする。
+            # 以前の既定値「01 桐生」を自動選択しない。
+            st.session_state["selected_jcd"] = None
+            st.session_state.pop("login_pin", None)
+
+            with st.spinner("ログイン情報を保存しています…"):
+                time.sleep(0.8)
+
+            st.rerun()
+
+        st.stop()
+
+    role = st.session_state.get("auth_role")
+    collector = st.session_state.get(
+        "collector_name",
+        "owner" if role == "admin" else "スタッフ",
+    )
+
+    globals()["IS_ADMIN"] = role == "admin"
+    globals()["COLLECTOR_NAME"] = collector
+
+    st.caption(
+        f"👤 {collector} / "
+        f"{'管理者' if role == 'admin' else '収集スタッフ'}"
+    )
+
+    if st.button("ログアウト", key="logout_button"):
+        try:
+            cookie_manager.delete(
+                AUTH_COOKIE_NAME,
+                key=f"boat_ai_auth_delete_{int(time.time() * 1000)}",
+            )
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+        for _key in (
+            "auth_role",
+            "collector_name",
+            "login_pin",
+            "_cookie_bootstrap_done",
+            "selected_jcd",
+        ):
+            st.session_state.pop(_key, None)
+
+        st.rerun()
+
+
+_login_gate()
+
+@st.cache_data
+def load_demo_history():
+    return pd.read_csv(_data_paths.data_path("sample_history.csv"))
+
+def safe_name(v):
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    s = str(v).strip()
+    return "" if s.lower() in {"nan", "none"} else s
+
+def ensure_columns(df, defaults):
+    out = df.copy()
+    for c, default in defaults.items():
+        if c not in out.columns:
+            out[c] = default
+    return out
+
+def _virtual_ticket_rows(raw):
+    """保存済みtickets_jsonを安全にlist[dict]へ戻す。"""
+    if raw is None:
+        return []
+
+    try:
+        if pd.isna(raw):
+            return []
+    except Exception:
+        pass
+
+    try:
+        parsed = json.loads(str(raw))
+    except Exception:
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _virtual_backtest(results_df, min_p1_prob=None, groups=None):
+    """
+    保存済みの固定買い目から「見送るレース／買わない区分」を差し引いた場合の
+    仮想成績を再計算する。
+
+    重要:
+    - 新しい買い目を追加したり、購入額を再配分したりはしない。
+    - 保存済み買い目の一部だけを残す研究なので、未来情報を使わない。
+    - 的中買い目を残した場合の払戻は保存済みの実受取額をそのまま使う。
+    """
+    if results_df is None or len(results_df) == 0:
+        return {
+            "対象R": 0,
+            "購入点数": 0,
+            "的中R": 0,
+            "的中率": np.nan,
+            "投資": 0,
+            "払戻": 0,
+            "収支": 0,
+            "回収率": np.nan,
+        }
+
+    allowed_groups = None if groups is None else {str(g) for g in groups}
+
+    races = 0
+    ticket_count = 0
+    hit_races = 0
+    total_stake = 0
+    total_payout = 0
+
+    for _, row in results_df.iterrows():
+        try:
+            p1_prob = float(row.get("p1_prob"))
+        except Exception:
+            p1_prob = np.nan
+
+        if min_p1_prob is not None:
+            if not np.isfinite(p1_prob) or p1_prob < float(min_p1_prob):
+                continue
+
+        tickets = _virtual_ticket_rows(row.get("tickets_json", ""))
+        selected = []
+
+        for item in tickets:
+            if allowed_groups is not None and str(item.get("group", "")) not in allowed_groups:
+                continue
+
+            try:
+                stake = int(float(item.get("stake", 0) or 0))
+            except Exception:
+                stake = 0
+
+            if stake <= 0:
+                continue
+
+            selected.append((item, stake))
+
+        stake_sum = sum(stake for _, stake in selected)
+        if stake_sum <= 0:
+            continue
+
+        races += 1
+        ticket_count += len(selected)
+        total_stake += stake_sum
+
+        actual_combo = str(row.get("trifecta_actual", "")).strip().lstrip("'")
+        selected_hit = any(
+            str(item.get("combo", "")).strip().lstrip("'") == actual_combo
+            for item, _ in selected
+        )
+
+        if selected_hit:
+            hit_races += 1
+            try:
+                race_payout = int(float(row.get("payout", 0) or 0))
+            except Exception:
+                race_payout = 0
+            total_payout += max(race_payout, 0)
+
+    profit = total_payout - total_stake
+    hit_rate = hit_races / races if races else np.nan
+    recovery = total_payout / total_stake if total_stake else np.nan
+
+    return {
+        "対象R": int(races),
+        "購入点数": int(ticket_count),
+        "的中R": int(hit_races),
+        "的中率": hit_rate,
+        "投資": int(total_stake),
+        "払戻": int(total_payout),
+        "収支": int(profit),
+        "回収率": recovery,
+    }
+
+
+def _virtual_backtest_table(results_df):
+    """代表的な仮想購入ルールを同条件で比較する。"""
+    rules = [
+        ("現行", None, None),
+        ("本命70%以上", 0.70, None),
+        ("本命75%以上", 0.75, None),
+        ("本命80%以上", 0.80, None),
+        ("本命85%以上", 0.85, None),
+        ("本線のみ", None, {"本線"}),
+        ("抑えなし", None, {"本線", "穴"}),
+        ("80%以上＋本線のみ", 0.80, {"本線"}),
+        ("85%以上＋本線のみ", 0.85, {"本線"}),
+    ]
+
+    rows = []
+    for label, threshold, groups in rules:
+        result = _virtual_backtest(
+            results_df,
+            min_p1_prob=threshold,
+            groups=groups,
+        )
+        result["仮想ルール"] = label
+        rows.append(result)
+
+    out = pd.DataFrame(rows)
+    return out[
+        [
+            "仮想ルール",
+            "対象R",
+            "購入点数",
+            "的中R",
+            "的中率",
+            "投資",
+            "払戻",
+            "収支",
+            "回収率",
+        ]
+    ]
+
+
+def race_key(d, jcd, rno):
+    return f"{d.strftime('%Y%m%d')}_{jcd}_{int(rno)}"
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_fetch_race(date_str, jcd, rno):
+    """
+    公式データ取得結果をサーバー側（プロセス単位）でキャッシュする。
+
+    スマホのブラウザはバックグラウンド化などでWebSocket接続が切れやすく、
+    再接続時にst.session_stateがリセットされることがある。
+    session_stateだけに頼ると「せっかく取得したデータが消えた」状態に
+    なるため、同じレース（date/jcd/rno）の再取得はここから即座に
+    復元できるようにしておく。
+    """
+    return fetch_official_race(date_str, jcd, rno)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_fetch_odds(date_str, jcd, rno):
+    return fetch_odds3t(date_str, jcd, rno)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_fetch_race_bundle(date_str, jcd, rno, include_odds=True):
+    """
+    レース本体と3連単オッズは相互依存しないため同時取得する。
+    返す内容は従来の cached_fetch_race / cached_fetch_odds と同じ。
+    """
+    if not include_odds:
+        return fetch_official_race(date_str, jcd, rno), None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        race_future = executor.submit(
+            fetch_official_race, date_str, jcd, rno
+        )
+        odds_future = executor.submit(
+            fetch_odds3t, date_str, jcd, rno
+        )
+        race = race_future.result()
+        odds = odds_future.result()
+
+    return race, odds
+
+
+def fetch_daily_schedule(date_str):
+    """
+    その日の開催会場一覧・締切一覧を返す。
+
+    朝のバッチ（schedule_prefetcher.py、GitHub Actions）がSupabaseの
+    daily_scheduleテーブルへ事前保存しているため、通常はそれを読むだけで
+    済み、会場選択のたびに公式サイトへ問い合わせることはない。
+    バッチが未実行・失敗している等でSupabase側にその日のデータが
+    無い場合は、従来どおり公式サイトから直接取得する（フォールバック）。
+
+    行自体は存在していても、締切一覧の取得だけ失敗している（deadlinesが
+    空のまま保存されている）開催中の会場がある場合は、その会場分だけ
+    公式サイトから締切一覧を取り直して補う。
+    """
+    from_supabase = fetch_daily_schedule_supabase(date_str)
+    if from_supabase and not any(
+        info["holding"] for info in from_supabase.values()
+    ):
+        # 公式サイトの取得失敗時に保存された「全場休み」の行しか無い場合は、
+        # 行が無い場合と同じく公式サイトからの直接取得にフォールバックする。
+        print(
+            "[SCHEDULE] Supabase daily_schedule has no holding venues, "
+            "treating as miss:", date_str, flush=True,
+        )
+        from_supabase = None
+    if from_supabase:
+        missing_codes = [
+            code for code, info in from_supabase.items()
+            if info["holding"]
+            and info["status"] not in {"開催終了", "中止"}
+            and not info["deadlines"]
+        ]
+        if not missing_codes:
+            return from_supabase
+
+        print(
+            "[SCHEDULE] Supabase daily_schedule has holding venues without "
+            "deadlines, fetching live for:", missing_codes, date_str, flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=min(8, len(missing_codes))) as executor:
+            future_codes = {
+                executor.submit(fetch_venue_deadlines, date_str, code): code
+                for code in missing_codes
+            }
+            for future in as_completed(future_codes):
+                code = future_codes[future]
+                try:
+                    from_supabase[code]["deadlines"] = future.result()
+                except Exception:
+                    pass
+        return from_supabase
+
+    print(
+        "[SCHEDULE] Supabase daily_schedule miss, falling back to live fetch:",
+        date_str, flush=True,
+    )
+
+    schedule = fetch_today_schedule(date_str)
+    result = {
+        str(row["jcd"]).zfill(2): {
+            "jcd": str(row["jcd"]).zfill(2),
+            "holding": bool(row.get("holding")),
+            "day_label": row.get("day_label") or "",
+            "status": str(row.get("status", "") or "").strip(),
+            "next_race_no": row.get("next_race_no"),
+            "next_race_time": row.get("next_race_time") or "",
+            "deadlines": {},
+        }
+        for row in schedule.to_dict("records")
+    }
+
+    active_codes = [
+        code for code, info in result.items()
+        if info["holding"] and info["status"] not in {"開催終了", "中止"}
+    ]
+    if active_codes:
+        with ThreadPoolExecutor(max_workers=min(8, len(active_codes))) as executor:
+            future_codes = {
+                executor.submit(fetch_venue_deadlines, date_str, code): code
+                for code in active_codes
+            }
+            for future in as_completed(future_codes):
+                code = future_codes[future]
+                try:
+                    result[code]["deadlines"] = future.result()
+                except Exception:
+                    pass
+
+    return result
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_fetch_daily_payouts(date_str):
+    """開催場の結果一覧を並列取得し、確定済み3連単払戻をまとめる。"""
+    frames = []
+    errors = []
+    schedule = fetch_today_schedule(date_str)
+    codes = (
+        schedule.loc[schedule["holding"].fillna(False), "jcd"]
+        .astype(str)
+        .str.zfill(2)
+        .tolist()
+    )
+    if not codes:
+        raise RuntimeError(
+            "選択日の開催会場を公式サイトから取得できませんでした。"
+        )
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(codes)))) as executor:
+        future_codes = {
+            executor.submit(fetch_venue_result_list, date_str, code): code
+            for code in codes
+        }
+        for future in as_completed(future_codes):
+            code = future_codes[future]
+            try:
+                frame = future.result()
+                if frame is not None and len(frame):
+                    frames.append(frame)
+            except Exception as exc:
+                errors.append(
+                    f"{VENUES.get(code, code)}: {type(exc).__name__}"
+                )
+
+    if not frames:
+        columns = [
+            "race_date", "jcd", "venue", "race_no",
+            "trifecta", "payout_per_100", "remarks", "source_url",
+        ]
+        return pd.DataFrame(columns=columns), errors
+
+    out = pd.concat(frames, ignore_index=True)
+    out["race_no"] = pd.to_numeric(out["race_no"], errors="coerce")
+    out["payout_per_100"] = pd.to_numeric(
+        out["payout_per_100"], errors="coerce"
+    ).fillna(0).astype(int)
+    out = out.sort_values(["jcd", "race_no"], kind="stable").reset_index(drop=True)
+    return out, errors
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def cached_fetch_deadlines(date_str, jcd):
+    """
+    選択会場の1R〜12R締切予定時刻も日付・会場単位で固定する。
+    同じ日付・同じ会場ではアプリを閉じて開き直しても
+    Streamlitサーバー側キャッシュを再利用する。
+    """
+    return fetch_venue_deadlines(date_str, jcd)
+
+
+def _deadline_minutes_left(d, hhmm):
+    """日本時間で締切までの残り分数を返す。"""
+    try:
+        hour, minute = map(int, str(hhmm).split(":"))
+        deadline = datetime(
+            d.year, d.month, d.day, hour, minute, tzinfo=JST
+        )
+        return (deadline - datetime.now(JST)).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+def _deadline_html(rno, hhmm, d):
+    """
+    全R締切一覧用HTML。
+    0〜30分以内の締切だけ時刻を赤系で強調する。
+    """
+    mins = _deadline_minutes_left(d, hhmm)
+    if mins is not None and 0 <= mins <= 15:
+        time_html = (
+            f'<span style="color:#e53935;font-weight:800">{hhmm}</span>'
+        )
+    else:
+        time_html = f'<span style="font-weight:700">{hhmm}</span>'
+
+    return (
+        '<div style="padding:.30rem .18rem;text-align:center;'
+        'border:1px solid rgba(150,150,150,.22);border-radius:10px;'
+        'margin:.12rem 0;font-size:.88rem">'
+        f'<b>{int(rno)}R</b><br>{time_html}</div>'
+    )
+
+def missing_summary(df):
+    checks = [
+        ("racer_win_rate", "全国勝率"),
+        ("local_win_rate", "当地勝率"),
+        ("motor_2ren", "モーター2連率"),
+        ("boat_2ren", "ボート2連率"),
+        ("avg_st", "平均ST"),
+    ]
+    out = []
+    for col, label in checks:
+        n = pd.to_numeric(df.get(col, pd.Series(dtype=float)), errors="coerce").notna().sum()
+        if n < 6:
+            out.append(f"{label}({n}/6)")
+    return out
+
+st.session_state.setdefault("race", None)
+st.session_state.setdefault("odds", None)
+st.session_state.setdefault("race_context", None)
+
+tab1, payout_tab, tab2, tab3, tab4 = st.tabs(
+    ["🎯 予想", "💴 本日の払戻", "🧠 学習データ", "⚙️ 設定", "📊 検証"]
+)
+
+with payout_tab:
+    st.subheader("💴 払戻")
+    st.caption(
+        "当日または過去の日付を選び、全開催の確定済み3連単と"
+        "100円当たりの公式払戻を表示します。AI予想の有無には関係しません。"
+    )
+
+    with st.form("payout_history_form"):
+        payout_date = st.date_input(
+            "表示日",
+            value=_today_jst(),
+            key="payout_history_date",
+        )
+        payout_submit = st.form_submit_button("払戻を読み込む")
+
+    if payout_submit:
+        try:
+            with st.spinner("払戻を読み込んでいます…"):
+                payout_rows, payout_errors = cached_fetch_daily_payouts(
+                    payout_date.strftime("%Y%m%d")
+                )
+            st.session_state["payout_history_rows"] = payout_rows
+            st.session_state["payout_history_errors"] = payout_errors
+            st.session_state["payout_history_loaded_date"] = payout_date.isoformat()
+            st.session_state.pop("payout_history_error", None)
+        except Exception as exc:
+            st.session_state["payout_history_error"] = (
+                f"払戻を取得できませんでした: {type(exc).__name__} {exc}"
+            )
+
+    payout_error = st.session_state.get("payout_history_error")
+    if payout_error:
+        st.error(payout_error)
+
+    loaded_date = st.session_state.get("payout_history_loaded_date")
+    payout_rows = st.session_state.get("payout_history_rows")
+    if isinstance(payout_rows, pd.DataFrame) and loaded_date:
+        st.markdown(f"#### {loaded_date} の払戻")
+        if payout_rows.empty:
+            st.info("この日付の確定済み払戻はまだありません。")
+        else:
+            venue_count = int(payout_rows["jcd"].nunique())
+            max_payout = int(payout_rows["payout_per_100"].max())
+            payout_count_col, payout_hit_col, payout_total_col = st.columns(3)
+            with payout_count_col:
+                st.metric("確定", f"{len(payout_rows)}R")
+            with payout_hit_col:
+                st.metric("開催場", f"{venue_count}場")
+            with payout_total_col:
+                st.metric("最高払戻", f"{max_payout:,}円")
+
+            payout_display = payout_rows.copy()
+            payout_display["R"] = (
+                pd.to_numeric(payout_display["race_no"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .astype(str)
+                + "R"
+            )
+            payout_display["3連単"] = payout_display["trifecta"].fillna("-")
+            payout_display["100円払戻"] = payout_display["payout_per_100"].map(
+                lambda value: f"{int(value):,}円"
+            )
+            st.dataframe(
+                payout_display[["venue", "R", "3連単", "100円払戻", "remarks"]].rename(
+                    columns={"venue": "会場", "remarks": "備考"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "払戻はBOAT RACE公式結果の3連単・100円当たりの金額です。"
+                "予想結果やシミュレーション投資額から計算した値ではありません。"
+            )
+            payout_errors = st.session_state.get("payout_history_errors", [])
+            if payout_errors:
+                st.caption(
+                    "一部会場の確認に失敗しました: " + ", ".join(payout_errors)
+                )
+
+with tab2:
+    st.subheader("学習データ")
+    if IS_ADMIN:
+        hist_up = st.file_uploader("過去成績CSV", type="csv", key="hist")
+        history = pd.read_csv(hist_up) if hist_up else load_demo_history()
+        if hist_up:
+            st.success(f"アップロードした学習データ：{len(history):,}行")
+        else:
+            st.warning(f"動作確認用の合成データ {len(history):,}行を使用中。実運用前に公式過去データへ置き換えてください。")
+        with st.expander("学習データ先頭を見る"):
+            st.dataframe(history.head(12), use_container_width=True, hide_index=True)
+    else:
+        history = load_demo_history()
+        st.info("🔒 収集スタッフは学習データを変更できません。管理者と同じ既定データを使用します。")
+
+with tab3:
+    st.subheader("🤖 自動固定状況")
+    _auto_progress = _auto_random_progress()
+    if _auto_progress is None:
+        st.caption("自動固定状況を取得できませんでした。")
+    else:
+        _auto_count_col, _auto_state_col = st.columns(2)
+        with _auto_count_col:
+            st.metric(
+                "本日の自動固定",
+                f"{_auto_progress['current']} / {_auto_progress['target']}R",
+            )
+        with _auto_state_col:
+            st.metric(
+                "稼働状態",
+                "ON" if _auto_progress["enabled"] else "OFF",
+            )
+        if _auto_progress["current"] >= _auto_progress["target"]:
+            st.success("本日の目標レース数まで固定済みです。")
+        else:
+            _auto_remaining = _auto_progress["target"] - _auto_progress["current"]
+            st.caption(f"あと{_auto_remaining}Rで本日の目標に到達します。（30秒ごとに更新）")
+
+    st.divider()
+    st.subheader("買い目設定")
+    if not IS_ADMIN:
+        st.info("🔒 収集スタッフは設定を保存できません。管理者の保存設定を使用します。")
+
+    if "app_settings" not in st.session_state:
+        st.session_state["app_settings"] = load_settings()
+    saved = st.session_state["app_settings"]
+
+    st.info(
+        "🎯 的中率重視モード：条件付き2着確率と3着候補の接戦度から、"
+        "推奨買い目を1レース8〜10点に自動調整します。"
+    )
+
+    main_n, cover_n, hole_n = 4, 4, 0
+    st.caption(
+        "8点＝本線4＋抑え4、9点＝本線4＋抑え5、"
+        "10点＝本線5＋抑え5。穴枠は使いません。"
+    )
+
+    st.divider()
+    total_budget = st.number_input(
+        "💴 1レース予算",
+        min_value=500,
+        max_value=100000,
+        value=int(saved.get("total_budget", 2000)),
+        step=100,
+    )
+    min_bet = st.number_input(
+        "1点あたり最低購入額",
+        min_value=100,
+        max_value=1000,
+        value=int(saved.get("min_bet", 100)),
+        step=100,
+    )
+    longshot_min_prob_pct = st.slider(
+        "穴の最低的中確率（%）",
+        min_value=0.0,
+        max_value=2.0,
+        value=float(saved.get("longshot_min_prob_pct", 0.30)),
+        step=0.05,
+        help="原則、この確率未満の超低確率買い目は穴から除外します。",
+    )
+    value_bias = st.slider(
+        "💰 妙味重視度（回収率志向）", 0.0, 1.0, float(saved.get("value_bias", 0.0)), 0.1,
+        help=(
+            "0は従来通り本線を厚めに配分。上げるほど「本線・抑え・穴」という"
+            "カテゴリの序列より期待値（市場オッズに対するAIの優位性＝妙味）を"
+            "重視した配分になります。的中率より回収率を狙うなら高めに。"
+        ),
+    )
+
+    st.divider()
+    _style_options = ["バランス", "展示重視"]
+    _saved_style = saved.get("prediction_style", "バランス")
+    prediction_style = st.selectbox(
+        "🧭 予想スタイル",
+        _style_options,
+        index=_style_options.index(_saved_style) if _saved_style in _style_options else 0,
+    )
+
+    if prediction_style == "展示重視":
+        default_display = 0.42
+    else:
+        default_display = 0.32
+
+    display_weight = st.slider(
+        "展示情報の反映度", 0.0, 0.8, default_display, 0.02,
+        key=f"display_weight_{prediction_style}",
+    )
+    weather_weight = st.slider(
+        "天候（風・波）の反映度", 0.0, 0.5, 0.10, 0.02,
+        key=f"weather_weight_{prediction_style}",
+        help="風速5m/s以上または波高3cm以上の荒れ水面で、アウトコース（5・6号艇）を不利側に補正します。",
+    )
+    venue_course_weight = st.slider(
+        "場のコース特性（逃げ率・決まり手）の反映度", 0.0, 0.5, 0.12, 0.02,
+        key=f"venue_course_weight_{prediction_style}",
+        help="選手個人の実績ではなく、その場自体が「インが強いか」「まくりが決まりやすいか」という特性をBOAT RACE公式データから反映します。",
+    )
+    hedge_enabled = st.toggle(
+        "🛟 本命艇の保険買い目", value=True,
+        key=f"hedge_enabled_{prediction_style}",
+        help="本命買い目には毎回、本命艇（多くは1号艇）がどこかしらの着順で含まれがちです。展示・モーター/ボート・今節成績を総合して本命艇に不安要素が多いと判定された場合、穴の1点を本命艇を含まない組み合わせに差し替え、「本命艇が飛ぶ」リスクに備えます。",
+    )
+
+    st.divider()
+    if IS_ADMIN and st.button("💾 この設定を保存（次回起動時も復元）"):
+        new_settings = {
+            "main_n": int(main_n),
+            "cover_n": int(cover_n),
+            "hole_n": int(hole_n),
+            "total_budget": int(total_budget),
+            "min_bet": int(min_bet),
+            "longshot_min_prob_pct": float(longshot_min_prob_pct),
+            "value_bias": float(value_bias),
+            "prediction_style": prediction_style,
+        }
+        if save_settings(new_settings):
+            st.session_state["app_settings"] = new_settings
+            st.success("設定を保存しました。アプリを再起動しても復元されます。")
+        else:
+            st.error("設定の保存に失敗しました。")
+
+    # -------------------------------------------------
+    # Threads（スレッズ）連携
+    # -------------------------------------------------
+    # 投稿はオーナー（管理者）だけの機能。収集スタッフには設定画面ごと
+    # 見せない。アクセストークンは公開アカウントへの投稿権限そのもので、
+    # 画面に出る＝渡すのと同じ意味になるため。
+    if IS_ADMIN:
+        st.divider()
+        st.subheader("🧵 スレッズ連携")
+
+        _sb_url, _sb_key = supabase_config()
+
+        if not THREADS_AVAILABLE:
+            st.info(
+                "スレッズ投稿は未導入です。使う場合は threads_poster.py を"
+                "リポジトリに追加してください。追加しなくてもアプリは通常どおり動きます。"
+            )
+        elif not _sb_url or not _sb_key:
+            st.info(
+                "スレッズ投稿はSupabaseの設定が必要です。"
+                "トークンを安全に保存し、自動更新するために使います。"
+            )
+        else:
+            _threads_cfg = threads_load_config(_sb_url, _sb_key)
+
+            if _threads_cfg:
+                _age = threads_token_age_days(_threads_cfg)
+                if _age is None:
+                    st.success("✅ 連携済みです。")
+                elif _age >= 50:
+                    st.error(
+                        f"⚠️ トークンの更新から{_age}日経過しています。"
+                        "60日で失効します。GitHub Actionsが動いていない可能性があるため、"
+                        "下から再登録してください。"
+                    )
+                else:
+                    st.success(
+                        f"✅ 連携済みです。（トークン更新から{_age}日経過 / 期限60日）"
+                        " GitHub Actionsが自動で更新します。"
+                    )
+
+                # 保存されているユーザーIDが正しいかは、投稿するまで分からない。
+                # 誤ったIDを入れてしまった場合に、トークンを貼り直さずに
+                # 直せるようにしておく（トークンはSupabaseに保存済みなので
+                # そこから引き直せる）。
+                st.caption(f"登録中のユーザーID: `{_threads_cfg.get('user_id', '')}`")
+
+                if st.button(
+                    "🔄 ユーザーIDをトークンから取り直す",
+                    key="refetch_threads_user_id",
+                ):
+                    try:
+                        with st.spinner("アカウント情報を取得しています…"):
+                            _uid2, _uname2 = threads_fetch_user_id(
+                                _threads_cfg["access_token"]
+                            )
+                        # token_updated_at は引き継ぐ。ここで now にすると
+                        # 自動更新の起点がずれてしまうため。
+                        threads_save_config(
+                            _sb_url,
+                            _sb_key,
+                            _uid2,
+                            _threads_cfg["access_token"],
+                            token_updated_at=_threads_cfg.get("token_updated_at"),
+                        )
+                        st.success(
+                            f"@{_uname2} のユーザーID（{_uid2}）に更新しました。"
+                            if _uname2
+                            else f"ユーザーIDを {_uid2} に更新しました。"
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error("ユーザーIDの取得に失敗しました。")
+                        st.code(str(e))
+            else:
+                st.info(
+                    "未連携です。Meta for Developersで取得した"
+                    "ユーザーIDと長期アクセストークンを登録してください。"
+                )
+
+            with st.expander("トークンを登録・更新する", expanded=not _threads_cfg):
+                st.caption(
+                    "必要な権限は threads_basic と threads_content_publish の2つです。"
+                    "登録した長期トークンは、以後GitHub Actionsが自動で延長します。"
+                )
+                _ttoken = st.text_input(
+                    "長期アクセストークン",
+                    value="",
+                    type="password",
+                    key="threads_token_input",
+                    help="貼り付けると保存されます。既存のトークンは表示されません。",
+                )
+                _tid = st.text_input(
+                    "ThreadsユーザーID（空欄でOK）",
+                    value=str((_threads_cfg or {}).get("user_id", "")),
+                    key="threads_user_id_input",
+                    help=(
+                        "空欄のまま保存すると、トークンから自動で取得します。"
+                        "手入力する場合は数字のみです。"
+                    ),
+                )
+
+                if st.button("🧵 スレッズ連携を保存", key="save_threads_config"):
+                    if not _ttoken.strip():
+                        st.error("長期アクセストークンを入力してください。")
+                    else:
+                        try:
+                            # ユーザーIDが空ならトークンから引く。
+                            # 先に引いてユーザーネームを表示することで、
+                            # 別アカウントのトークンを貼っていないか確認できる。
+                            _uid = _tid.strip()
+                            _uname = ""
+                            if not _uid:
+                                with st.spinner("トークンからアカウント情報を取得しています…"):
+                                    _uid, _uname = threads_fetch_user_id(_ttoken.strip())
+
+                            threads_save_config(_sb_url, _sb_key, _uid, _ttoken)
+
+                            if _uname:
+                                st.success(f"保存しました。連携アカウント: @{_uname}")
+                            else:
+                                st.success("保存しました。予想タブから投稿できます。")
+                            st.rerun()
+                        except Exception as e:
+                            st.error("保存に失敗しました。")
+                            st.code(str(e))
+
+            # -------------------------------------------------
+            # 1日の発信まとめ
+            # -------------------------------------------------
+            # note記事用に確定したレースの的中結果を集計し、その日の締めくくり
+            # 投稿を下書きする。送信は個別レース投稿と同じく手動ボタンで行う。
+            st.markdown("#### 📊 本日のまとめ投稿")
+            _sum_date = st.date_input(
+                "まとめる日付",
+                value=_today_jst(),
+                key="threads_summary_date",
+            )
+            _sum_date_str = _sum_date.strftime("%Y-%m-%d")
+            _sum_state_key = f"threads_summary_records_{_sum_date_str}"
+
+            if st.button("📊 まとめを作成・更新", key="threads_summary_build"):
+                try:
+                    with st.spinner("note確定レースと結果を照合しています…"):
+                        _sum_records = threads_fetch_daily_publication_results(
+                            _sb_url, _sb_key, _sum_date
+                        )
+                        # 払戻は的中レースの会場だけ公式結果一覧から引く。
+                        # 取れなくてもまとめ自体は作れるので失敗は無視する。
+                        _sum_payouts = {}
+                        _sum_codes = {
+                            str(r["race_key"]).split("_")[1]
+                            for r in _sum_records
+                            if r.get("hit") and str(r.get("race_key", "")).count("_") == 2
+                        }
+                        for _code in sorted(_sum_codes):
+                            try:
+                                _pay_df = fetch_venue_result_list(
+                                    _sum_date.strftime("%Y%m%d"), _code
+                                )
+                            except Exception:
+                                continue
+                            if _pay_df is None or not len(_pay_df):
+                                continue
+                            for _, _pay_row in _pay_df.iterrows():
+                                try:
+                                    _pay_key = (
+                                        f"{_sum_date.strftime('%Y%m%d')}_{_code}_"
+                                        f"{int(float(_pay_row.get('race_no')))}"
+                                    )
+                                    _sum_payouts[_pay_key] = int(
+                                        float(_pay_row.get("payout_per_100") or 0)
+                                    )
+                                except Exception:
+                                    continue
+                    st.session_state[_sum_state_key] = {
+                        "records": _sum_records,
+                        "payouts": _sum_payouts,
+                    }
+                    # 再作成時は下書きも作り直す。
+                    for _flag in (0, 1):
+                        st.session_state.pop(
+                            f"threads_summary_text_{_sum_date_str}_{_flag}", None
+                        )
+                except Exception as e:
+                    st.error("まとめの作成に失敗しました。")
+                    st.code(str(e))
+
+            _sum_loaded = st.session_state.get(_sum_state_key)
+            if _sum_loaded is not None:
+                _sum_records = _sum_loaded["records"]
+                _sum_pending = [r for r in _sum_records if not r.get("settled")]
+                _sum_settled = [r for r in _sum_records if r.get("settled")]
+                _sum_hits = [r for r in _sum_settled if r.get("hit")]
+
+                _c1, _c2, _c3 = st.columns(3)
+                with _c1:
+                    st.metric("発信", f"{len(_sum_records)}R")
+                with _c2:
+                    st.metric("的中", f"{len(_sum_hits)} / {len(_sum_settled)}R")
+                with _c3:
+                    st.metric("結果待ち", f"{len(_sum_pending)}R")
+
+                _include_pending = True
+                if _sum_pending:
+                    st.warning(
+                        "⏳ 結果がまだ確定していないレースがあります（"
+                        + "、".join(
+                            f"{r.get('venue')}{r.get('race_no')}R" for r in _sum_pending
+                        )
+                        + "）。全レース確定後に「まとめを作成・更新」を押し直すのがおすすめです。"
+                    )
+                    _include_pending = st.checkbox(
+                        "結果待ちのレースも「結果待ち」として載せる",
+                        value=True,
+                        key=f"threads_summary_pending_{_sum_date_str}",
+                    )
+
+                _sum_default = threads_build_daily_summary_text(
+                    race_date=_sum_date,
+                    records=_sum_records,
+                    payouts=_sum_loaded.get("payouts"),
+                    include_pending=_include_pending,
+                )
+                # 結果待ちの表示切替で下書きを作り直せるよう、キーに含める。
+                _sum_text = st.text_area(
+                    "まとめ投稿内容（送信前に編集できます）",
+                    value=_sum_default,
+                    height=280,
+                    key=f"threads_summary_text_{_sum_date_str}_{int(_include_pending)}",
+                )
+                _sum_len = len(_sum_text)
+                if _sum_len > THREADS_TEXT_LIMIT:
+                    st.error(f"{_sum_len} / {THREADS_TEXT_LIMIT}文字（超過しています）")
+                else:
+                    st.caption(f"{_sum_len} / {THREADS_TEXT_LIMIT}文字")
+
+                _sum_posted_key = f"threads_summary_posted_{_sum_date_str}"
+                if st.session_state.get(_sum_posted_key):
+                    st.success(
+                        "✅ この日のまとめは投稿済みです。"
+                        f" 投稿ID: {st.session_state[_sum_posted_key]}"
+                    )
+
+                if not _threads_cfg:
+                    st.caption("スレッズ連携を登録すると、ここから投稿できます。")
+                elif st.button(
+                    "🧵 このまとめをスレッズに投稿",
+                    key=f"post_threads_summary_{_sum_date_str}",
+                    disabled=_sum_len > THREADS_TEXT_LIMIT or not _sum_records,
+                ):
+                    try:
+                        _sum_post_id = threads_post_text(
+                            _threads_cfg["user_id"],
+                            _threads_cfg["access_token"],
+                            _sum_text,
+                        )
+                        st.session_state[_sum_posted_key] = _sum_post_id
+                        st.success(f"投稿しました。（投稿ID: {_sum_post_id}）")
+                        st.rerun()
+                    except Exception as e:
+                        st.error("スレッズへの投稿に失敗しました。")
+                        st.code(str(e))
+                        st.caption(
+                            "トークンが失効している可能性があります。"
+                            "上から再登録してください。"
+                        )
+
+
+# 収集スタッフは画面上の一時操作で予想条件を変えられないよう、
+# 実際に予想へ渡す値を管理者の保存設定へ戻す。
+if not IS_ADMIN:
+    main_n = int(saved.get("main_n", 3))
+    cover_n = int(saved.get("cover_n", 3))
+    hole_n = int(saved.get("hole_n", 0))
+    total_budget = int(saved.get("total_budget", 2000))
+    min_bet = int(saved.get("min_bet", 100))
+    longshot_min_prob_pct = float(saved.get("longshot_min_prob_pct", 0.30))
+    value_bias = float(saved.get("value_bias", 0.0))
+    prediction_style = str(saved.get("prediction_style", "バランス"))
+    display_weight = 0.42 if prediction_style == "展示重視" else 0.32
+    weather_weight = 0.10
+    venue_course_weight = 0.12
+    hedge_enabled = True
+
+
+with tab4:
+    st.subheader("📊 予想検証")
+    if not IS_ADMIN:
+        st.caption("🔒 収集スタッフは検証画面を閲覧のみで利用します。")
+    results_df = load_results()
+    st.markdown("### 📈 AI成績分析")
+
+    # Supabaseの分析ビューをまとめて表示
+    analysis_views = [
+        ("📊 総合", "summary"),
+        ("🎯 1号艇予測確率帯", "p1_prob"),
+        ("🎫 買い目区分", "ticket_group"),
+        ("💰 期待値帯", "expected_return"),
+    ]
+
+    analysis_tabs = st.tabs([label for label, _ in analysis_views])
+
+    for analysis_tab, (label, view_name) in zip(analysis_tabs, analysis_views):
+        with analysis_tab:
+            analysis_df = load_analysis_view(view_name)
+
+            if analysis_df.empty:
+                st.info(f"{label} の分析データはまだありません。")
+            else:
+                st.dataframe(
+                    analysis_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+    vm = validation_metrics(results_df)
+
+    if vm["races"] == 0:
+        st.info("まだ検証データがありません。AI予想後に実着順と払戻を登録すると、ここへ蓄積されます。")
+    else:
+        m1, m2 = st.columns(2)
+        with m1:
+            st.metric("検証レース数", f"{vm['races']}R")
+            st.metric(
+                "1着トップ予想 的中率",
+                f"{vm['first_hit_rate']*100:.1f}%" if pd.notna(vm["first_hit_rate"]) else "-"
+            )
+            st.metric(
+                "予想候補 的中率（資金配分なし）",
+                f"{vm['candidate_hit_rate']*100:.1f}%" if pd.notna(vm["candidate_hit_rate"]) else "-"
+            )
+        with m2:
+            st.metric("累計収支", f"{vm['profit']:+,}円")
+            st.metric(
+                "回収率",
+                f"{vm['roi']*100:.1f}%" if pd.notna(vm["roi"]) else "-"
+            )
+            st.metric(
+                "簡易Brier score",
+                f"{vm['brier_first']:.3f}" if pd.notna(vm["brier_first"]) else "-"
+            )
+
+        st.caption("Brier score は小さいほど、予測確率と実際の結果のズレが小さい指標です。")
+
+        st.markdown("#### 🎯 買い目点数別の予想精度")
+        pc1, pc2, pc3 = st.columns(3)
+        for column, label, container in (
+            ("hit_within_8_rate", "8点内", pc1),
+            ("hit_within_9_rate", "9点内", pc2),
+            ("hit_within_10_rate", "10点内", pc3),
+        ):
+            value = vm.get(column, np.nan)
+            with container:
+                st.metric(
+                    label,
+                    f"{value*100:.1f}%" if pd.notna(value) else "-",
+                )
+        st.caption(
+            "投資額・推奨／非推奨に関係なく、固定時の候補上位に実結果が含まれた割合です。"
+            "回収率は別のシミュレーション指標として扱います。"
+        )
+
+        st.markdown("#### 1着予測の確率校正")
+        cal = calibration_table(results_df)
+        st.dataframe(cal, use_container_width=True, hide_index=True)
+
+        st.markdown("#### 🧪 仮想バックテスト")
+        st.caption(
+            "保存済みの固定予想を使い、『そのレースを見送っていたら／一部の買い目区分を買わなかったら』"
+            "を再計算します。実際の予想ロジック・設定・保存データは変更しません。"
+        )
+
+        virtual_compare = _virtual_backtest_table(results_df)
+        virtual_show = virtual_compare.copy()
+        virtual_show["的中率"] = (
+            pd.to_numeric(virtual_show["的中率"], errors="coerce") * 100
+        )
+        virtual_show["回収率"] = (
+            pd.to_numeric(virtual_show["回収率"], errors="coerce") * 100
+        )
+
+        st.dataframe(
+            virtual_show,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                "回収率": st.column_config.NumberColumn(format="%.1f%%"),
+                "投資": st.column_config.NumberColumn(format="%d円"),
+                "払戻": st.column_config.NumberColumn(format="%d円"),
+                "収支": st.column_config.NumberColumn(format="%+d円"),
+            },
+        )
+
+        with st.expander("🔬 条件を変えて試す", expanded=False):
+            custom_prob_pct = st.slider(
+                "AI本命確率の最低ライン",
+                min_value=0,
+                max_value=90,
+                value=80,
+                step=5,
+                format="%d%%",
+                key="virtual_bt_min_prob",
+            )
+            custom_groups = st.multiselect(
+                "残す買い目区分",
+                ["本線", "抑え", "穴"],
+                default=["本線"],
+                key="virtual_bt_groups",
+            )
+
+            if custom_groups:
+                custom_bt = _virtual_backtest(
+                    results_df,
+                    min_p1_prob=custom_prob_pct / 100.0 if custom_prob_pct > 0 else None,
+                    groups=set(custom_groups),
+                )
+
+                bc1, bc2 = st.columns(2)
+                with bc1:
+                    st.metric("対象レース", f"{custom_bt['対象R']}R")
+                    st.metric("的中レース", f"{custom_bt['的中R']}R")
+                    st.metric(
+                        "的中率",
+                        f"{custom_bt['的中率']*100:.1f}%"
+                        if pd.notna(custom_bt["的中率"])
+                        else "-",
+                    )
+                with bc2:
+                    st.metric("仮想収支", f"{custom_bt['収支']:+,}円")
+                    st.metric(
+                        "仮想回収率",
+                        f"{custom_bt['回収率']*100:.1f}%"
+                        if pd.notna(custom_bt["回収率"])
+                        else "-",
+                    )
+                    st.metric("仮想投資", f"{custom_bt['投資']:,}円")
+            else:
+                st.info("少なくとも1つの買い目区分を選んでください。")
+
+        st.caption(
+            "※ この仮想バックテストは『保存済み買い目を削る／レースを見送る』比較専用です。"
+            "未購入だった新規買い目の追加や、購入額の再配分までは再現しません。"
+        )
+
+        st.markdown("#### 保存済みレース")
+
+        show_cols = [
+            "race_date","venue","race_no","trifecta_actual","p1_lane","p1_prob",
+            "candidate_count","candidate_hit","candidate_hit_rank",
+            "total_stake","payout","profit","roi"
+        ]
+        show_cols = [c for c in show_cols if c in results_df.columns]
+        show = results_df[show_cols].copy()
+
+        show = show.rename(columns={
+            "race_date":"日付",
+            "venue":"場",
+            "race_no":"R",
+            "trifecta_actual":"実3連単",
+            "p1_lane":"AI本命",
+            "p1_prob":"本命確率",
+            "candidate_count":"候補点数",
+            "candidate_hit":"予想的中",
+            "candidate_hit_rank":"的中順位",
+            "total_stake":"購入",
+            "payout":"払戻",
+            "profit":"収支",
+            "roi":"回収倍率",
+        })
+
+        _preferred_show_cols = [
+            "日付", "場", "R", "実3連単", "AI本命", "本命確率",
+            "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
+        ]
+        show = show[[c for c in _preferred_show_cols if c in show.columns]]
+
+        st.dataframe(
+            show.sort_values(["日付","場","R"], ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        csv_export_results = results_df.copy()
+        for _c in ("trifecta_actual", "top_ticket"):
+            if _c in csv_export_results.columns:
+                # combo表記("3-1-4"等)をExcelが日付だと誤解釈するのを防ぐ
+                csv_export_results[_c] = "'" + csv_export_results[_c].astype(str)
+
+        csv_export_results = csv_export_results.rename(columns={
+            "saved_at": "保存日時",
+            "race_date": "日付",
+            "venue": "場",
+            "race_no": "R",
+            "race_key": "レースキー",
+            "first_actual": "実1着",
+            "second_actual": "実2着",
+            "third_actual": "実3着",
+            "trifecta_actual": "実3連単",
+            "p1_lane": "AI本命艇",
+            "p1_prob": "本命確率",
+            "top_ticket": "本命買い目",
+            "top_ticket_prob": "本命買い目確率",
+            "top_ticket_odds": "本命買い目オッズ",
+            "top_ticket_stake": "本命買い目購入額",
+            "total_stake": "購入合計",
+            "payout": "払戻",
+            "profit": "収支",
+            "roi": "回収倍率",
+            "hit_top_ticket": "本命的中",
+            "hit_any_ticket": "いずれか的中",
+            "candidate_count": "候補点数",
+            "candidate_hit": "予想候補的中",
+            "candidate_hit_rank": "的中順位",
+            "hit_within_8": "8点内的中",
+            "hit_within_9": "9点内的中",
+            "hit_within_10": "10点内的中",
+            "predicted_first_hit": "1着予想的中",
+            "tickets_json": "買い目詳細",
+            "lane_probs_json": "6艇予測詳細",
+        })
+
+        csv_results = csv_export_results.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "📥 検証履歴CSV保存",
+            csv_results,
+            file_name="prediction_results.csv",
+            mime="text/csv",
+        )
+
+        # -------------------------------------------------
+        # 研究用：補正を1段ずつ足したときの長期成績比較
+        # -------------------------------------------------
+        research_rows = []
+        for _, _rr in results_df.iterrows():
+            raw = _rr.get("lane_probs_json", "")
+            if not raw or pd.isna(raw):
+                continue
+
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                continue
+
+            if not isinstance(parsed, dict):
+                continue
+
+            variants_saved = parsed.get("research", {})
+            if not isinstance(variants_saved, dict) or not variants_saved:
+                continue
+
+            try:
+                actual_first = int(_rr.get("first_actual"))
+            except Exception:
+                continue
+
+            for label, lanes in variants_saved.items():
+                if not isinstance(lanes, list) or not lanes:
+                    continue
+
+                probs = {}
+                for item in lanes:
+                    try:
+                        lane_no = int(item.get("lane"))
+                        prob = float(item.get("p_first"))
+                    except Exception:
+                        continue
+                    if 1 <= lane_no <= 6 and np.isfinite(prob):
+                        probs[lane_no] = prob
+
+                if len(probs) < 2:
+                    continue
+
+                top_lane = max(probs, key=probs.get)
+                actual_prob = probs.get(actual_first, np.nan)
+                brier6 = np.mean([
+                    (probs.get(lane, 0.0) - (1.0 if lane == actual_first else 0.0)) ** 2
+                    for lane in range(1, 7)
+                ])
+
+                research_rows.append({
+                    "方式": label,
+                    "本命的中": int(top_lane == actual_first),
+                    "6艇Brier": float(brier6),
+                    "実1着確率": actual_prob,
+                })
+
+        if research_rows:
+            research_df = pd.DataFrame(research_rows)
+            research_summary = (
+                research_df.groupby("方式", sort=False)
+                .agg(
+                    検証R=("本命的中", "size"),
+                    本命的中率=("本命的中", "mean"),
+                    六艇Brier=("6艇Brier", "mean"),
+                    実1着平均確率=("実1着確率", "mean"),
+                )
+                .reset_index()
+            )
+            research_summary["本命的中率"] = (research_summary["本命的中率"] * 100).round(1)
+            research_summary["六艇Brier"] = research_summary["六艇Brier"].round(4)
+            research_summary["実1着平均確率"] = (research_summary["実1着平均確率"] * 100).round(1)
+
+            st.markdown("#### 🧪 研究用・補正別の長期比較")
+            st.caption(
+                "本番予想は『現行全部入り』のまま固定。ここは各補正を段階的に足した研究結果だけを比較します。"
+                "6艇Brierは小さいほど良好です。"
+            )
+            st.dataframe(
+                research_summary,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "本命的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "実1着平均確率": st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
+        else:
+            st.info(
+                "🧪 補正別比較データはまだありません。研究比較機能追加後に保存したレースから自動で蓄積されます。"
+            )
+
+        st.markdown("#### 🔍 1レース詳細比較")
+        st.caption("保存済みレースを選ぶと、AI予想（6艇の確率・買い目）と実際の結果を並べて確認できます。")
+
+        detail_df = results_df.sort_values(["race_date", "venue", "race_no"], ascending=False).reset_index(drop=True)
+        detail_labels = [
+            f"{r['race_date']} {r['venue']} {int(r['race_no'])}R（実{r['trifecta_actual']}）"
+            for _, r in detail_df.iterrows()
+        ]
+
+        if detail_labels:
+            sel_idx = st.selectbox(
+                "レースを選択",
+                range(len(detail_labels)),
+                format_func=lambda i: detail_labels[i],
+                key="detail_race_select",
+            )
+            sel = detail_df.iloc[sel_idx]
+
+            actual_combo = str(sel["trifecta_actual"])
+            actual_lanes = actual_combo.split("-") if "-" in actual_combo else []
+
+            st.markdown(f"##### {sel['race_date']} {sel['venue']} {int(sel['race_no'])}R")
+
+            dc1, dc2, dc3 = st.columns(3)
+            with dc1:
+                st.metric("実際の3連単", actual_combo)
+            with dc2:
+                st.metric("購入合計", f"{int(sel.get('total_stake', 0) or 0):,}円")
+            with dc3:
+                payout_v = sel.get("payout", 0)
+                profit_v = sel.get("profit", 0)
+                st.metric("払戻 / 収支", f"{int(payout_v or 0):,}円", delta=f"{int(profit_v or 0):+,}円")
+
+            lane_probs_raw = sel.get("lane_probs_json", "")
+            try:
+                lane_probs_parsed = json.loads(lane_probs_raw) if lane_probs_raw and pd.notna(lane_probs_raw) else []
+            except Exception:
+                lane_probs_parsed = []
+
+            # 旧データはlist、新データは {final: [...], research: {...}} 形式。
+            if isinstance(lane_probs_parsed, dict):
+                lane_probs = lane_probs_parsed.get("final", [])
+                detail_research = lane_probs_parsed.get("research", {})
+            else:
+                lane_probs = lane_probs_parsed
+                detail_research = {}
+
+            if lane_probs:
+                st.markdown("###### 6艇の予測確率 vs 実際の着順")
+                lp = pd.DataFrame(lane_probs)
+                lp["lane"] = pd.to_numeric(lp["lane"], errors="coerce").astype("Int64")
+
+                def _actual_rank(lane_no):
+                    lane_s = str(lane_no)
+                    if lane_s in actual_lanes:
+                        return actual_lanes.index(lane_s) + 1
+                    return None
+
+                lp["実着順"] = lp["lane"].apply(_actual_rank)
+                lp = lp.sort_values("p_first", ascending=False)
+
+                view = lp.rename(columns={
+                    "lane": "艇",
+                    "racer_name": "選手",
+                    "p_first": "AI1着予測確率",
+                    "reason": "根拠",
+                })
+                view["AI1着予測確率"] = (pd.to_numeric(view["AI1着予測確率"], errors="coerce") * 100).round(1)
+                view["実着順"] = view["実着順"].apply(lambda v: f"{v}着" if v else "着外/不明")
+
+                st.dataframe(
+                    view[["艇", "選手", "AI1着予測確率", "実着順", "根拠"]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "AI1着予測確率": st.column_config.NumberColumn(format="%.1f%%"),
+                    },
+                )
+            else:
+                st.info("このレースは6艇分の予測確率データが保存される前に記録されたため、詳細比較はできません。")
+
+            if detail_research:
+                rows = []
+                try:
+                    actual_first = int(sel.get("first_actual"))
+                except Exception:
+                    actual_first = None
+
+                for label, lanes in detail_research.items():
+                    if not isinstance(lanes, list) or not lanes:
+                        continue
+                    probs = {}
+                    for item in lanes:
+                        try:
+                            probs[int(item.get("lane"))] = float(item.get("p_first"))
+                        except Exception:
+                            pass
+                    if not probs:
+                        continue
+                    top_lane = max(probs, key=probs.get)
+                    rows.append({
+                        "方式": label,
+                        "本命艇": top_lane,
+                        "本命確率": probs[top_lane] * 100,
+                        "実1着確率": probs.get(actual_first, np.nan) * 100 if actual_first else np.nan,
+                        "本命的中": "○" if actual_first and top_lane == actual_first else "",
+                    })
+
+                if rows:
+                    st.markdown("###### 🧪 このレースの補正別比較")
+                    st.dataframe(
+                        pd.DataFrame(rows),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "本命確率": st.column_config.NumberColumn(format="%.1f%%"),
+                            "実1着確率": st.column_config.NumberColumn(format="%.1f%%"),
+                        },
+                    )
+
+            tickets_raw = sel.get("tickets_json", "")
+            try:
+                tickets_saved = json.loads(tickets_raw) if tickets_raw and pd.notna(tickets_raw) else []
+            except Exception:
+                tickets_saved = []
+
+            if tickets_saved:
+                st.markdown("###### 購入した買い目 vs 結果")
+                tv = pd.DataFrame(tickets_saved)
+                tv["的中"] = tv["combo"].astype(str).apply(lambda c: "🎯 的中" if c == actual_combo else "")
+                tv["prob"] = (pd.to_numeric(tv.get("prob"), errors="coerce") * 100).round(2)
+
+                tv = tv.rename(columns={
+                    "combo": "買い目", "group": "区分", "prob": "的中確率(%)",
+                    "odds": "オッズ", "expected_return": "期待値", "stake": "購入額",
+                })
+                cols = [c for c in ["買い目", "区分", "的中確率(%)", "オッズ", "期待値", "購入額", "的中"] if c in tv.columns]
+                st.dataframe(tv[cols], use_container_width=True, hide_index=True)
+            else:
+                st.caption("このレースは購入した買い目の記録がありません。")
+
+
+
+
+def _meeting_time_badge(deadlines):
+    """その日の12R締切時刻から、朝・昼・夜開催を簡易判定する。"""
+    if not deadlines:
+        return ""
+    hhmm = str(deadlines.get(12, "") or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", hhmm)
+    if not m:
+        return ""
+    mins = int(m.group(1)) * 60 + int(m.group(2))
+
+    # モーニング系は最終Rが早い。通常デイは夕方まで、
+    # ナイター/ミッドナイト系は夕方以降まで開催する。
+    if mins < 15 * 60:
+        return "🌅朝"
+    if mins < 18 * 60 + 30:
+        return "☀️昼"
+    return "🌙夜"
+
+
+with tab1:
+    d = st.date_input("日付", value=_today_jst())
+
+    st.session_state.setdefault("selected_jcd", None)
+
+    st.markdown("### 🏟️ 会場を選択")
+    try:
+        _date_key = d.strftime("%Y%m%d")
+        _schedule_key = f"daily_schedule_{_date_key}"
+        if _schedule_key in st.session_state:
+            schedule_by_jcd = st.session_state[_schedule_key]
+        else:
+            schedule_by_jcd = fetch_daily_schedule(_date_key)
+            # 公式サイトへの直接取得が失敗すると全場holding=Falseが返る。
+            # それをセッションに固定すると再取得(長押しプル)まで会場が
+            # 一つも出ないままになるため、開催会場がある時だけ保持する。
+            if any(_i.get("holding") for _i in schedule_by_jcd.values()):
+                st.session_state[_schedule_key] = schedule_by_jcd
+
+        # 朝/昼/夜表示と「締切15分以内の次レース」判定は、
+        # 事前取得済みの締切一覧(deadlines)からその場で計算する。
+        meeting_badges = {}
+        meeting_deadlines = {}
+        for _code, _info in schedule_by_jcd.items():
+            _dls = _info.get("deadlines") or {}
+            meeting_deadlines[_code] = _dls
+            _badge = _meeting_time_badge(_dls)
+            if _badge:
+                meeting_badges[_code] = _badge
+    except Exception as e:
+        st.caption("本日の開催状況を取得できませんでした（会場は手動で選べます）。")
+        st.code(str(e))
+        schedule_by_jcd = {}
+        meeting_badges = {}
+        meeting_deadlines = {}
+
+    # 赤判定は、開催中の会場について締切一覧から
+    # 「今より後で最も近いR」を直接求める。
+    # 公式開催一覧の next_race_no 更新が遅れても15分前を拾える一方、
+    # 発売開始前・中止・開催終了の会場は対象外にする。
+    urgent_venues = {}
+    for _code, _info in schedule_by_jcd.items():
+        _holding = bool(_info.get("holding"))
+        _status = str(_info.get("status", "") or "").strip()
+
+        if (
+            not _holding
+            or _status in {"開催終了", "中止", "発売開始前"}
+        ):
+            continue
+
+        _dls = meeting_deadlines.get(_code, {}) or {}
+        _future = []
+
+        for _rr, _hhmm in _dls.items():
+            _mins = _deadline_minutes_left(d, _hhmm)
+            if _mins is not None and _mins >= 0:
+                _future.append((float(_mins), int(_rr)))
+
+        if not _future:
+            continue
+
+        _mins, _next_rno = min(_future)
+
+        if _mins <= 15:
+            urgent_venues[_code] = {
+                "race_no": int(_next_rno),
+                "minutes": float(_mins),
+            }
+
+    venue_codes = list(VENUES.keys())
+    cols_per_row = 4
+
+    venue_grid = st.container(key="venue_grid")
+
+    st.markdown(
+        """
+        <style>
+        .st-key-venue_grid button{
+            min-height:58px !important;
+            padding:4px 2px !important;
+        }
+        .st-key-venue_grid button p{
+            white-space:pre-line !important;
+            overflow:visible !important;
+            text-overflow:clip !important;
+            line-height:1.05 !important;
+            font-size:14px !important;
+            text-align:center !important;
+        }
+        @media (max-width:480px){
+            .st-key-venue_grid button p{
+                font-size:13px !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if urgent_venues:
+        _urgent_css = ["<style>"]
+        for _code in urgent_venues:
+            _urgent_css.append(
+                f".st-key-venue_btn_{_code} button "
+                "{background:#d32f2f !important;"
+                "border-color:#d32f2f !important;"
+                "color:white !important;}"
+            )
+            _urgent_css.append(
+                f".st-key-venue_btn_{_code} button p "
+                "{color:white !important;font-weight:900 !important;}"
+            )
+        _urgent_css.append("</style>")
+        st.markdown("".join(_urgent_css), unsafe_allow_html=True)
+
+    for i in range(0, len(venue_codes), cols_per_row):
+        row_codes = venue_codes[i:i + cols_per_row]
+        cols = venue_grid.columns(len(row_codes))
+
+        for col, code in zip(cols, row_codes):
+            info = schedule_by_jcd.get(code, {})
+            holding = bool(info.get("holding"))
+            status = str(info.get("status", "") or "").strip()
+            is_cancelled = status == "中止"
+            active_holding = holding and status not in {"開催終了", "中止"}
+            is_selected = st.session_state["selected_jcd"] == code
+
+            # 会場状態をアイコンで区別する。
+            # 🟢 開催中 / ⛔ 中止 / ▫️ 非開催・開催終了
+            if is_cancelled:
+                marker = "⛔"
+            elif active_holding:
+                marker = "🟢"
+            else:
+                marker = "▫️"
+            _time_badge = meeting_badges.get(code, "")
+            _time_icon = ""
+            if _time_badge and active_holding:
+                if "朝" in _time_badge:
+                    _time_icon = "🌅"
+                elif "昼" in _time_badge:
+                    _time_icon = "☀️"
+                elif "夜" in _time_badge:
+                    _time_icon = "🌙"
+
+            # スマホ4列でも会場名が切れないよう、通常は時間帯を2行目に表示。
+            # 締切15分以内なら2行目を対象R表示に切り替える。
+            _urgent = urgent_venues.get(code)
+            label = f"{marker} {VENUES[code]}"
+            if _urgent and active_holding:
+                label += f"\n🔥{int(_urgent['race_no'])}R"
+            elif _time_icon:
+                label += f"\n{_time_icon}"
+
+            with col:
+                if st.button(
+                    label,
+                    key=f"venue_btn_{code}",
+                    use_container_width=True,
+                    type="primary" if is_selected else "secondary",
+                ):
+                    st.session_state["selected_jcd"] = code
+
+                    # 赤い会場は、次の締切15分以内Rを自動選択して
+                    # 既存のRカードと同じ公式データ取得フローへ流す。
+                    if _urgent and active_holding:
+                        _urgent_rno = int(_urgent["race_no"])
+                        st.session_state["selected_rno"] = _urgent_rno
+                        st.session_state["_pending_race_fetch"] = _urgent_rno
+
+                    st.rerun()
+
+    st.caption(
+        "🌅朝＝早朝〜昼過ぎまで / ☀️昼＝通常デイ開催 / 🌙夜＝ナイター系 / "
+        "赤い会場＝次レース締切15分以内（タップでそのRを取得）"
+    )
+
+    jcd = st.session_state.get("selected_jcd")
+    if not jcd:
+        st.info("会場を選択してください。")
+    else:
+        jcd = st.session_state["selected_jcd"]
+        st.info(f"選択中の会場：{jcd} {VENUES[jcd]}")
+
+        _selected_status = str(
+            schedule_by_jcd.get(jcd, {}).get("status", "") or ""
+        ).strip()
+        if _selected_status == "中止":
+            st.error(
+                f"⛔ {VENUES[jcd]}は本日の開催が中止になっています。"
+            )
+
+        # 会場を選んだら、その日の1R〜12R締切予定時刻を表示する。
+        # 通常は事前取得済みのスケジュール(schedule_by_jcd)に含まれる
+        # deadlinesを使う。含まれていない場合だけ公式サイトから
+        # 直接取得する（フォールバック）。
+        # 締切15分以内のレースだけ「時刻」を赤系で強調する。
+        deadlines = schedule_by_jcd.get(jcd, {}).get("deadlines") or {}
+        if not deadlines:
+            try:
+                deadlines = cached_fetch_deadlines(d.strftime("%Y%m%d"), jcd)
+            except Exception:
+                deadlines = {}
+
+        # R選択と締切表示を一体化。
+        # カードをタップした時点で、そのRの公式データ取得まで実行する。
+        st.session_state.setdefault("selected_rno", 12)
+        auto_odds = st.toggle("3連単オッズも取得", value=True)
+
+        st.markdown("#### ⏰ レース・締切予定時刻")
+        st.caption("Rと締切時刻のカードをタップすると、そのレースの公式データを取得します。")
+
+        # 締切15分以内はカード文字を赤で強調。
+        # Streamlitのkey付きcontainerは st-key-<key> のCSSクラスになるため、
+        # 対象Rだけ安全に色を変えられる。
+        near_deadline = []
+        for rr in range(1, 13):
+            hhmm = deadlines.get(rr, "--:--") if deadlines else "--:--"
+            mins = _deadline_minutes_left(d, hhmm)
+            if mins is not None and 0 <= mins <= 15:
+                near_deadline.append(rr)
+
+        if near_deadline:
+            css = ["<style>"]
+            for rr in near_deadline:
+                css.append(
+                    f".st-key-race_deadline_{rr} button p "
+                    "{color:#e53935 !important;font-weight:800 !important;}"
+                )
+            css.append("</style>")
+            st.markdown("".join(css), unsafe_allow_html=True)
+
+        # v1.10.12:
+        # 3行×4列のStreamlitボタンを使う。選択中Rの背景色は付けず全R同色にする。
+        # on_click callback は本体の再実行より先に selected_rno を更新するため、
+        # 「6Rを押したのに12Rが選択表示」のようなズレを防げる。
+        def _queue_race_fetch(rr):
+            st.session_state["selected_rno"] = int(rr)
+            st.session_state["_pending_race_fetch"] = int(rr)
+
+        st.markdown(
+            """
+            <style>
+            /* 各行を4列のCSS Gridとして固定。スマホでも縦1列化しない。 */
+            div[class*="st-key-race_row_"] [data-testid="stHorizontalBlock"]{
+                display:grid !important;
+                grid-template-columns:repeat(4, minmax(0, 1fr)) !important;
+                gap:5px !important;
+                width:100% !important;
+            }
+            div[class*="st-key-race_row_"] [data-testid="column"]{
+                width:auto !important;
+                min-width:0 !important;
+                flex:none !important;
+            }
+            div[class*="st-key-race_row_"] button{
+                width:100% !important;
+                min-height:50px !important;
+                height:50px !important;
+                padding:2px 0 !important;
+                border-radius:9px !important;
+            }
+            div[class*="st-key-race_row_"] button p{
+                margin:0 !important;
+                font-size:11px !important;
+                line-height:1.05 !important;
+                white-space:pre-line !important;
+                font-weight:800 !important;
+            }
+            @media (max-width:480px){
+                div[class*="st-key-race_row_"] [data-testid="stHorizontalBlock"]{
+                    gap:4px !important;
+                }
+                div[class*="st-key-race_row_"] button{
+                    min-height:46px !important;
+                    height:46px !important;
+                }
+                div[class*="st-key-race_row_"] button p{
+                    font-size:10px !important;
+                }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        current_selected = int(st.session_state.get("selected_rno", 12))
+
+        # 締切15分以内のRだけ時刻文字を赤くする。
+        near_deadline = []
+        for rr in range(1, 13):
+            hhmm = deadlines.get(rr, "--:--") if deadlines else "--:--"
+            mins = _deadline_minutes_left(d, hhmm)
+            if mins is not None and 0 <= mins <= 15:
+                near_deadline.append(rr)
+
+        if near_deadline:
+            _near_css = ["<style>"]
+            for rr in near_deadline:
+                _near_css.append(
+                    f".st-key-race_btn_wrap_{rr} button p "
+                    "{color:#e53935 !important;font-weight:900 !important;}"
+                )
+            _near_css.append("</style>")
+            st.markdown("".join(_near_css), unsafe_allow_html=True)
+
+        # 1-4R / 5-8R / 9-12R の3段。
+        for row_start in (1, 5, 9):
+            with st.container(key=f"race_row_{row_start}"):
+                cols = st.columns(4)
+                for col, rr in zip(cols, range(row_start, row_start + 4)):
+                    hhmm = deadlines.get(rr, "--:--") if deadlines else "--:--"
+                    with col:
+                        with st.container(key=f"race_btn_wrap_{rr}"):
+                            st.button(
+                                f"{rr}R\n{hhmm}",
+                                key=f"race_pick_btn_{rr}",
+                                use_container_width=True,
+                                type="secondary",
+                                on_click=_queue_race_fetch,
+                                args=(rr,),
+                            )
+
+        requested_rno = st.session_state.pop("_pending_race_fetch", None)
+        fetch_requested = requested_rno is not None
+        if fetch_requested:
+            # callbackですでにselected_rnoは更新済みだが、念のため同期する。
+            st.session_state["selected_rno"] = int(requested_rno)
+
+        if not deadlines:
+            st.caption("締切予定時刻は取得できませんでしたが、Rカードから公式データ取得はできます。")
+        else:
+            st.caption("締切15分以内のレースは赤で強調表示します。")
+
+        rno = int(st.session_state.get("selected_rno", 12))
+        ctx = race_key(d, jcd, rno)
+
+        if st.session_state.get("race_context") not in (None, ctx) and not fetch_requested:
+            st.info("会場・Rが変更されています。Rカードをタップすると公式データを取得します。")
+
+        if fetch_requested:
+            try:
+                with st.spinner(f"{VENUES[jcd]} {rno}R の公式ページを読み込み中…"):
+                    # Rカードを明示的にタップした時は最新データを取得する。
+                    # レース本体と3連単オッズは同時取得して待ち時間を短縮する。
+                    cached_fetch_race.clear()
+                    cached_fetch_odds.clear()
+                    cached_fetch_race_bundle.clear()
+                    race, odds = cached_fetch_race_bundle(
+                        d.strftime("%Y%m%d"),
+                        jcd,
+                        rno,
+                        include_odds=bool(auto_odds),
+                    )
+                st.session_state["race"] = race
+                st.session_state["odds"] = odds
+                st.session_state["race_context"] = ctx
+                st.session_state.pop("result", None)
+                st.query_params["fetched_ctx"] = ctx
+                st.success(f"{VENUES[jcd]} {rno}R の公式データを取得しました。")
+            except Exception as e:
+                st.error("自動取得できませんでした。手動入力も利用できます。")
+                st.code(str(e))
+
+        race = st.session_state.get("race") if st.session_state.get("race_context") == ctx else None
+
+        if race is None and st.query_params.get("fetched_ctx") == ctx:
+            # 接続が切れてsession_stateが失われたケース。以前に取得済みの
+            # 目印があるので、キャッシュから静かに復元を試みる
+            # （キャッシュが生きていれば通信は発生せず一瞬で戻る）。
+            try:
+                with st.spinner("接続が切れたため復元しています…"):
+                    race = cached_fetch_race(d.strftime("%Y%m%d"), jcd, rno)
+                    odds = cached_fetch_odds(d.strftime("%Y%m%d"), jcd, rno) if auto_odds else None
+                st.session_state["race"] = race
+                st.session_state["odds"] = odds
+                st.session_state["race_context"] = ctx
+                st.info("接続切れから公式データを復元しました。")
+            except Exception:
+                race = None
+
+        if race is None:
+            st.info("公式データ取得を押すか、手動入力を作成してください。")
+            if st.button("✍️ このレースの手動入力を作る"):
+                race = pd.DataFrame({
+                    "date":[d.isoformat()]*6,"venue":[VENUES[jcd]]*6,"race_no":[rno]*6,"lane":range(1,7),
+                    "racer_name":[""]*6,"racer_class":[""]*6,"racer_win_rate":[np.nan]*6,"local_win_rate":[np.nan]*6,
+                    "motor_2ren":[np.nan]*6,"boat_2ren":[np.nan]*6,"avg_st":[0.16]*6,
+                    "exhibition_time":[np.nan]*6,"exhibition_st":[np.nan]*6,"weight":[np.nan]*6,"tilt":[np.nan]*6,
+                    "wind_speed":[np.nan]*6,"wave_height":[np.nan]*6,"temperature":[np.nan]*6,
+                })
+                st.session_state["race"] = race
+                st.session_state["race_context"] = ctx
+                st.session_state["odds"] = None
+                st.rerun()
+
+        if race is not None:
+            race = ensure_columns(race, {
+                "lane":np.nan,"racer_name":"","racer_class":"","racer_win_rate":np.nan,"local_win_rate":np.nan,
+                "motor_2ren":np.nan,"boat_2ren":np.nan,"avg_st":np.nan,
+                "exhibition_time":np.nan,"exhibition_st":np.nan,"weight":np.nan,"tilt":np.nan,
+                "wind_speed":np.nan,"wave_height":np.nan,"temperature":np.nan,
+            }).sort_values("lane").reset_index(drop=True)
+            st.markdown("### 📊 今節成績")
+
+            meet_cols = [
+                "lane",
+                "racer_name",
+                "current_meet_avg_finish",
+                "current_meet_avg_finish_adjusted",
+                "current_meet_top2_rate",
+                "current_meet_avg_st",
+                "current_meet_races",
+            ]
+
+            existing_meet_cols = [
+                c for c in meet_cols
+                if c in race.columns
+            ]
+
+            meet_display = race[existing_meet_cols].copy()
+
+            meet_display = meet_display.rename(columns={
+                "lane": "艇",
+                "racer_name": "選手",
+                "current_meet_avg_finish": "今節平均着順",
+                "current_meet_avg_finish_adjusted": "今節平均着順(コース補正)",
+                "current_meet_top2_rate": "今節2連対率",
+                "current_meet_avg_st": "今節平均ST",
+                "current_meet_races": "今節走数",
+            })
+
+            st.dataframe(
+                meet_display,
+                width="stretch",
+                hide_index=True,
+            )
+            st.markdown("### 📐 コース適性")
+
+            course_cols = [
+                "lane",
+                "racer_name",
+                "course_top3_rate",
+                "course_avg_st",
+                "course_start_rank",
+            ]
+
+            existing_course_cols = [
+                c for c in course_cols
+                if c in race.columns
+            ]
+
+            course_display = race[existing_course_cols].copy()
+
+            course_display = course_display.rename(columns={
+                "lane": "艇",
+                "racer_name": "選手",
+                "course_top3_rate": "コース3連対率",
+                "course_avg_st": "コース平均ST",
+                "course_start_rank": "コースST順位",
+            })
+
+            st.dataframe(
+                course_display,
+                width="stretch",
+                hide_index=True,
+            )
+            st.markdown("### ① 選手・機力データ")
+            basic_cols = ["lane","racer_name","racer_class","racer_win_rate","local_win_rate","motor_2ren","boat_2ren","avg_st"]
+            basic = st.data_editor(
+                race[basic_cols], use_container_width=True, hide_index=True, num_rows="fixed", key=f"basic_{ctx}",
+                column_config={
+                    "lane":st.column_config.NumberColumn("艇", disabled=True, format="%d"),
+                    "racer_name":st.column_config.TextColumn("選手"),
+                    "racer_class":st.column_config.SelectboxColumn("級別", options=["", "A1", "A2", "B1", "B2"]),
+                    "racer_win_rate":st.column_config.NumberColumn("全国勝率", format="%.2f"),
+                    "local_win_rate":st.column_config.NumberColumn("当地勝率", format="%.2f"),
+                    "motor_2ren":st.column_config.NumberColumn("モーター2連率", format="%.2f"),
+                    "boat_2ren":st.column_config.NumberColumn("ボート2連率", format="%.2f"),
+                    "avg_st":st.column_config.NumberColumn("平均ST", format="%.3f"),
+                })
+            miss = missing_summary(basic)
+            if miss:
+                st.warning("未取得・不足あり：" + " / ".join(miss))
+            else:
+                st.success("選手・機力の主要データは6艇分そろっています。")
+
+            st.markdown("### ② 展示・直前データ")
+            expo_cols = ["lane","exhibition_time","exhibition_st","weight","tilt","wind_speed","wave_height","temperature"]
+            expo = st.data_editor(
+                race[expo_cols], use_container_width=True, hide_index=True, num_rows="fixed", key=f"expo_{ctx}",
+                column_config={
+                    "lane":st.column_config.NumberColumn("艇", disabled=True, format="%d"),
+                    "exhibition_time":st.column_config.NumberColumn("展示タイム", format="%.2f"),
+                    "exhibition_st":st.column_config.NumberColumn("展示ST", format="%.2f"),
+                    "weight":st.column_config.NumberColumn("体重kg", format="%.1f"),
+                    "tilt":st.column_config.NumberColumn("チルト", format="%.1f"),
+                    "wind_speed":st.column_config.NumberColumn("風速m/s", format="%.1f"),
+                    "wave_height":st.column_config.NumberColumn("波高cm", format="%.1f"),
+                    "temperature":st.column_config.NumberColumn("気温℃", format="%.1f"),
+                })
+            n_display = pd.to_numeric(expo["exhibition_time"], errors="coerce").notna().sum()
+            if n_display == 6:
+                st.success("展示タイム：6艇分取得済み")
+            elif n_display:
+                st.warning(f"展示タイム：{n_display}/6艇")
+            else:
+                st.info("展示タイム未取得。展示前なら正常です。")
+
+            edited = race.copy()
+
+            for c in basic_cols:
+                edited[c] = basic[c].to_numpy()
+            for c in expo_cols:
+                if c != "lane":
+                    edited[c] = expo[c].to_numpy()
+
+            # オリジナル展示はAI予想に使わないため、常時表示せず参考欄へ格納する。
+            _orig_auto_cols = ["original_straight", "original_turn", "original_lap"]
+
+            orig = pd.DataFrame({"lane": range(1, 7)})
+            for c in _orig_auto_cols:
+                orig[c] = pd.to_numeric(race[c], errors="coerce") if c in race.columns else np.nan
+
+            _ocr_df = st.session_state.get(f"orig_ocr_data_{ctx}")
+            if _ocr_df is not None:
+                orig = orig.drop(columns=_orig_auto_cols).merge(_ocr_df, on="lane", how="left")
+
+            _orig_source = safe_name(race["original_exhibition_source"].dropna().iloc[0]) if (
+                "original_exhibition_source" in race.columns
+                and race["original_exhibition_source"].astype(str).str.strip().any()
+            ) else ""
+
+            _orig_has_data = (
+                orig[_orig_auto_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .notna()
+                .any()
+                .any()
+            )
+            _orig_label = (
+                "📎 参考：オリジナル展示（取得済み）"
+                if _orig_has_data
+                else "📎 参考：オリジナル展示"
+            )
+
+            with st.expander(_orig_label, expanded=False):
+                st.caption(
+                    "直線・まわり足・1周タイムの参考欄です。"
+                    "現在はAI予想・買い目・確率には反映しません。"
+                )
+
+                if OCR_AVAILABLE:
+                    st.caption("画像から読み取る場合は、オリジナル展示のスクリーンショットを選択してください。")
+                    ocr_file = st.file_uploader(
+                        "画像を選択",
+                        type=["png", "jpg", "jpeg"],
+                        key=f"orig_upload_{ctx}",
+                    )
+                    if ocr_file is not None and st.button(
+                        "この画像から読み取る",
+                        key=f"orig_ocr_btn_{ctx}",
+                    ):
+                        with st.spinner("画像を解析中…"):
+                            ocr_df = extract_original_exhibition(ocr_file.getvalue())
+                        if ocr_df is None or ocr_df.empty:
+                            st.warning(
+                                "表を読み取れませんでした。表全体がはっきり写っている画像か、"
+                                "拡大・トリミングして再度お試しください。"
+                            )
+                        else:
+                            st.session_state[f"orig_ocr_data_{ctx}"] = ocr_df
+                            st.session_state[f"orig_ver_{ctx}"] = (
+                                st.session_state.get(f"orig_ver_{ctx}", 0) + 1
+                            )
+                            st.success("読み取りました。数値を確認してください。")
+                            st.rerun()
+
+                _orig_ver = st.session_state.get(f"orig_ver_{ctx}", 0)
+                orig = st.data_editor(
+                    orig,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="fixed",
+                    key=f"orig_{ctx}_{_orig_ver}",
+                    column_config={
+                        "lane": st.column_config.NumberColumn("艇", disabled=True, format="%d"),
+                        "original_straight": st.column_config.NumberColumn("直線", format="%.2f"),
+                        "original_turn": st.column_config.NumberColumn("まわり足", format="%.2f"),
+                        "original_lap": st.column_config.NumberColumn("1周", format="%.2f"),
+                    },
+                )
+
+                if orig[_orig_auto_cols].apply(
+                    pd.to_numeric, errors="coerce"
+                ).notna().any().any():
+                    if _orig_source:
+                        st.caption(f"自動取得元：{_orig_source} / 参考表示のみ")
+                    else:
+                        st.caption("参考表示のみ")
+                else:
+                    st.caption("オリジナル展示データはありません。")
+
+            work = edited.merge(orig, on="lane", how="left")
+            work["date"] = d.isoformat()
+            work["venue"] = VENUES[jcd]
+            work["race_no"] = rno
+
+            st.markdown("### ④ 3連単オッズ")
+            odds = st.session_state.get("odds")
+            if odds is not None and len(odds):
+                st.success(f"3連単オッズ {len(odds)}通りを自動取得")
+            else:
+                st.info("オッズなしでも確率予想は可能。期待値を出す場合はCSVを追加してください。")
+                odds_up = st.file_uploader("オッズCSV（任意）", type="csv", key=f"oddsfile_{ctx}", help="combo,odds の2列。例：1-2-3,12.5")
+                if odds_up:
+                    odds = pd.read_csv(odds_up)
+
+            if odds_tracking_available():
+                with st.expander("📈 オッズの時系列追跡", expanded=False):
+                    st.caption("登録すると、締切まで数分おきに自動でオッズを記録し、動きを確認できるようになります。")
+                    if st.button("この開催レースの追跡を開始", key=f"watch_{ctx}"):
+                        ok, msg = add_to_odds_watchlist(d.strftime("%Y%m%d"), jcd, rno)
+                        if ok:
+                            st.success(msg)
+                            saved_now, save_msg = save_odds_snapshot_now(
+                                d.strftime("%Y%m%d"), jcd, rno, odds
+                            )
+                            if saved_now:
+                                st.success(f"⚡ {save_msg}")
+                            else:
+                                st.warning(
+                                    f"{save_msg} 定期追跡は開始済みなので、"
+                                    "次回のGitHub Actionsでも保存を試みます。"
+                                )
+                        else:
+                            st.error(msg)
+
+                    hist = load_odds_history(d.strftime("%Y%m%d"), jcd, rno)
+                    if len(hist):
+                        st.caption(f"記録済み：{hist['fetched_at'].nunique()}時点分")
+                        pivot = hist.pivot_table(index="fetched_at", columns="combo", values="odds")
+                        # 動きが大きい（下落幅が大きい）上位5点だけをグラフ表示
+                        if len(pivot.columns) and len(pivot) >= 2:
+                            change = pivot.iloc[-1] - pivot.iloc[0]
+                            top_movers = change.sort_values().head(5).index.tolist()
+                            st.line_chart(pivot[top_movers])
+                            st.caption("下落幅が大きい上位5買い目のオッズ推移（人気が集まっている＝妙味が薄れつつある買い目）")
+                        else:
+                            st.info("まだ記録が1時点分しかありません。もう少し待ってから確認してください。")
+                    else:
+                        st.info("まだ追跡記録がありません。「追跡を開始」を押してから数分待ってください。")
+
+            st.divider()
+            if st.button("🤖 AI最終予想", type="primary"):
+                try:
+                    with st.spinner("AI解析中…"):
+                        model = train(history)
+                        pre = work.copy()
+                        # 比較用の「展示反映前」は通常展示タイムだけをOFFにする。
+                        # オリジナル展示（直線・まわり足・1周）は本番予想に使わない。
+                        # 天候・場特性・今節・コース・級別・決まり手は最終予想と同条件にする。
+                        pre["exhibition_time"] = np.nan
+                        pre["original_straight"] = np.nan
+                        pre["original_turn"] = np.nan
+                        pre["original_lap"] = np.nan
+                        pre["exhibition_st"] = np.nan
+                        before = predict(
+                            model,
+                            pre,
+                            display_weight=0,
+                            weather_weight=weather_weight,
+                            venue_course_weight=venue_course_weight,
+                            original_display_scale=0.0,
+                        )
+                        final = predict(
+                            model,
+                            work,
+                            display_weight=display_weight,
+                            weather_weight=weather_weight,
+                            venue_course_weight=venue_course_weight,
+                            original_display_scale=0.0,
+                        )
+
+                        # 研究用の比較は別計算。final（本番予想）は一切変更しない。
+                        research_variants = research_prediction_variants(
+                            model,
+                            work,
+                            display_weight=display_weight,
+                            weather_weight=weather_weight,
+                            venue_course_weight=venue_course_weight,
+                        )
+                        tri = trifecta(final)
+                        ticket_plan = adaptive_ticket_plan(final)
+                        target_points = int(ticket_plan["point_count"])
+                        main_points = min(int(ticket_plan["main_n"]), target_points)
+                        cover_points = target_points - main_points
+
+                        favorite_lane, risk_score, risk_reasons = assess_favorite_risk(work, final)
+                        hedge_lane = favorite_lane if (hedge_enabled and risk_score >= 2) else None
+
+                        tickets = rank_tickets(
+                            tri,
+                            odds,
+                            main_n=main_points,
+                            cover_n=cover_points,
+                            longshot_n=0,
+                            longshot_min_prob=float(longshot_min_prob_pct) / 100.0,
+                            hedge_lane=hedge_lane,
+                            first=final,
+                            min_first_margin=0.40,
+                            min_second_coverage=ticket_plan["min_second_coverage"],
+                            close_third_gap=None,
+                            close_third_coverage=4,
+                            include_nonrecommended=True,
+                            second_favorite_n=2,
+                        )
+                        tickets = _complete_adaptive_tickets(
+                            tickets,
+                            tri,
+                            odds,
+                            main_points=main_points,
+                            cover_points=cover_points,
+                        )
+                        if len(tickets) != target_points:
+                            raise RuntimeError(
+                                f"買い目点数の生成不整合: 予定{target_points}点 / 実際{len(tickets)}点"
+                            )
+                        tickets = allocate_stakes_smart(
+                            tickets,
+                            budget=int(total_budget),
+                            unit=100,
+                            min_bet=int(min_bet),
+                            max_longshot_share=0.15,
+                            max_ticket_share=0.35,
+                            value_bias=float(value_bias),
+                            guarantee_col="second_favorite",
+                        )
+                        if (
+                            "recommended" in tickets.columns
+                            and not tickets["recommended"].fillna(True).all()
+                        ):
+                            tickets["stake"] = 0
+                            tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
+                        st.session_state["result"] = {
+                            "context": ctx,
+                            "before": before,
+                            "final": final,
+                            "tickets": tickets,
+                            "work": work,
+                            "hedge_lane": hedge_lane,
+                            "risk_reasons": risk_reasons,
+                            "research_variants": research_variants,
+                            "ticket_plan": ticket_plan,
+                        }
+                except Exception as e:
+                    st.error("AI予想でエラーが発生しました。")
+                    st.code(str(e))
+
+            result = st.session_state.get("result")
+            if result and result.get("context") == ctx:
+                before, final, tickets, work_result = result["before"], result["final"], result["tickets"], result["work"]
+
+                if "stake" not in tickets.columns:
+                    tickets = allocate_stakes_smart(
+                        tickets,
+                        budget=int(total_budget),
+                        unit=100,
+                        min_bet=int(min_bet),
+                        max_longshot_share=0.15,
+                        max_ticket_share=0.35,
+                        value_bias=float(value_bias),
+                        guarantee_col="second_favorite",
+                    )
+                    st.session_state["result"]["tickets"] = tickets
+
+                tickets = tickets.copy()
+                tickets["stake"] = pd.to_numeric(tickets["stake"], errors="coerce").fillna(0).astype(int)
+
+                st.divider()
+                st.subheader(f"{VENUES[jcd]} {rno}R AI最終予想")
+
+                total_stake_metric = int(tickets["stake"].sum())
+                mc1, mc2, mc3 = st.columns(3)
+                with mc1:
+                    st.metric("AI総合信頼度", confidence(final, work_result))
+                with mc2:
+                    st.metric(
+                        "推奨投資額（シミュレーション）",
+                        f"{total_stake_metric:,}円",
+                    )
+                with mc3:
+                    st.metric(
+                        "推奨判定",
+                        "非推奨" if total_stake_metric == 0 else "推奨",
+                    )
+
+                ticket_plan = result.get("ticket_plan") or {}
+                point_count = len(tickets)
+                plan_reason = ticket_plan.get("reason", "固定済みの買い目構成")
+                st.info(f"🎯 推奨買い目 {point_count}点：{plan_reason}")
+
+                if total_stake_metric == 0:
+                    st.warning(
+                        "⚠️ 非推奨レースです。予想は通常どおり表示しますが、"
+                        "1着確率1位と2位の差が40ポイント未満のため、"
+                        "買い目は検証用予想として表示し、推奨投資額を0円としています。"
+                    )
+
+                # -------------------------------------------------
+                # note投稿管理（オーナー専用）
+                # -------------------------------------------------
+                # 推奨レース、または本命1着確率70%以上だけを投稿候補にする。
+                # 「記事用に確定」を押した時点でSupabase側が当日の通し番号を原子的に採番し、
+                # 1〜3本目=無料、4本目以降=有料300円に固定する。同一レースの再押下では増えない。
+                if IS_ADMIN:
+                    try:
+                        _pub_probs = pd.to_numeric(final["p_first"], errors="coerce")
+                        _pub_top_idx = _pub_probs.idxmax()
+                        _pub_p1_prob = float(_pub_probs.loc[_pub_top_idx])
+                        _pub_p1_lane = int(final.loc[_pub_top_idx, "lane"])
+                        _pub_recommended = total_stake_metric > 0
+                        # 記事投稿の最終判断はオーナーが行うため、全レースで投稿UIを表示する。
+                        _pub_eligible = True
+
+                        if _pub_eligible:
+                            _pub_reason = (
+                                "推奨＋本命70%以上"
+                                if (_pub_recommended and _pub_p1_prob >= 0.70)
+                                else ("推奨" if _pub_recommended else ("本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"))
+                            )
+                            _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
+
+                            _pub_groups = {"本線": [], "抑え": [], "穴": []}
+                            if "combo" in tickets.columns:
+                                for _, _pub_row in tickets.iterrows():
+                                    _pub_combo = str(_pub_row.get("combo", "") or "").strip()
+                                    _pub_group = str(_pub_row.get("group", "抑え") or "抑え").strip()
+                                    if _pub_combo:
+                                        _pub_groups.setdefault(_pub_group, []).append(_pub_combo)
+
+                            def _compact_note_tickets(_combos):
+                                """同じ1着-2着の3着候補をまとめる。例: 1-2-3,1-2-4,1-2-6 -> 1-2-346"""
+                                _grouped = {}
+                                _fallback = []
+                                for _combo in _combos:
+                                    _parts = [p.strip() for p in str(_combo).split("-")]
+                                    if len(_parts) == 3 and all(p.isdigit() for p in _parts):
+                                        _key = (_parts[0], _parts[1])
+                                        _grouped.setdefault(_key, [])
+                                        if _parts[2] not in _grouped[_key]:
+                                            _grouped[_key].append(_parts[2])
+                                    else:
+                                        _fallback.append(str(_combo))
+                                _out = []
+                                for (_first, _second), _thirds in _grouped.items():
+                                    _third_text = "".join(_thirds)
+                                    _out.append(f"{_first}-{_second}-{_third_text}")
+                                return _out + _fallback
+
+                            _pub_lines = ["【本線買い目】"]
+                            if _pub_groups.get("本線"):
+                                _pub_lines += _compact_note_tickets(_pub_groups["本線"])
+                            else:
+                                _pub_lines += ["なし"]
+
+                            _cover_tickets = (_pub_groups.get("抑え") or []) + (_pub_groups.get("穴") or [])
+                            _pub_lines += ["", "【抑え買い目】"]
+                            if _cover_tickets:
+                                _pub_lines += _compact_note_tickets(_cover_tickets)
+                            else:
+                                _pub_lines += ["なし"]
+
+                            _pub_lines += [
+                                "",
+                                "※資金配分は指定していません。",
+                                "オッズとご自身の予算に合わせて、購入する買い目・金額をご判断ください。",
+                                "",
+                                "※掲載している予想は、的中や利益を保証するものではありません。舟券の購入はご自身の判断でお願いします。",
+                            ]
+                            _pub_article = "\n".join(_pub_lines)
+
+                            _pub_url, _pub_key = supabase_config()
+                            _pub_race_key = ctx
+                            _pub_date = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
+
+                            # 当日の未投稿DRAFTだけを削除して、投稿回数を0から数え直す。
+                            # 公開済み（note_url / published_atあり）は誤削除しない。
+                            if _pub_url and _pub_key:
+                                if st.button("🔄 本日の投稿回数をリセット", key=f"reset_note_count_{_pub_date}"):
+                                    try:
+                                        _reset = requests.post(
+                                            f"{_pub_url}/rest/v1/rpc/reset_note_publications_for_date",
+                                            headers={
+                                                "apikey": _pub_key,
+                                                "Authorization": f"Bearer {_pub_key}",
+                                                "Content-Type": "application/json",
+                                            },
+                                            json={"p_publication_date": _pub_date},
+                                            timeout=10,
+                                        )
+                                        _reset.raise_for_status()
+                                        _deleted = int(_reset.json() or 0)
+                                        st.success(f"本日の未投稿記事 {_deleted}件をリセットしました。投稿回数は0から数え直します。")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error("投稿回数のリセットに失敗しました。")
+                                        st.code(str(e))
+
+                            _existing_pub = None
+                            if _pub_url and _pub_key:
+                                try:
+                                    _er = requests.get(
+                                        f"{_pub_url}/rest/v1/note_publications",
+                                        params={"race_key": f"eq.{_pub_race_key}", "select": "*"},
+                                        headers={"apikey": _pub_key, "Authorization": f"Bearer {_pub_key}"},
+                                        timeout=10,
+                                    )
+                                    if _er.ok and (_er.json() or []):
+                                        _existing_pub = _er.json()[0]
+                                except Exception:
+                                    _existing_pub = None
+
+                            if _existing_pub:
+                                _ptype = _existing_pub.get("publication_type")
+                                _seq = int(_existing_pub.get("sequence_no") or 0)
+                                _price = int(_existing_pub.get("price") or 0)
+                                if _ptype == "FREE":
+                                    st.success(f"✅ 本日{_seq}本目 → 無料予想（確定済み）")
+                                else:
+                                    st.success(f"🔒 本日{_seq}本目 → 有料予想 {_price}円（確定済み）")
+                                _title_prefix = "無料予想" if _ptype == "FREE" else "有料予想"
+                                _note_title = st.text_input(
+                                    "noteタイトル",
+                                    value=(f"【{_title_prefix}】{VENUES[jcd]} {rno}R｜締切 {_pub_deadline}" if _pub_deadline else f"【{_title_prefix}】{VENUES[jcd]} {rno}R"),
+                                    key=f"note_title_{ctx}",
+                                )
+                                _note_body = st.text_area(
+                                    "note本文（そのままコピー用）",
+                                    value=_existing_pub.get("article_text") or _pub_article,
+                                    height=420,
+                                    key=f"note_body_{ctx}",
+                                )
+                                _copy_payload = json.dumps(
+                                    {"title": _note_title, "body": _note_body},
+                                    ensure_ascii=False,
+                                ).replace("</", "<\\/")
+                                components.html(
+                                    f"""
+                                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 8px 0;">
+                                      <button id="copy-title" style="padding:9px 14px;cursor:pointer;">📋 タイトルをコピー</button>
+                                      <button id="copy-body" style="padding:9px 14px;cursor:pointer;">📋 本文をコピー</button>
+                                      <button id="copy-all" style="padding:9px 14px;cursor:pointer;">📋 タイトル＋本文をコピー</button>
+                                      <button id="copy-tags" style="padding:9px 14px;cursor:pointer;">📋 ハッシュタグをコピー</button>
+                                      <span id="copy-status" style="align-self:center;font-size:13px;"></span>
+                                    </div>
+                                    <script>
+                                    const data = {_copy_payload};
+                                    const status = document.getElementById("copy-status");
+                                    async function copyText(value) {{
+                                      try {{
+                                        await navigator.clipboard.writeText(value);
+                                        status.textContent = "コピーしました";
+                                      }} catch (e) {{
+                                        status.textContent = "コピーできませんでした";
+                                      }}
+                                      setTimeout(() => status.textContent = "", 1800);
+                                    }}
+                                    document.getElementById("copy-title").onclick = () => copyText(data.title);
+                                    document.getElementById("copy-body").onclick = () => copyText(data.body);
+                                    document.getElementById("copy-all").onclick = () => copyText(data.title + "\\n\\n" + data.body);
+                                    document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
+                                    </script>
+                                    """,
+                                    height=58,
+                                )
+                            else:
+                                st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
+                                if st.button("📝 note記事用に確定", key=f"reserve_note_{ctx}"):
+                                    if not _pub_url or not _pub_key:
+                                        st.error("Supabase設定が見つかりません。")
+                                    else:
+                                        try:
+                                            _rr = requests.post(
+                                                f"{_pub_url}/rest/v1/rpc/reserve_note_publication",
+                                                headers={
+                                                    "apikey": _pub_key,
+                                                    "Authorization": f"Bearer {_pub_key}",
+                                                    "Content-Type": "application/json",
+                                                },
+                                                json={
+                                                    "p_race_key": _pub_race_key,
+                                                    "p_publication_date": _pub_date,
+                                                    "p_venue": VENUES[jcd],
+                                                    "p_race_no": int(rno),
+                                                    "p_trigger_reason": _pub_reason,
+                                                    "p_p1_lane": _pub_p1_lane,
+                                                    "p_p1_prob": _pub_p1_prob,
+                                                    "p_title": (f"{VENUES[jcd]} {rno}R｜締切 {_pub_deadline}" if _pub_deadline else f"{VENUES[jcd]} {rno}R"),
+                                                    "p_article_text": _pub_article,
+                                                },
+                                                timeout=10,
+                                            )
+                                            _rr.raise_for_status()
+                                            st.success("記事枠を確定しました。無料／有料は自動判定されています。")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error("記事枠の確定に失敗しました。")
+                                            st.code(str(e))
+                        else:
+                            st.caption(
+                                f"📝 記事投稿対象外：本命 {_pub_p1_lane}号艇 {_pub_p1_prob:.1%} ／ 非推奨"
+                            )
+                    except Exception as e:
+                        st.caption(f"記事投稿判定を表示できませんでした: {e}")
+
+                # -------------------------------------------------
+                # スレッズ投稿
+                # -------------------------------------------------
+                # 投稿できるのはオーナーだけ。収集スタッフの画面には出さない。
+                _sb_url, _sb_key = supabase_config()
+                _threads_cfg = (
+                    threads_load_config(_sb_url, _sb_key)
+                    if (IS_ADMIN and THREADS_AVAILABLE and _sb_url and _sb_key)
+                    else None
+                )
+
+                if _threads_cfg:
+                    with st.expander("🧵 スレッズに投稿", expanded=False):
+                        _default_text = threads_build_post_text(
+                            race_date=d.strftime("%-m/%-d") if hasattr(d, "strftime") else str(d),
+                            venue=VENUES[jcd],
+                            race_no=rno,
+                            final=final,
+                            tickets=tickets,
+                            deadline=(deadlines or {}).get(rno),
+                            publication_type=(
+                                str(_pub_existing.get("publication_type") or "FREE")
+                                if "_pub_existing" in locals() and _pub_existing
+                                else "FREE"
+                            ),
+                        )
+
+                        _posted_key = f"threads_posted_{ctx}"
+                        if st.session_state.get(_posted_key):
+                            st.success(
+                                "✅ このレースは投稿済みです。"
+                                f" 投稿ID: {st.session_state[_posted_key]}"
+                            )
+
+                        _text = st.text_area(
+                            "投稿内容（送信前に編集できます）",
+                            value=_default_text,
+                            height=240,
+                            key=f"threads_text_v2_{ctx}",
+                        )
+                        _len = len(_text)
+                        if _len > THREADS_TEXT_LIMIT:
+                            st.error(f"{_len} / {THREADS_TEXT_LIMIT}文字（超過しています）")
+                        else:
+                            st.caption(f"{_len} / {THREADS_TEXT_LIMIT}文字")
+
+                        if st.button(
+                            "🧵 この内容でスレッズに投稿",
+                            key=f"post_threads_{ctx}",
+                            disabled=_len > THREADS_TEXT_LIMIT,
+                        ):
+                            try:
+                                _post_id = threads_post_text(
+                                    _threads_cfg["user_id"],
+                                    _threads_cfg["access_token"],
+                                    _text,
+                                )
+                                st.session_state[_posted_key] = _post_id
+                                st.success(f"投稿しました。（投稿ID: {_post_id}）")
+                                st.rerun()
+                            except Exception as e:
+                                st.error("スレッズへの投稿に失敗しました。")
+                                st.code(str(e))
+                                st.caption(
+                                    "トークンが失効している可能性があります。"
+                                    "設定タブから再登録してください。"
+                                )
+
+                snapshot = load_prediction_snapshot(ctx)
+                if snapshot:
+                    kind_label = (
+                        "過去レース・バックテスト"
+                        if snapshot.get("snapshot_kind") == "backtest"
+                        else "当日予想"
+                    )
+                    st.success(
+                        "📌 検証用予想は固定済みです。"
+                        f" 固定時刻: {snapshot.get('saved_at', '-')} / {kind_label}。"
+                        "このあとAIを再計算しても、結果保存では固定済み予想を使います。"
+                    )
+                else:
+                    if d < _today_jst():
+                        st.warning(
+                            "📌 このレースは過去レースです。ここで固定するとバックテスト扱いになります。"
+                            "買い目・回収率は締切後データが混ざる可能性があるため参考値として扱ってください。"
+                        )
+                        snapshot_kind = "backtest"
+                    else:
+                        st.warning(
+                            "📌 レース前に『この予想を検証用に固定』を押してください。"
+                            "固定後はレース終了後に再取得・再予想しても、検証成績はこの時点の予想で判定します。"
+                        )
+                        snapshot_kind = "same_day"
+
+                    if st.button(
+                        "📌 この予想を検証用に固定",
+                        key=f"lock_prediction_{ctx}",
+                    ):
+                        try:
+                            # 当日レースは締切後の固定を禁止する。
+                            # 結果や直前確定情報を見た後の予想が検証データへ混ざるのを防ぐ。
+                            if snapshot_kind == "same_day" and d == _today_jst():
+                                _lock_hhmm = deadlines.get(rno) if deadlines else None
+                                _lock_mins = _deadline_minutes_left(d, _lock_hhmm) if _lock_hhmm else None
+                                if _lock_mins is not None and _lock_mins <= 0:
+                                    raise ValueError(
+                                        "締切時刻を過ぎているため、本番検証用の予想は固定できません。"
+                                    )
+
+                            snap = save_prediction_snapshot(
+                                race_key=ctx,
+                                race_date=d.isoformat(),
+                                venue=VENUES[jcd],
+                                race_no=rno,
+                                final=final,
+                                tickets=tickets,
+                                research_variants=st.session_state["result"].get(
+                                    "research_variants",
+                                    {},
+                                ),
+                                race_features=work_result,
+                                snapshot_kind=snapshot_kind,
+                                collector_name=COLLECTOR_NAME,
+                            )
+                            st.success(
+                                "検証用予想を固定しました。"
+                                f" 固定時刻: {snap.get('saved_at', '-')}"
+                            )
+
+                            # 本番（当日・レース前）で予想を固定したら、
+                            # 同じレースをオッズ追跡対象へ自動登録する。
+                            # バックテストでは終了後オッズを追跡しても意味がないため登録しない。
+                            if snapshot_kind == "same_day" and odds_tracking_available():
+                                ok, msg = add_to_odds_watchlist(
+                                    d.strftime("%Y%m%d"),
+                                    jcd,
+                                    rno,
+                                )
+                                if ok:
+                                    st.success(
+                                        "📈 オッズ自動追跡も開始しました。"
+                                        " GitHub Actionsが数分おきに記録します。"
+                                    )
+                                    saved_now, save_msg = save_odds_snapshot_now(
+                                        d.strftime("%Y%m%d"), jcd, rno, odds
+                                    )
+                                    if saved_now:
+                                        st.success(f"⚡ {save_msg}")
+                                    else:
+                                        st.warning(
+                                            f"{save_msg} 定期追跡は開始済みなので、"
+                                            "次回のGitHub Actionsでも保存を試みます。"
+                                        )
+                                else:
+                                    # 予想固定自体は成功済みなので、追跡登録の失敗だけを警告する。
+                                    st.warning(
+                                        "予想の固定は成功しましたが、"
+                                        f"オッズ追跡の開始に失敗しました。 {msg}"
+                                    )
+
+                            st.rerun()
+                        except Exception as e:
+                            st.error("検証用予想の固定に失敗しました。")
+                            st.code(str(e))
+
+                merged = final.merge(before[["lane","p_first"]], on="lane", suffixes=("_after","_before"))
+                merged["変化"] = merged["p_first_after"] - merged["p_first_before"]
+                merged = merged.sort_values("p_first_after", ascending=False)
+
+                research_variants = st.session_state["result"].get("research_variants", {})
+                if research_variants:
+                    with st.expander("🧪 研究用：補正を1段ずつ比較", expanded=False):
+                        st.caption(
+                            "本番表示・買い目は『現行全部入り』の結果をそのまま使用しています。"
+                            "この表は研究用で、予想結果には影響しません。"
+                        )
+                        rows = []
+                        for label, variant_df in research_variants.items():
+                            ranked = variant_df.sort_values("p_first", ascending=False).reset_index(drop=True)
+                            if len(ranked) == 0:
+                                continue
+                            top = ranked.iloc[0]
+                            rows.append({
+                                "方式": label,
+                                "本命艇": int(top["lane"]),
+                                "本命確率": float(top["p_first"]) * 100,
+                            })
+                        if rows:
+                            st.dataframe(
+                                pd.DataFrame(rows),
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    "本命確率": st.column_config.NumberColumn(format="%.1f%%"),
+                                },
+                            )
+
+                hedge_lane = st.session_state["result"].get("hedge_lane")
+                risk_reasons = st.session_state["result"].get("risk_reasons", [])
+                if hedge_lane is not None and (tickets["group"] == "穴").any():
+                    st.warning(
+                        f"🛟 {hedge_lane}号艇（本命）に不安要素あり（{' / '.join(risk_reasons)}）のため、"
+                        f"穴の1点を{hedge_lane}号艇を含まない保険買い目に差し替えています。"
+                    )
+
+                st.markdown("### 1着確率")
+                for _, row in merged.iterrows():
+                    lane = int(row["lane"])
+                    nm = safe_name(row.get("racer_name", ""))
+
+                    # 決まり手補正の内訳を各艇カードに表示する。
+                    km_available = bool(row.get("kimarite_available", False))
+                    km_effect = pd.to_numeric(
+                        pd.Series([row.get("kimarite_effect_pct")]),
+                        errors="coerce",
+                    ).iloc[0]
+                    km_starts = pd.to_numeric(
+                        pd.Series([row.get("kimarite_starts")]),
+                        errors="coerce",
+                    ).iloc[0]
+                    km_wins = pd.to_numeric(
+                        pd.Series([row.get("kimarite_wins")]),
+                        errors="coerce",
+                    ).iloc[0]
+                    km_dom = safe_name(row.get("kimarite_dominant", ""))
+
+                    if km_available and pd.notna(km_effect):
+                        km_parts = [f"決まり手補正 {float(km_effect):+.1f}%"]
+                        if km_dom:
+                            km_parts.append(f"得意 {km_dom}")
+                        if pd.notna(km_starts):
+                            starts_txt = f"{int(km_starts)}走"
+                            if pd.notna(km_wins):
+                                starts_txt += f"（{int(km_wins)}勝）"
+                            km_parts.append(f"コース実績 {starts_txt}")
+                        km_html = " / ".join(km_parts)
+                    elif pd.notna(km_starts) and int(km_starts or 0) > 0:
+                        km_html = f"決まり手データ不足 / コース実績 {int(km_starts)}走"
+                    else:
+                        km_html = "決まり手データ不足"
+
+                    p2 = pd.to_numeric(
+                        pd.Series([row.get("p_second")]), errors="coerce"
+                    ).iloc[0]
+                    p3 = pd.to_numeric(
+                        pd.Series([row.get("p_third")]), errors="coerce"
+                    ).iloc[0]
+                    place_html = ""
+                    if pd.notna(p2) and pd.notna(p3):
+                        place_html = (
+                            f'<span class="small">2着 <b>{float(p2)*100:.1f}%</b> / '
+                            f'3着 <b>{float(p3)*100:.1f}%</b></span><br>'
+                        )
+
+                    st.markdown(
+                        f"""<div class="ticket"><b>{lane}号艇 {nm}</b><br>
+    1着 <b>{row['p_first_after']*100:.1f}%</b>
+    <span class="small">展示反映前 {row['p_first_before']*100:.1f}% / 展示効果 {row['変化']*100:+.1f}pt</span><br>
+    {place_html}<span class="small">🎯 {km_html}</span><br>
+    <span class="small">{row['reason']}</span></div>""",
+                        unsafe_allow_html=True
+                    )
+
+                for group, emoji in [("本線","🔥"),("抑え","🛟"),("穴","💎")]:
+                    st.markdown(f"### {emoji} {group}")
+                    g = tickets[tickets["group"] == group]
+
+                    if len(g) == 0:
+                        st.caption("なし")
+
+                    for _, row in g.iterrows():
+                        oddtxt = f"{row['odds']:.1f}倍" if pd.notna(row.get("odds")) else "オッズ未取得"
+                        evtxt = f" / 期待値 {row['expected_return']:.2f}" if pd.notna(row.get("expected_return")) else ""
+                        stake = int(row.get("stake", 0) or 0)
+                        stake_txt = f"{stake:,}円" if stake > 0 else "見送り"
+
+                        st.markdown(
+                            f"""<div class="ticket">
+    <b>{row['combo']}</b>　的中確率 <b>{row['prob']*100:.2f}%</b><br>
+    <span class="small">{oddtxt}{evtxt}</span><br>
+    <div class="money">💴 推奨 {stake_txt}</div>
+    <span class="small">{row.get('stake_reason', '')}</span>
+    </div>""",
+                            unsafe_allow_html=True
+                        )
+
+                st.markdown("### 💴 購入配分")
+                buy_view = tickets[["combo", "group", "stake"]].copy()
+                buy_view = buy_view[buy_view["stake"] > 0]
+
+                if len(buy_view):
+                    st.dataframe(
+                        buy_view,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "combo":"買い目",
+                            "group":"区分",
+                            "stake":st.column_config.NumberColumn("購入額", format="%d円"),
+                        }
+                    )
+                    st.success(f"購入合計：{int(buy_view['stake'].sum()):,}円")
+                else:
+                    st.info("購入推奨額はありません。")
+
+                csv_export = tickets.copy()
+                if "combo" in csv_export.columns:
+                    # Excelは "3-1-4" のような買い目表記を日付だと誤解釈して
+                    # 例えば "2003/1/4" のように勝手に変換してしまうことがある。
+                    # 先頭に ' を付けるとExcel上ではテキスト扱いになり、
+                    # セルの見た目には出ない（数式バーにのみ残る）。
+                    csv_export["combo"] = "'" + csv_export["combo"].astype(str)
+
+                csv_export = csv_export.rename(columns={
+                    "combo": "買い目",
+                    "prob": "的中確率",
+                    "odds": "オッズ",
+                    "expected_return": "期待値",
+                    "group": "区分",
+                    "stake": "購入額",
+                    "stake_reason": "配分理由",
+                })
+
+                csv = csv_export.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 買い目CSV保存",
+                    csv,
+                    file_name=f"{d}_{VENUES[jcd]}_{rno}R_tickets.csv",
+                    mime="text/csv"
+                )
+
+                st.divider()
+                st.markdown("### ✅ レース結果を検証保存")
+
+                if result_exists(ctx):
+                    st.success("このレースは検証履歴に保存済みです。再保存すると上書きします。")
+
+                # 半自動検証 Phase 2：
+                # 公式結果取得 → 固定予想で払戻計算 → 検証履歴保存 → オッズ追跡停止
+                # を1クリックで実行する。固定予想がないレースは保存しない。
+                if st.button(
+                    "🏁 結果取得＋検証保存",
+                    key=f"fetch_and_save_result_{ctx}",
+                    type="primary",
+                ):
+                    snapshot_for_auto = load_prediction_snapshot(ctx)
+
+                    if snapshot_for_auto is None:
+                        st.error(
+                            "⚠️ このレースは検証用予想が固定されていません。"
+                            "レース終了後の再予想が混ざるのを防ぐため、自動保存は行いません。"
+                        )
+                    else:
+                        try:
+                            official_result = fetch_race_result(
+                                d.strftime("%Y%m%d"),
+                                jcd,
+                                rno,
+                            )
+
+                            combo = official_result["trifecta"]
+                            # 固定予想は1回だけ読み込み、払戻計算と結果保存で
+                            # 同じものを使う。別々に読み込むと、片方だけ通信に
+                            # 失敗したときに「払戻0円なのに的中扱い」のような
+                            # 食い違った行が保存されてしまう。
+                            received, hit_stake = snapshot_payout_from_official(
+                                ctx,
+                                combo,
+                                official_result["trifecta_payout_per_100"],
+                                snapshot=snapshot_for_auto,
+                            )
+
+                            # 画面の手動確認欄にも取得値を反映しておく。
+                            st.session_state[f"actual1_{ctx}"] = int(official_result["first"])
+                            st.session_state[f"actual2_{ctx}"] = int(official_result["second"])
+                            st.session_state[f"actual3_{ctx}"] = int(official_result["third"])
+                            st.session_state[f"payout_{ctx}"] = int(received)
+                            st.session_state[f"official_result_{ctx}"] = {
+                                **official_result,
+                                "received": int(received),
+                                "hit_stake": int(hit_stake),
+                            }
+
+                            rec = save_race_result(
+                                race_key=ctx,
+                                race_date=d.isoformat(),
+                                venue=VENUES[jcd],
+                                race_no=rno,
+                                final=final,
+                                tickets=tickets,
+                                first_actual=int(official_result["first"]),
+                                second_actual=int(official_result["second"]),
+                                third_actual=int(official_result["third"]),
+                                payout=int(received),
+                                research_variants=st.session_state["result"].get("research_variants", {}),
+                                prefer_snapshot=True,
+                                snapshot=snapshot_for_auto,
+                                require_snapshot=True,
+                                collector_name=COLLECTOR_NAME,
+                            )
+
+                            # 保存まで成功した後だけ追跡を停止する。
+                            deactivate_odds_watchlist(
+                                d.strftime("%Y%m%d"),
+                                jcd,
+                                rno,
+                            )
+
+                            hit_text = "的中" if rec["hit_any_ticket"] else "不的中"
+                            source_text = (
+                                "固定予想で判定"
+                                if rec.get("_used_snapshot")
+                                else "現在予想で判定"
+                            )
+                            st.success(
+                                f"自動保存しました：実結果 {rec['trifecta_actual']} / "
+                                f"購入買い目 {hit_text} / 収支 {rec['profit']:+,}円 / "
+                                f"{source_text}"
+                            )
+
+                        except Exception as e:
+                            st.warning(
+                                "公式結果の取得または検証保存を完了できませんでした。"
+                                "結果確定後にもう一度押してください。"
+                            )
+                            st.caption(str(e))
+
+                st.caption(
+                    "Phase 2：結果確定後は上のボタン1回で、公式結果取得・固定予想での判定・"
+                    "検証保存・オッズ追跡停止まで実行します。下の欄は確認／手動フォールバック用です。"
+                )
+
+                official_result_state = st.session_state.get(
+                    f"official_result_{ctx}"
+                )
+                if official_result_state:
+                    hit_text = (
+                        f"的中購入額 {official_result_state['hit_stake']:,}円"
+                        if official_result_state["hit_stake"] > 0
+                        else "固定買い目は不的中"
+                    )
+                    st.success(
+                        "🏁 公式結果取得済み："
+                        f"{official_result_state['trifecta']} / "
+                        f"3連単 {official_result_state['trifecta_payout_per_100']:,}円（100円あたり） / "
+                        f"{hit_text} / "
+                        f"実受取 {official_result_state['received']:,}円"
+                    )
+                    st.caption(
+                        "着順と払戻受取額を下に自動入力しました。"
+                        "内容を確認してから検証履歴へ保存してください。"
+                    )
+
+                rc1, rc2, rc3 = st.columns(3)
+                with rc1:
+                    actual_1 = st.selectbox("実1着", range(1,7), key=f"actual1_{ctx}")
+                with rc2:
+                    actual_2 = st.selectbox("実2着", range(1,7), index=1, key=f"actual2_{ctx}")
+                with rc3:
+                    actual_3 = st.selectbox("実3着", range(1,7), index=2, key=f"actual3_{ctx}")
+
+                payout_input = st.number_input(
+                    "このレースの実払戻受取額（円）",
+                    min_value=0,
+                    max_value=10000000,
+                    value=0,
+                    step=100,
+                    key=f"payout_{ctx}",
+                    help="購入した買い目が外れなら0円。当たった場合は実際に受け取った合計払戻額を入力。",
+                )
+
+                if len({actual_1, actual_2, actual_3}) < 3:
+                    st.warning("1着・2着・3着は別々の艇を選んでください。")
+                else:
+                    snapshot_for_result = load_prediction_snapshot(ctx)
+
+                    if snapshot_for_result is None:
+                        st.error(
+                            "⚠️ このレースは検証用予想が固定されていません。"
+                            "レース終了後の再予想が混ざるのを防ぐため、結果保存は行いません。"
+                        )
+                    elif st.button("💾 実結果を検証履歴へ保存", key=f"save_result_{ctx}"):
+                        rec = save_race_result(
+                            race_key=ctx,
+                            race_date=d.isoformat(),
+                            venue=VENUES[jcd],
+                            race_no=rno,
+                            final=final,
+                            tickets=tickets,
+                            first_actual=actual_1,
+                            second_actual=actual_2,
+                            third_actual=actual_3,
+                            payout=int(payout_input),
+                            research_variants=st.session_state["result"].get("research_variants", {}),
+                            prefer_snapshot=True,
+                            snapshot=snapshot_for_result,
+                            require_snapshot=True,
+                            collector_name=COLLECTOR_NAME,
+                        )
+                        hit_text = "的中" if rec["hit_any_ticket"] else "不的中"
+                        source_text = (
+                            "固定予想で判定"
+                            if rec.get("_used_snapshot")
+                            else "現在予想で判定"
+                        )
+                        st.success(
+                            f"保存しました：実結果 {rec['trifecta_actual']} / "
+                            f"購入買い目 {hit_text} / 収支 {rec['profit']:+,}円 / "
+                            f"{source_text}"
+                        )
+
+                st.warning("AI予想は確率推定であり、的中・利益を保証しません。オッズ変動、欠場・返還、展示と本番の進入差にも注意してください。")
+
+
+    # -------------------------------------------------
+    # 下方向への長いプル操作で会場一覧を再取得
+    # -------------------------------------------------
+    # スマホで下方向へ引っ張る操作を3秒以上続けた場合だけ、
+    # 開催会場・開催状態・締切15分以内判定を公式から取り直す。
+    # ページ最上部である必要はない。選択中会場・予想結果は維持する。
+    def _refresh_venues_from_long_pull():
+        _date_key = d.strftime("%Y%m%d")
+        st.session_state.pop(f"daily_schedule_{_date_key}", None)
+
+    st.markdown(
+        """
+        <style>
+        .st-key-long_pull_venue_refresh_trigger{
+            display:none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(key="long_pull_venue_refresh_trigger"):
+        st.button(
+            "会場一覧を更新",
+            key="long_pull_venue_refresh_button",
+            on_click=_refresh_venues_from_long_pull,
+        )
+
+    components.html(
+        """
+        <script>
+        (() => {
+          const p = window.parent;
+          if (!p || p.__boatAiLongPullVenueRefreshInstalled) return;
+          p.__boatAiLongPullVenueRefreshInstalled = true;
+
+          let startY = null;
+          let lastY = null;
+          let startedAt = 0;
+          let timer = null;
+          let active = false;
+          let fired = false;
+
+          const holdMs = 3000;
+          const minPullPx = 48;
+          const maxUpwardTolerancePx = 12;
+
+          const findButton = () => p.document.querySelector(
+            ".st-key-long_pull_venue_refresh_trigger button"
+          );
+
+          const clearState = () => {
+            if (timer) {
+              p.clearTimeout(timer);
+              timer = null;
+            }
+            startY = null;
+            lastY = null;
+            startedAt = 0;
+            active = false;
+            fired = false;
+          };
+
+          const armTimer = () => {
+            if (timer) p.clearTimeout(timer);
+            timer = p.setTimeout(() => {
+              if (!active || fired || startY === null || lastY === null) return;
+              const dy = lastY - startY;
+              if (dy < minPullPx) return;
+
+              const btn = findButton();
+              if (!btn) return;
+
+              fired = true;
+              active = false;
+              btn.click();
+            }, holdMs);
+          };
+
+          p.document.addEventListener("touchstart", (e) => {
+            if (!e.touches || e.touches.length !== 1) {
+              clearState();
+              return;
+            }
+            startY = e.touches[0].clientY;
+            lastY = startY;
+            startedAt = Date.now();
+            active = true;
+            fired = false;
+            armTimer();
+          }, {passive:true});
+
+          p.document.addEventListener("touchmove", (e) => {
+            if (!active || fired || startY === null) return;
+            if (!e.touches || e.touches.length !== 1) {
+              clearState();
+              return;
+            }
+
+            const y = e.touches[0].clientY;
+            const dyFromStart = y - startY;
+            const stepDy = y - (lastY ?? y);
+            lastY = y;
+
+            // 上方向へ戻したり、下方向への引っ張りが弱い状態に戻ったら解除。
+            if (
+              dyFromStart < -maxUpwardTolerancePx ||
+              (Date.now() - startedAt > 250 && dyFromStart < 8)
+            ) {
+              clearState();
+              return;
+            }
+
+            // 下方向へ引っ張っている間だけ3秒タイマーを維持。
+            if (dyFromStart >= 8 || stepDy > 0) {
+              if (!timer) armTimer();
+            }
+          }, {passive:true});
+
+          p.document.addEventListener("touchend", clearState, {passive:true});
+          p.document.addEventListener("touchcancel", clearState, {passive:true});
+        })();
+        </script>
+        """,
+        height=1,
+    )

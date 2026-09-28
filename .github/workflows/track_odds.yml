@@ -1,0 +1,43 @@
+name: Track Odds
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
+    # 評価される（指定しても無視される）。JST 8:00〜22:00の5分おきに実行する
+    # ため、9時間分ずらしたUTC 23:00（前日）〜13:55で指定する
+    # （UTC日付をまたぐため2行に分割）。
+    # 毎時0/5/10/15...分ちょうど（特に0/15/30/45分）はGitHub Actions全体で
+    # schedule実行が集中し遅延・欠落しやすいことが公式ドキュメントでも
+    # 知られている（auto_random_fix.yml / refresh_schedule_status.yml /
+    # prefetch_schedule.ymlで実際に数時間単位の欠落を確認し、同様の理由で
+    # 分をずらす対策済み）。2026-09-21にtrack_odds.ymlでも約2時間schedule
+    # 実行が一度も発火しない欠落が発生したため、同じ対策として2分ずらす。
+    - cron: "2-57/5 0-13 * * *"
+    - cron: "2-57/5 23 * * *"
+
+jobs:
+  track-odds:
+    # 定期実行（schedule）は本番リポジトリでだけ動かす。移行作業中の仮の
+    # リポジトリ名（-boatrace-ai-new など）で二重に動かないようにするため。
+    # 手動・pg_cronからの workflow_dispatch はどのリポジトリ名でも動く。
+    if: github.event_name != 'schedule' || github.repository == 'tatsutatsu1028/-boatrace-ai'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Track odds
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python track_odds.py

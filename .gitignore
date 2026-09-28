@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+# 学習・過去データは非公開のデータ用リポジトリ（tatsutatsu1028/-boatrace-ai-data）に置く。
+# 公式データを再配布しないよう、このリポジトリには絶対にコミットしない（data_paths.py 参照）。
+sample_history.csv
+history_full.csv
+data/
+_data/

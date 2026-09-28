@@ -1,0 +1,125 @@
+name: Collect History
+
+# 学習用の過去データ（展示タイム・級別・天候を含む）を公式サイトから集める。
+#
+# 現在の学習データ sample_history.csv には出走表の5項目しか入っておらず、
+# 展示データをモデルが一度も学習していない。それを解消するための収集。
+#
+# 手動実行に加えて、毎日00:30 JSTに前日分を自動収集する。
+# 手動実行は1回あたり指定時間で打ち切り、集めた分をリポジトリへ
+# コミットする。同じ期間を指定して再実行すれば続きから再開する。
+
+on:
+  # 毎日、日本時間の深夜に「前日分」を自動収集する。
+  # GitHub ActionsのcronはUTC基準なので、15:30 UTC = 00:30 JST。
+  schedule:
+    - cron: "30 15 * * *"
+
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "開始日 (YYYYMMDD)"
+        required: true
+        default: "20260601"
+      end:
+        description: "終了日 (YYYYMMDD)"
+        required: true
+        default: "20260831"
+      max_hours:
+        description: "1回の実行時間(時間)。GitHubの上限6時間なので5推奨"
+        required: true
+        default: "5"
+
+# 前の実行が終わる前に次が始まると、同じレースを二重に取ってしまう。
+concurrency:
+  group: collect-history
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    # 定期実行（schedule）は本番リポジトリでだけ動かす。移行作業中の仮の
+    # リポジトリ名（-boatrace-ai-new など）で二重に動かないようにするため。
+    # 手動・pg_cronからの workflow_dispatch はどのリポジトリ名でも動く。
+    if: github.event_name != 'schedule' || github.repository == 'tatsutatsu1028/-boatrace-ai'
+    runs-on: ubuntu-latest
+    env:
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+    # 打ち切り時間より少し長めに取る（コミットの時間を残す）
+    timeout-minutes: 350
+
+    # このリポジトリへは書き込まない（データは _data/ の非公開リポジトリへpush）
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 学習・過去データは非公開リポジトリにある（公式データを公開リポジトリで
+      # 再配布しないため）。_data/ に取り出し、BOATRACE_DATA_DIR で各スクリプトへ渡す。
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas numpy
+
+      - name: Resolve collection range
+        id: range
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # UTCのrunner上でもJSTの「昨日」を確実に作る。
+            TARGET_DATE=$(TZ=Asia/Tokyo date -d "yesterday" +%Y%m%d)
+            echo "start=$TARGET_DATE" >> "$GITHUB_OUTPUT"
+            echo "end=$TARGET_DATE" >> "$GITHUB_OUTPUT"
+            echo "max_hours=3" >> "$GITHUB_OUTPUT"
+            echo "自動収集対象: $TARGET_DATE"
+          else
+            echo "start=${{ inputs.start }}" >> "$GITHUB_OUTPUT"
+            echo "end=${{ inputs.end }}" >> "$GITHUB_OUTPUT"
+            echo "max_hours=${{ inputs.max_hours }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect
+        run: |
+          python collect_history.py \
+            --start "${{ steps.range.outputs.start }}" \
+            --end "${{ steps.range.outputs.end }}" \
+            --out "$BOATRACE_DATA_DIR/history_full.csv" \
+            --max-hours "${{ steps.range.outputs.max_hours }}"
+
+      # ログは誰でも見られるため、件数とサイズだけを出す（行の中身は出さない）。
+      - name: Show result
+        run: |
+          F="$BOATRACE_DATA_DIR/history_full.csv"
+          if [ -f "$F" ]; then
+            echo "行数: $(wc -l < "$F")"
+            echo "サイズ: $(du -h "$F" | cut -f1)"
+          else
+            echo "ファイルが作られませんでした"
+          fi
+
+      # 途中で止まっても集めた分は残す。次回はここから再開する。
+      # 保存先は非公開のデータ用リポジトリ。成果物（artifact）には残さない
+      # （公開リポジトリの成果物は誰でもダウンロードできるため）。
+      - name: Commit collected data
+        working-directory: _data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f history_full.csv ]; then
+            git add history_full.csv
+            git diff --staged --quiet || git commit -q -m "collect history data"
+            git pull -q --rebase
+            git push -q
+          fi

@@ -1,0 +1,50 @@
+name: Refresh Schedule Status
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
+    # 評価される（指定しても無視される）。JST 8:00〜22:30 の30分おきにするため、
+    # 9時間分ずらしたUTC 23:00（前日）〜13:30で指定する
+    # （UTC日付をまたぐため2行に分割）。
+    # 毎時 0分・30分ちょうどはGitHub Actions全体でscheduleイベントが
+    # 集中し、実行が数時間単位で遅延・欠落することがあるため
+    # （GitHub公式ドキュメントも0/15/30/45分ちょうどを避けるよう推奨）、
+    # 5分・35分にずらして実行する。
+    #
+    # それでも実際には1日30回の予定に対し3〜4回しか発火しない日が続いた
+    # （9/26はJST 0:31を最後にJST 10時過ぎまで発火なし）ため、同じ時刻に
+    # Supabaseのpg_cronからworkflow_dispatchで起動している（track_odds.ymlと
+    # 同じ仕組み。supabase/migrations/20260926010500_trigger_refresh_schedule_status_via_pg_cron.sql）。
+    # このscheduleは保険として残す。
+    - cron: "5,35 0-13 * * *"
+    - cron: "5,35 23 * * *"
+
+jobs:
+  refresh-schedule-status:
+    # 定期実行（schedule）は本番リポジトリでだけ動かす。移行作業中の仮の
+    # リポジトリ名（-boatrace-ai-new など）で二重に動かないようにするため。
+    # 手動・pg_cronからの workflow_dispatch はどのリポジトリ名でも動く。
+    if: github.event_name != 'schedule' || github.repository == 'tatsutatsu1028/-boatrace-ai'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 当日分の全量取得（締切一覧込み）がまだ無い・欠けている場合は、
+      # schedule_prefetcher.py側で自動的に全量取得へ切り替える
+      # （prefetch_scheduleの朝の実行が遅延・欠落した場合の保険）。
+      - name: Refresh schedule status (full prefetch if missing)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python schedule_prefetcher.py --mode status

@@ -1,0 +1,78 @@
+name: Backfill Kimarite
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_races:
+        description: "今回処理する最大レース数（0=全件）"
+        required: true
+        default: "0"
+      workers:
+        description: "同時取得数（1〜6）"
+        required: true
+        default: "4"
+
+concurrency:
+  group: backfill-kimarite
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    env:
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+    timeout-minutes: 350
+
+    # このリポジトリへは書き込まない（データは _data/ の非公開リポジトリへpush）
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 学習・過去データは非公開リポジトリにある（公式データを公開リポジトリで
+      # 再配布しないため）。_data/ に取り出し、BOATRACE_DATA_DIR で各スクリプトへ渡す。
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas numpy
+
+      - name: Backfill kimarite
+        run: |
+          python backfill_kimarite.py \
+            --path "$BOATRACE_DATA_DIR/history_full.csv" \
+            --workers "${{ inputs.workers }}" \
+            --max-races "${{ inputs.max_races }}"
+
+      - name: Show coverage
+        run: |
+          python - <<'PY'
+          import os
+          import pandas as pd
+          df = pd.read_csv(os.path.join(os.environ["BOATRACE_DATA_DIR"], "history_full.csv"))
+          total = df["race_key"].nunique()
+          done = df[df["kimarite"].notna() & df["kimarite"].astype(str).str.strip().ne("")]["race_key"].nunique()
+          print(f"決まり手取得済み: {done}/{total}R")
+          PY
+
+      - name: Commit backfilled history
+        working-directory: _data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add history_full.csv
+          git diff --staged --quiet || git commit -q -m "backfill kimarite history"
+          git pull -q --rebase
+          git push -q
