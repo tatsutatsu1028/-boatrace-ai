@@ -1,0 +1,24 @@
+name: Check boundary racelist (temporary)
+on:
+  push:
+    branches: [claude/boat-racing-data-investigation-xogz4e]
+    paths: [tools/check_boundary_racelist.py]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install requests beautifulsoup4 lxml pandas numpy
+      - run: python tools/check_boundary_racelist.py
