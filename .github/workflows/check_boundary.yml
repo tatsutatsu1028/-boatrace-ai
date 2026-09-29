@@ -1,8 +1,8 @@
-name: Check boundary racelist (temporary)
+name: Check header (temporary)
 on:
   push:
     branches: [claude/boat-racing-data-investigation-xogz4e]
-    paths: [tools/check_boundary_racelist.py]
+    paths: [tools/check_header_beforeinfo.py]
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -21,4 +21,4 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install requests beautifulsoup4 lxml pandas numpy
-      - run: PYTHONPATH=. python tools/check_boundary_racelist.py
+      - run: PYTHONPATH=. python tools/check_header_beforeinfo.py

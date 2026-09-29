@@ -345,8 +345,10 @@ RACER_COLS = [
     "national_win_rate", "national_2ren", "national_3ren", "local_2ren", "local_3ren",
     "motor_no", "motor_3ren", "boat_no", "boat_3ren",
 ]
-# 5/1・11/1（級別審査期間の切り替え）で区間を分けるか。
-SPLIT_AT_TERM_BOUNDARY = False
+# 5/1・11/1（級別審査期間の切り替え）をまたぐ節は、その日で区間を分ける。
+# 2024-11-01・2025-05-01・2025-11-01・2026-05-01 をまたぐ節で実際に出走表を取り比べたところ、
+# 勝率・2連率・3連率・級別は変わらなかったが、F数は23人中6人で変わった（期間の切り替えで数え直し）。
+SPLIT_AT_TERM_BOUNDARY = True
 TERM_BOUNDARIES = ("0501", "1101")
 
 
