@@ -61,3 +61,4 @@ for bd in ("20241101", "20250501", "20251101", "20260501"):
     print(f"[CHECK] 境界 {bd} 場{j} 節初日{m}: 前後を比べた選手 {n}人 変わった項目 "
           f"{ {c: v for c, v in changed.items() if v} }", flush=True)
 print(f"[CHECK] 合計 {racers}人 変わった項目 { {c: v for c, v in total.items() if v} }", flush=True)
+# rerun

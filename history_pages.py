@@ -297,13 +297,21 @@ def _fetch(kind, hd, jcd, rno):
     return r.text
 
 
-def collect_race(hd, jcd, rno):
-    rl_html = _fetch("racelist", hd, jcd, rno)
-    race, rl_boats = parse_racelist(rl_html, hd, rno)
-    if not any(b.get("racer_id") for b in rl_boats.values()):
-        raise PageError("racelist: 選手が読めない")
+def collect_race(hd, jcd, rno, with_racelist=True):
+    """1レース分（6艇）。with_racelist=False なら直前情報だけ取り、選手の出走表項目は
+    呼び出し側（RacerCache）が同じ節・同じ区間の別レースの値で埋める。"""
+    rl_boats = {}
+    if with_racelist:
+        rl_html = _fetch("racelist", hd, jcd, rno)
+        _, rl_boats = parse_racelist(rl_html, hd, rno)
+        if not any(b.get("racer_id") for b in rl_boats.values()):
+            raise PageError("racelist: 選手が読めない")
     bi_html = _fetch("beforeinfo", hd, jcd, rno)
     bi_boats, wx = parse_beforeinfo(bi_html)
+    # グレード・何日目・レース名・進入固定・安定板・締切は直前情報ページにも同じ見出しがある
+    race = parse_race_header(BeautifulSoup(bi_html, "lxml"), bi_html, hd, rno)
+    if "race_name" not in race:
+        raise PageError("beforeinfo: レース名が読めない")
     rows = []
     for ln in range(1, 7):
         rec = {"race_date": hd, "jcd": jcd, "race_no": int(rno),
@@ -312,10 +320,128 @@ def collect_race(hd, jcd, rno):
         rec.update(wx)
         rec.update({k: v for k, v in rl_boats.get(ln, {}).items() if k != "lane"})
         rec.update({k: v for k, v in bi_boats.get(ln, {}).items() if k != "lane"})
+        if with_racelist:
+            rec["racelist_from"] = rec["race_key"]
         rows.append(rec)
     df = pd.DataFrame(rows)
     df["fetched_at"] = polite_http.now_jst().strftime("%Y-%m-%d %H:%M")
     return df
+
+
+# ---------------------------------------------------------------
+# 出走表の取得を節ごとに1回へ減らす（RacerCache）
+# ---------------------------------------------------------------
+# 出走表の選手の項目（勝率・2連率・3連率・F数・L数・平均ST・級別・モーター・ボートなど）は
+# 「今節成績を含まない」ので、同じ節の中では変わらない。ただし実測で次の場合だけ変わる:
+#   - フライング・出遅れ（F/L）をした翌日から F数・L数が増える（当日の後のレースは変わらない）
+#   - 節の途中でボート（・モーター）が替わる
+# そこで「場・節・選手・区間」ごとに1回だけ出走表を取り、区間は上の2つで区切る。
+# 2026-08-29〜09-27 の4,506レースで、この区間の中では全項目が変わらないことを確認済み。
+# 1日ごとに変わる出走表の体重（weight_racelist）は使い回さない（当日体重は直前情報の weight）。
+RACER_COLS = [
+    "racer_name", "racer_class", "avg_st", "f_count", "l_count",
+    "racer_win_rate", "local_win_rate", "motor_2ren", "boat_2ren",
+    "branch", "birthplace", "age",
+    "national_win_rate", "national_2ren", "national_3ren", "local_2ren", "local_3ren",
+    "motor_no", "motor_3ren", "boat_no", "boat_3ren",
+]
+# 5/1・11/1（級別審査期間の切り替え）で区間を分けるか。
+SPLIT_AT_TERM_BOUNDARY = False
+TERM_BOUNDARIES = ("0501", "1101")
+
+
+def _term(date_yyyymmdd):
+    md = date_yyyymmdd[4:]
+    return date_yyyymmdd[:4] + ("A" if "0501" <= md < "1101" else "B")
+
+
+def build_segments():
+    """競走成績（実際に走った選手）と番組表（ボート・モーター番号）から、
+    (race_key, racer_id) → 区間キー を作る。"""
+    k = store.read_kind("k_results", columns=["race_key", "race_date", "jcd", "race_no", "lane",
+                                               "racer_id", "finish_raw"])
+    b = store.read_kind("b_programs", columns=["race_key", "race_date", "jcd", "day_no",
+                                                "racer_id", "boat_no", "motor_no"])
+    if k.empty:
+        return {}, {}
+    starts = {}
+    for d, j, n in b.drop_duplicates(["race_date", "jcd"])[["race_date", "jcd", "day_no"]].itertuples(index=False):
+        try:
+            starts[(d, j)] = (datetime.strptime(d, "%Y%m%d") - timedelta(days=int(n) - 1)).strftime("%Y%m%d")
+        except (TypeError, ValueError):
+            pass
+    eq = {(rk, rid): (bn, mn) for rk, rid, bn, mn in
+          b[["race_key", "racer_id", "boat_no", "motor_no"]].itertuples(index=False)}
+    k = k.assign(_rno=pd.to_numeric(k["race_no"]),
+                 _meet=[starts.get((d, j), d) for d, j in zip(k["race_date"], k["jcd"])])
+    k = k.sort_values(["jcd", "_meet", "racer_id", "race_date", "_rno"])
+    seg_of = {}
+    prev, n, fl_day, last_eq, last_term = None, 0, None, None, None
+    for rk, d, j, rid, fr, meet in k[["race_key", "race_date", "jcd", "racer_id",
+                                       "finish_raw", "_meet"]].itertuples(index=False):
+        cur_eq = eq.get((rk, rid))
+        key = (j, meet, rid)
+        if key != prev:
+            prev, n, fl_day, last_eq, last_term = key, 0, None, cur_eq, _term(d)
+        else:
+            if (fl_day and d > fl_day) \
+                    or (cur_eq and last_eq and cur_eq != last_eq) \
+                    or (SPLIT_AT_TERM_BOUNDARY and _term(d) != last_term):
+                n += 1
+                fl_day = None
+        seg_of[(rk, rid)] = f"{j}|{meet}|{rid}|{n}"
+        if str(fr).startswith(("F", "L")):
+            fl_day = d
+        if cur_eq:
+            last_eq = cur_eq
+        last_term = _term(d)
+    lanes = {}
+    for rk, ln, rid in k[["race_key", "lane", "racer_id"]].itertuples(index=False):
+        lanes.setdefault(rk, {})[int(ln)] = rid
+    return seg_of, lanes
+
+
+class RacerCache:
+    def __init__(self):
+        self.seg_of, self.lanes = build_segments()
+        self.values = {}
+        self.source = {}
+        p = store.read_kind("pages")
+        if not p.empty:
+            if "racelist_from" in p.columns:
+                p = p[(p["racelist_from"] == "") | (p["racelist_from"] == p["race_key"])]
+            for rec in p.to_dict("records"):
+                self.remember(rec)
+        print(f"[PAGES] 出走表の区間 {len(set(self.seg_of.values()))} / 取得済み {len(self.values)}", flush=True)
+
+    def remember(self, rec):
+        seg = self.seg_of.get((rec.get("race_key"), str(rec.get("racer_id"))))
+        if seg and seg not in self.values and rec.get("racer_id") not in ("", None):
+            self.values[seg] = {c: rec.get(c) for c in RACER_COLS if c in rec}
+            self.source[seg] = rec.get("race_key")
+
+    def segs(self, race_key):
+        return [self.seg_of.get((race_key, rid)) for rid in self.lanes.get(race_key, {}).values()]
+
+    def covered(self, race_key, extra=()):
+        ss = self.segs(race_key)
+        return bool(ss) and all(s_ and (s_ in self.values or s_ in extra) for s_ in ss)
+
+    def fill(self, df):
+        """出走表を取らなかったレースの選手項目を埋める。埋められなければ False。"""
+        rk = df["race_key"].iloc[0]
+        lanes = self.lanes.get(rk, {})
+        out = []
+        for rec in df.to_dict("records"):
+            rid = lanes.get(int(rec["lane"]))
+            seg = self.seg_of.get((rk, rid))
+            if seg not in self.values:
+                return None
+            rec.update(self.values[seg])
+            rec["racer_id"] = rid
+            rec["racelist_from"] = self.source[seg]
+            out.append(rec)
+        return pd.DataFrame(out)
 
 
 # ---------------------------------------------------------------
@@ -421,12 +547,30 @@ def run(start, end, stop_at=None, max_minutes=0, workers=3, checkpoint_cmd="", c
             if fail_rows:
                 save_failed(pd.DataFrame(list(fail_rows.values())))
 
-    def one(t):
+    cache = RacerCache()
+    n_rl = n_reuse = 0
+
+    def one(t, with_racelist):
         hd, jcd, rno, key = t
         try:
-            return key, collect_race(hd, jcd, rno), ""
+            return key, collect_race(hd, jcd, rno, with_racelist=with_racelist), ""
         except Exception as e:  # noqa: BLE001
             return key, None, f"{type(e).__name__}: {str(e)[:150]}"
+
+    def record(key, df, err):
+        nonlocal ok, ng
+        if df is not None:
+            with lock:
+                buf.append(df)
+            fail_rows.pop(key, None)
+            ok += 1
+            return
+        ng += 1
+        prev = fail_rows.get(key, {})
+        fail_rows[key] = {"race_key": key, "attempts": int(prev.get("attempts") or 0) + 1,
+                          "last_error": err, "last_at": polite_http.now_jst().strftime("%Y-%m-%d %H:%M")}
+        if ng <= 5 or ng % 50 == 0:
+            print(f"[PAGES] 失敗 {key}: {err}", flush=True)
 
     i = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -441,24 +585,44 @@ def run(start, end, stop_at=None, max_minutes=0, workers=3, checkpoint_cmd="", c
                 continue
             batch = targets[i:i + 12]
             i += len(batch)
-            futs = [ex.submit(one, t) for t in batch]
+            # 出走表が要るのは、まだ値を持っていない区間の選手がいるレースだけ。
+            # 同じバッチ内で取る予定の区間（planned）に含まれるレースは、取得後に埋める。
+            planned, plan = set(), []
+            for t in batch:
+                need = not cache.covered(t[3], planned)
+                if need:
+                    planned.update(s_ for s_ in cache.segs(t[3]) if s_)
+                plan.append((t, need))
+            futs = {ex.submit(one, t, need): (t, need) for t, need in plan}
+            deferred = []
             for fu in as_completed(futs):
+                t, need = futs[fu]
                 key, df, err = fu.result()
-                if df is not None:
-                    with lock:
-                        buf.append(df)
-                    fail_rows.pop(key, None)
-                    ok += 1
+                if df is not None and need:
+                    n_rl += 1
+                    for rec in df.to_dict("records"):
+                        cache.remember(rec)
+                elif df is not None:
+                    deferred.append((t, df))
+                    continue
+                record(key, df, err)
+            # 出走表を取らなかったレースを、同じ区間の値で埋める。
+            # 埋められない（取る予定だったレースが失敗した等）ときは出走表も取り直す。
+            for t, df in deferred:
+                filled = cache.fill(df)
+                if filled is None:
+                    key, df2, err = one(t, True)
+                    if df2 is not None:
+                        n_rl += 1
+                        for rec in df2.to_dict("records"):
+                            cache.remember(rec)
+                    record(key, df2, err)
                 else:
-                    ng += 1
-                    prev = fail_rows.get(key, {})
-                    fail_rows[key] = {"race_key": key, "attempts": int(prev.get("attempts") or 0) + 1,
-                                      "last_error": err, "last_at": polite_http.now_jst().strftime("%Y-%m-%d %H:%M")}
-                    if ng <= 5 or ng % 50 == 0:
-                        print(f"[PAGES] 失敗 {key}: {err}", flush=True)
+                    n_reuse += 1
+                    record(t[3], filled, "")
             if time.time() - last_report >= 300:
                 el = (time.time() - started) / 3600
-                print(f"[PAGES] 取得{ok} 失敗{ng} 残り{len(targets) - i} "
+                print(f"[PAGES] 取得{ok}（出走表あり{n_rl}・使い回し{n_reuse}） 失敗{ng} 残り{len(targets) - i} "
                       f"({ok / max(el, 1e-9):.0f}レース/時, {polite_http.request_count() / max(el * 3600, 1e-9):.3f}req/s) "
                       f"最新 {batch[-1][3]}", flush=True)
                 last_report = time.time()
@@ -468,7 +632,7 @@ def run(start, end, stop_at=None, max_minutes=0, workers=3, checkpoint_cmd="", c
                 last_cp = time.time()
     flush()
     el = (time.time() - started) / 3600
-    print(f"[PAGES] 終了 取得{ok} 失敗{ng} {el:.2f}時間 リクエスト{polite_http.request_count()}回 "
+    print(f"[PAGES] 終了 取得{ok}（出走表あり{n_rl}・使い回し{n_reuse}） 失敗{ng} {el:.2f}時間 リクエスト{polite_http.request_count()}回 "
           f"({polite_http.request_count() / max(el * 3600, 1e-9):.3f}req/s)", flush=True)
     return ok, ng
 
