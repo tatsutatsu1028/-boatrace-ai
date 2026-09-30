@@ -1,7 +1,7 @@
 -- pg_cron による auto_random_fix.yml（自動固定）と collect_history_workflow.yml（日次収集）の起動。
 --
 -- GitHub Actions の schedule トリガーは数時間単位の遅延・欠落が続いた
--- （自動固定は 9/30 02:00 JST を最後に翌朝まで起動しなかった）ため、
+-- （自動固定は本来1日26回のところ、9/28〜10/1朝の約3日で11回しか起動しなかった）ため、
 -- track_odds などと同じく workflow_dispatch を直接叩いて起動する。
 -- 両ワークフローの schedule トリガーは外した（二重起動を避けるため）。
 --
