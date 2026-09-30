@@ -381,6 +381,23 @@ def train(history):
     m._position_model_rows = int(len(position_history))
     m._second_model_rows = int(len(second_history))
     m._third_model_rows = int(len(third_history))
+    # 学習し直したことをログで確かめられるよう、2着・3着モデルの学習データ量を出す
+    # （件数と期間だけ。データの中身は出さない）。予想の計算には影響しない。
+    try:
+        _races = position_history["race_key"].nunique() if "race_key" in position_history.columns else None
+        _dates = (
+            position_history["race_key"].astype(str).str[:8]
+            if "race_key" in position_history.columns else None
+        )
+        print(
+            "[TRAIN] 2着・3着モデル学習 "
+            f"{m._position_model_rows}行 / {_races}レース"
+            + (f" / {_dates.min()}〜{_dates.max()}" if _dates is not None and len(_dates) else "")
+            + f" / 条件付き2着={m._second_model_conditional}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
     # 予想時に選手×想定コースの決まり手補正を使えるよう、
     # まず学習CSV自身からプロファイルを作る。

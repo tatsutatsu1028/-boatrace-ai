@@ -145,6 +145,13 @@ def _boat_ai_train_cache_key():
 
 @st.cache_resource(show_spinner=False)
 def _boat_ai_train_cached(cache_key):
+    # 学習し直した時刻をログに残す（Streamlit の Logs で確認できる）。
+    # 続けて train() 内の [TRAIN] 行に2着・3着モデルの学習件数が出る。
+    print(
+        "[TRAIN] 再学習開始",
+        pd.Timestamp.now(tz="Asia/Tokyo").strftime("%Y-%m-%d %H:%M:%S JST"),
+        flush=True,
+    )
     canonical = pd.read_csv(_data_paths.data_path("sample_history.csv"))
     return _prediction._boat_ai_original_train(canonical)
 

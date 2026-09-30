@@ -90,7 +90,7 @@ jobs:
       - name: Collect pages
         if: steps.cfg.outputs.mode != 'download'
         run: |
-          ARGS="--start ${{ steps.cfg.outputs.start }} --checkpoint-cmd 'bash tools/commit_history_data.sh' --checkpoint-minutes 30"
+          ARGS="--start ${{ steps.cfg.outputs.start }} --workers 4 --checkpoint-cmd 'bash tools/commit_history_data.sh' --checkpoint-minutes 30"
           [ -n "${{ steps.cfg.outputs.end }}" ] && ARGS="$ARGS --end ${{ steps.cfg.outputs.end }}"
           [ -n "${{ steps.cfg.outputs.stop_at }}" ] && ARGS="$ARGS --stop-at ${{ steps.cfg.outputs.stop_at }}"
           eval python history_pages.py $ARGS

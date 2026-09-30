@@ -23,11 +23,13 @@ UA = {
 }
 
 # 毎秒0.3リクエスト以下 → 開始間隔 1/0.3 = 3.33秒。余裕をみて3.4秒。
+# 環境変数で変えられるが、0.3リクエスト/秒を超える値（3.34秒未満）は受け付けない。
+MAX_RATE = 0.3
 MIN_INTERVAL = float(os.environ.get("POLITE_MIN_INTERVAL", "3.4"))
-assert MIN_INTERVAL >= 1.5
+assert MIN_INTERVAL >= 1 / MAX_RATE and MIN_INTERVAL >= 1.5, "取得間隔の下限（3.34秒）を下回っています"
 
 _lock = threading.Lock()
-_next_start = 0.0
+_last_start = None
 _count = 0
 
 
@@ -45,17 +47,24 @@ def in_maintenance(t=None):
 
 
 def _wait_turn():
-    global _next_start, _count
+    """前のリクエストの「実際の開始」から MIN_INTERVAL 経つまで待ってから返す。
+
+    待機はロックの中で順番に行い、次の基準は実際に出発した時刻にする。
+    こうするとスレッドの起床が遅れても次との間隔が縮まず、並列数に関係なく
+    開始間隔は必ず MIN_INTERVAL 以上になる（= 毎秒 MAX_RATE 以下）。
+    """
+    global _last_start, _count
     while in_maintenance():
         time.sleep(30)
     with _lock:
-        now = time.monotonic()
-        start = max(now, _next_start)
-        _next_start = start + MIN_INTERVAL
+        if _last_start is not None:
+            while True:
+                wait = _last_start + MIN_INTERVAL - time.monotonic()
+                if wait <= 0:
+                    break
+                time.sleep(wait)
+        _last_start = time.monotonic()
         _count += 1
-    delay = start - time.monotonic()
-    if delay > 0:
-        time.sleep(delay)
 
 
 def get(url, timeout=30, binary=False):
