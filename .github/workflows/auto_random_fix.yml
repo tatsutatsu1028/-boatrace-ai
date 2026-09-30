@@ -1,26 +1,17 @@
 name: Random Auto Fix
 
 on:
+  # 起動は Supabase の pg_cron から workflow_dispatch で行う
+  # （supabase/migrations/20261001000000_trigger_auto_fix_and_collect_history_via_pg_cron.sql）。
+  # JST 8:20〜20:50 の毎時20分・50分（30分おき）。
+  # 以前は GitHub Actions の schedule で起動していたが、数時間単位の遅延・欠落が
+  # 続いた（9/30 は 02:00 JST を最後に翌朝まで起動しなかった）ため pg_cron に一本化した。
+  # schedule を残すと pg_cron と同じ時刻に二重起動しうるので置かない。
+  # 重複して起動しても auto_random_fix.py 側の _snapshot_exists で同じレースは二重に固定しない。
   workflow_dispatch:
-  schedule:
-    # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
-    # 評価される（指定しても無視される）。JST 8:20〜20:50の間20,50分に実行する
-    # ため、9時間分ずらしたUTC 23:20（前日）〜11:50で指定する
-    # （UTC日付をまたぐため2行に分割）。
-    # 毎時0/15/30/45分ちょうどはGitHub Actions全体でschedule実行が集中し
-    # 遅延・欠落しやすいことが公式ドキュメントでも知られている（実際に本
-    # ワークフローもこの分単位を使っていたため、直前のマージ後1時間半以上
-    # schedule実行が一度も発火しない欠落が発生した）。refresh_schedule_status /
-    # prefetch_scheduleと同様に、混雑時間帯を避けるため20,50分にずらす。
-    - cron: "20,50 0-11 * * *"
-    - cron: "20,50 23 * * *"
 
 jobs:
   auto-random-fix:
-    # 定期実行（schedule）は本番リポジトリでだけ動かす。移行作業中の仮の
-    # リポジトリ名（-boatrace-ai-new など）で二重に動かないようにするため。
-    # 手動・pg_cronからの workflow_dispatch はどのリポジトリ名でも動く。
-    if: github.event_name != 'schedule' || github.repository == 'tatsutatsu1028/-boatrace-ai'
     runs-on: ubuntu-latest
     # 候補探索が長引いても次回のcron発火（30分後）を大きく超えて居座らない
     # よう、タイムアウトさせる（concurrencyブロックはschedule実行の発火

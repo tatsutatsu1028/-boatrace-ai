@@ -5,16 +5,14 @@ name: Collect History
 # 現在の学習データ sample_history.csv には出走表の5項目しか入っておらず、
 # 展示データをモデルが一度も学習していない。それを解消するための収集。
 #
-# 手動実行に加えて、毎日00:30 JSTに前日分を自動収集する。
-# 手動実行は1回あたり指定時間で打ち切り、集めた分をリポジトリへ
+# 毎日 00:32 JST に前日分を自動収集する。起動は Supabase の pg_cron から
+# workflow_dispatch（inputs.daily=true）で行う
+# （supabase/migrations/20261001000000_trigger_auto_fix_and_collect_history_via_pg_cron.sql）。
+# 以前の GitHub Actions の schedule は数時間遅れることが多かったため pg_cron に一本化した。
+# 手動実行は1回あたり指定時間で打ち切り、集めた分をデータ用リポジトリへ
 # コミットする。同じ期間を指定して再実行すれば続きから再開する。
 
 on:
-  # 毎日、日本時間の深夜に「前日分」を自動収集する。
-  # GitHub ActionsのcronはUTC基準なので、15:30 UTC = 00:30 JST。
-  schedule:
-    - cron: "30 15 * * *"
-
   workflow_dispatch:
     inputs:
       start:
@@ -29,6 +27,10 @@ on:
         description: "1回の実行時間(時間)。GitHubの上限6時間なので5推奨"
         required: true
         default: "5"
+      daily:
+        description: "true なら前日分だけ（start/end は無視）。pg_cron の毎日起動用"
+        required: false
+        default: "false"
 
 # 前の実行が終わる前に次が始まると、同じレースを二重に取ってしまう。
 concurrency:
@@ -37,10 +39,6 @@ concurrency:
 
 jobs:
   collect:
-    # 定期実行（schedule）は本番リポジトリでだけ動かす。移行作業中の仮の
-    # リポジトリ名（-boatrace-ai-new など）で二重に動かないようにするため。
-    # 手動・pg_cronからの workflow_dispatch はどのリポジトリ名でも動く。
-    if: github.event_name != 'schedule' || github.repository == 'tatsutatsu1028/-boatrace-ai'
     runs-on: ubuntu-latest
     env:
       BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
@@ -77,7 +75,7 @@ jobs:
         id: range
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.daily }}" = "true" ]; then
             # UTCのrunner上でもJSTの「昨日」を確実に作る。
             TARGET_DATE=$(TZ=Asia/Tokyo date -d "yesterday" +%Y%m%d)
             echo "start=$TARGET_DATE" >> "$GITHUB_OUTPUT"
