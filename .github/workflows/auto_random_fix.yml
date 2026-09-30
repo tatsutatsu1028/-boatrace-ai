@@ -5,7 +5,7 @@ on:
   # （supabase/migrations/20261001000000_trigger_auto_fix_and_collect_history_via_pg_cron.sql）。
   # JST 8:20〜20:50 の毎時20分・50分（30分おき）。
   # 以前は GitHub Actions の schedule で起動していたが、数時間単位の遅延・欠落が
-  # 続いた（9/30 は 02:00 JST を最後に翌朝まで起動しなかった）ため pg_cron に一本化した。
+  # 続いた（本来1日26回のところ、9/28〜10/1朝の約3日で11回しか起動しなかった）ため pg_cron に一本化した。
   # schedule を残すと pg_cron と同じ時刻に二重起動しうるので置かない。
   # 重複して起動しても auto_random_fix.py 側の _snapshot_exists で同じレースは二重に固定しない。
   workflow_dispatch:
