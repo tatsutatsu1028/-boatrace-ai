@@ -1,46 +1,23 @@
-name: Compare second_favorite_n (analysis only)
+name: Cleanup second_favorite_n artifact
 
-# 検証専用: second_favorite_n の設定比較を読み取りのみで実行し、結果をログと
-# アーティファクトに出す。本番の設定・データは変更しない。
+# 一回限り: 検証で出したアーティファクト（レース別CSV）を削除する。
 on:
-  workflow_dispatch:
   push:
     branches:
       - claude/second-favorite-n-comparison-iw19xj
     paths:
-      - tools/compare_second_favorite_n.py
       - .github/workflows/compare_second_favorite_n.yml
 
 jobs:
-  compare:
+  cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     permissions:
-      contents: read
-    env:
-      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+      actions: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Checkout data (private, payouts only)
-        uses: actions/checkout@v4
-        with:
-          repository: tatsutatsu1028/-boatrace-ai-data
-          token: ${{ secrets.DATA_REPO_TOKEN }}
-          path: _data
-          sparse-checkout: data/history/k_payouts
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install -r requirements.txt tabulate
-      - name: Compare
+      - name: Delete artifact
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python tools/compare_second_favorite_n.py --start 2026-09-08 --out second_favorite_n_report.md
-      - uses: actions/upload-artifact@v4
-        with:
-          name: second-favorite-n-report
-          path: |
-            second_favorite_n_report.md
-            second_favorite_n_report.csv
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/11255287503"
+          echo "deleted"
