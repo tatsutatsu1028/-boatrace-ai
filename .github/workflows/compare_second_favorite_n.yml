@@ -1,0 +1,64 @@
+name: Compare second_favorite_n
+
+# second_favorite_n（2番手候補1着の買い目確保）の設定比較（手動実行のみ）。
+# 読み取りのみで、本番の設定・予想データは変更しない。
+# 結果（集計表とレース別CSV）は非公開のデータ用リポジトリの
+# reports/second_favorite_n/ にだけ保存する。公開リポジトリのログや
+# アーティファクトには数値・データを出さない。
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "集計の開始日 (YYYY-MM-DD)"
+        required: false
+        default: "2026-09-08"
+
+concurrency:
+  group: collect-history
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+          sparse-checkout: |
+            data/history/k_payouts
+            reports
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt tabulate
+      - name: Compare
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          START: ${{ inputs.start }}
+        run: |
+          stamp=$(TZ=Asia/Tokyo date +%Y%m%d_%H%M)
+          mkdir -p _data/reports/second_favorite_n
+          python tools/compare_second_favorite_n.py --start "$START" \
+            --out "_data/reports/second_favorite_n/${stamp}.md" \
+            --csv "_data/reports/second_favorite_n/${stamp}.csv" > /dev/null
+          echo "保存先: -boatrace-ai-data/reports/second_favorite_n/${stamp}.md"
+      - name: Commit (private data repo)
+        working-directory: _data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/second_favorite_n
+          git diff --staged --quiet && { echo "変更なし"; exit 0; }
+          git commit -q -m "second_favorite_n の比較結果"
+          git pull -q --rebase && git push -q

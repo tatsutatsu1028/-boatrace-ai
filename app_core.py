@@ -25,7 +25,7 @@ from official_fetcher import (
     fetch_venue_result_list,
 )
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
-from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants
+from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants, second_favorite_n_for
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 from race_visuals import (
     ANIMATION_HEIGHT,
@@ -2870,7 +2870,7 @@ with tab1:
                             min_second_coverage=ticket_plan["min_second_coverage"],
                             close_third_gap=None,
                             close_third_coverage=4,
-                            second_favorite_n=2,
+                            second_favorite_n=second_favorite_n_for(final),
                         )
                         tickets = _complete_adaptive_tickets(
                             tickets,
