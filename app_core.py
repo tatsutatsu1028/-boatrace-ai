@@ -3097,13 +3097,18 @@ with tab1:
                                 ).replace("</", "<\\/")
                                 components.html(
                                     f"""
-                                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 8px 0;">
-                                      <button id="copy-title" style="padding:9px 14px;cursor:pointer;">📋 タイトルをコピー</button>
-                                      <button id="copy-body" style="padding:9px 14px;cursor:pointer;">📋 本文をコピー</button>
-                                      <button id="copy-all" style="padding:9px 14px;cursor:pointer;">📋 タイトル＋本文をコピー</button>
-                                      <button id="copy-tags" style="padding:9px 14px;cursor:pointer;">📋 ハッシュタグをコピー</button>
-                                      <span id="copy-status" style="align-self:center;font-size:13px;"></span>
+                                    <style>
+                                      body {{ margin:0; }}
+                                      .copy-row {{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:2px 0 4px 0; }}
+                                      .copy-row button {{ min-height:44px; padding:6px 4px; cursor:pointer; font-size:13px; border-radius:10px; white-space:nowrap; }}
+                                      #copy-status {{ font-size:13px; color:#9fe7a9; min-height:18px; text-align:center; }}
+                                    </style>
+                                    <div class="copy-row">
+                                      <button id="copy-title">📋 タイトル</button>
+                                      <button id="copy-body">📋 本文</button>
+                                      <button id="copy-tags">📋 ハッシュタグ</button>
                                     </div>
+                                    <div id="copy-status"></div>
                                     <script>
                                     const data = {_copy_payload};
                                     const status = document.getElementById("copy-status");
@@ -3118,11 +3123,10 @@ with tab1:
                                     }}
                                     document.getElementById("copy-title").onclick = () => copyText(data.title);
                                     document.getElementById("copy-body").onclick = () => copyText(data.body);
-                                    document.getElementById("copy-all").onclick = () => copyText(data.title + "\\n\\n" + data.body);
                                     document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
                                     </script>
                                     """,
-                                    height=58,
+                                    height=76,
                                 )
                             else:
                                 st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
