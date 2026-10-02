@@ -3275,13 +3275,13 @@ with tab1:
                             probability_chart_html(visual_rows),
                             unsafe_allow_html=True,
                         )
-                        st.markdown("### 🚤 スタート〜1マークのイメージ")
+                        st.markdown("### 🚤 スタート〜1マーク旋回のイメージ")
                         components.html(
                             start_animation_html(visual_rows),
                             height=ANIMATION_HEIGHT,
                         )
                         st.caption(
-                            "スタートの早さは平均STと展示ST、1マークの並びは1着確率の高い順で表しています。"
+                            "スタートの早さは平均STと展示ST、1マークを回る順番は1着確率の高い順で表しています。"
                         )
                         st.caption(start_summary_text(visual_rows))
                 except Exception as e:

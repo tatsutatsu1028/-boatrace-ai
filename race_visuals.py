@@ -171,14 +171,14 @@ def start_summary_text(rows):
     return "想定ST（平均STと展示STから）：" + " / ".join(items)
 
 
-ANIMATION_HEIGHT = 260
+ANIMATION_HEIGHT = 310
 
 _ANIMATION_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8">
 <style>
   html,body{margin:0;padding:0;background:transparent;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;}
   #wrap{width:100%;}
-  canvas{display:block;width:100%;height:210px;border-radius:10px;}
+  canvas{display:block;width:100%;height:260px;border-radius:10px;}
   #bar{display:flex;align-items:center;gap:10px;margin-top:8px;}
   button{padding:8px 14px;border-radius:8px;border:1px solid #2563eb;background:#2563eb;color:#fff;font-size:14px;cursor:pointer;}
   #note{font-size:11px;color:#888;}
@@ -191,7 +191,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
 <script>
 (function(){
   const BOATS = __BOATS__;
-  const H = 210, DURATION = 5.0, T_END = 4.7;
+  const H = 260, DURATION = 7.0, T_MARK = 3.7, TURN_SPEED = 90;
   const canvas = document.getElementById("c");
   const ctx = canvas.getContext("2d");
   let W = 360, raf = 0, startAt = 0, geo = null;
@@ -199,8 +199,10 @@ _ANIMATION_TEMPLATE = """<!doctype html>
 
   function layout(){
     const lineX = W * 0.30;
-    const markX = W * 0.88, markY = 26;
-    const laneY = i => 44 + i * 30;
+    // 1マークの外を一番大きく回る艇でも画面に収まるよう、マークの位置を決める。
+    const R0 = 15, RSTEP = 7;
+    const markX = W - 14 - (R0 + RSTEP * 5), markY = 112;
+    const laneY = i => 132 + i * 23;
     const boats = BOATS.map(b => {
       const i = b.lane - 1;
       const inner = b.lane <= 3;
@@ -208,27 +210,45 @@ _ANIMATION_TEMPLATE = """<!doctype html>
       const x0 = inner ? lineX - W * (0.07 + i * 0.012) : lineX - W * (0.20 + (i - 3) * 0.012);
       // 想定STが早いほど早くスタートラインを越える（差を見やすく拡大）。
       const tLine = Math.min(2.7, Math.max(1.3, 1.7 + (b.st - 0.10) * 5));
-      // 第1ターンマークの並び：先頭がマークのすぐ外、後続は外・後ろへずれる。
+      // 1マークの並び：先頭が一番内を小さく回り、後続ほど遅れて外を大きく回る。
       const r = b.turn_rank;
-      const tx = markX - 10 - r * W * 0.075;
-      const ty = markY + 18 + r * 11;
-      return {b, y: laneY(i), x0, tLine, tx, ty, a: inner ? 0.25 : 0.65};
+      const R = R0 + RSTEP * r;
+      // 旋回とその後は全艇同じ速さにして、外を回る艇ほど遅れる（並びは崩れない）。
+      const tEnter = T_MARK + r * 0.2;
+      const tTurn = Math.PI * R / TURN_SPEED;
+      return {b, y: laneY(i), x0, tLine, R, tEnter, tTurn, a: inner ? 0.25 : 0.65};
     });
-    return {lineX, markX, markY, boats};
+    const turnDone = Math.max(...boats.map(g => g.tEnter + g.tTurn));
+    return {lineX, markX, markY, boats, turnDone};
   }
 
   function pos(g, t){
-    const lx = geo.lineX;
+    const lx = geo.lineX, mx = geo.markX, my = geo.markY;
     if (t <= g.tLine){
       const u = Math.max(0, t) / g.tLine;
       return [g.x0 + (lx - g.x0) * (g.a * u + (1 - g.a) * u * u), g.y];
     }
-    const u = Math.min(1, (t - g.tLine) / (T_END - g.tLine));
-    const s = 1 - Math.pow(1 - u, 1.6);
-    const cx = lx + (g.tx - lx) * 0.55, cy = g.y;
-    const x = (1 - s) * (1 - s) * lx + 2 * (1 - s) * s * cx + s * s * g.tx;
-    const y = (1 - s) * (1 - s) * g.y + 2 * (1 - s) * s * cy + s * s * g.ty;
-    return [x, y];
+    if (t <= g.tEnter){
+      // スタートラインから1マークの入口（マークの真下、半径Rの位置）へ寄っていく。
+      const s = (t - g.tLine) / (g.tEnter - g.tLine);
+      const ex = mx, ey = my + g.R;
+      const k = (ex - lx) * 0.4;
+      const p1x = lx + k, p1y = g.y, p2x = ex - k, p2y = ey;
+      const q = 1 - s;
+      return [
+        q * q * q * lx + 3 * q * q * s * p1x + 3 * q * s * s * p2x + s * s * s * ex,
+        q * q * q * g.y + 3 * q * q * s * p1y + 3 * q * s * s * p2y + s * s * s * ey,
+      ];
+    }
+    if (t <= g.tEnter + g.tTurn){
+      // 1マークを左回り（反時計回り）に半周する。
+      const u = (t - g.tEnter) / g.tTurn;
+      const th = Math.PI / 2 - Math.PI * u;
+      return [mx + g.R * Math.cos(th), my + g.R * Math.sin(th)];
+    }
+    // 回り切ったあとはバックストレッチへ向かって左へ進む。
+    const d = (t - g.tEnter - g.tTurn) * TURN_SPEED;
+    return [mx - d, my - g.R];
   }
 
   function resize(){
@@ -260,7 +280,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
     ctx.setLineDash([6, 5]);
     ctx.strokeStyle = "rgba(255,255,255,0.85)";
     ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(geo.lineX, 10); ctx.lineTo(geo.lineX, H - 8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(geo.lineX, 118); ctx.lineTo(geo.lineX, H - 12); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.font = "10px sans-serif";
@@ -273,7 +293,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
     ctx.beginPath(); ctx.arc(geo.markX, geo.markY, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     ctx.fillStyle = "#ffffff";
     ctx.font = "bold 10px sans-serif";
-    ctx.fillText("1マーク", geo.markX, geo.markY - 11);
+    ctx.fillText("1マーク", geo.markX - 30, geo.markY + 4);
   }
 
   function drawBoat(g, t){
@@ -320,7 +340,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
     ctx.font = "bold 11px sans-serif";
     ctx.textAlign = "left";
     const order = geo.boats.slice().sort((a, b) => a.b.turn_rank - b.b.turn_rank);
-    const label = "1マークの並び " + order.map(g => g.b.lane).join("-");
+    const label = "1マーク回り切り " + order.map(g => g.b.lane).join("-");
     ctx.fillStyle = "rgba(0,0,0,0.45)";
     ctx.fillRect(6, 6, ctx.measureText(label).width + 10, 18);
     ctx.fillStyle = "#ffffff";
@@ -332,7 +352,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
     // 後ろの艇から描いて、先頭の艇を上に重ねる。
     const order = geo.boats.slice().sort((a, b) => b.b.turn_rank - a.b.turn_rank);
     for (const g of order) drawBoat(g, t);
-    if (t >= T_END) drawOrder();
+    if (t >= geo.turnDone) drawOrder();
   }
 
   function tick(now){
@@ -364,7 +384,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
 
 
 def start_animation_html(rows):
-    """スタート〜第1ターンマークまでを約5秒で動かす canvas の HTML。"""
+    """スタートから第1ターンマークを回り切るまでを約7秒で動かす canvas の HTML。"""
     if not rows:
         return ""
     boats = []
