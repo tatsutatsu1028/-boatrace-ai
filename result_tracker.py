@@ -1771,6 +1771,165 @@ def calibration_table(df=None):
 
     return g
 # -----------------------------
+# 資金配分の切り替え（全レース配分）前後の比較
+# -----------------------------
+
+STAKE_PERIOD_ALL = "全期間"
+STAKE_PERIOD_BEFORE = "切り替え前（非推奨は0円）"
+STAKE_PERIOD_AFTER = "切り替え後（全レース配分）"
+STAKE_PERIODS = [STAKE_PERIOD_ALL, STAKE_PERIOD_BEFORE, STAKE_PERIOD_AFTER]
+
+
+def _is_after_stake_switch(df):
+    """各行が全レース配分へ切り替えた後の予想か。
+
+    日付ではなく、固定時に保存した stake_policy で判定する。切り替え当日に
+    旧方式で固定したレースが「後」に混ざらないようにするため。
+    """
+    if df is None or "stake_policy" not in df.columns:
+        return pd.Series(False, index=getattr(df, "index", None), dtype=bool)
+    return (
+        df["stake_policy"].astype(str).str.strip().eq(STAKE_POLICY_ALL_RACES)
+    )
+
+
+def filter_by_stake_period(df, period):
+    """検証データを切り替え前／後で絞り込む。全期間ならそのまま返す。"""
+    if df is None or period == STAKE_PERIOD_ALL:
+        return df
+    after = _is_after_stake_switch(df)
+    if period == STAKE_PERIOD_AFTER:
+        return df[after].copy()
+    return df[~after].copy()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_stake_switch_setting():
+    if not _use_supabase():
+        return None
+    try:
+        url, _ = _supabase_config()
+        r = requests.get(
+            f"{url}/rest/v1/{SUPABASE_SETTINGS_TABLE}",
+            params={"select": "stake_policy_switched_at", "id": "eq.1"},
+            headers=_headers(),
+            timeout=10,
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+        value = rows[0].get("stake_policy_switched_at") if rows else None
+        if not value:
+            return None
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("Asia/Tokyo")
+        return ts.strftime("%Y-%m-%d %H:%M")
+    except Exception as e:
+        print("[RESULT_TRACKER] stake switch load error:", type(e).__name__, str(e), flush=True)
+        return None
+
+
+def load_stake_policy_switched_at(df=None):
+    """全レース配分へ切り替えた日時（JSTの文字列）を返す。
+
+    app_settings.stake_policy_switched_at に記録した値を優先し、未記録なら
+    切り替え後の予想で最も早い保存日時で代用する。どちらも無ければ None。
+    """
+    recorded = _load_stake_switch_setting()
+    if recorded:
+        return recorded
+
+    if df is not None and len(df) and "saved_at" in df.columns:
+        after = df[_is_after_stake_switch(df)]
+        if len(after):
+            return str(after["saved_at"].astype(str).min())[:16].replace("T", " ")
+    return None
+
+
+def stake_period_comparison(df):
+    """切り替え前後の成績を1表にまとめる。率は0〜1、金額は円。"""
+    rows = []
+    if df is None:
+        df = pd.DataFrame(columns=RESULT_COLUMNS)
+    for period in (STAKE_PERIOD_BEFORE, STAKE_PERIOD_AFTER):
+        part = filter_by_stake_period(df, period)
+        m = metrics(part)
+        hit_prob = pd.to_numeric(
+            part.get("hit_probability", pd.Series(dtype=float)), errors="coerce"
+        )
+        rows.append(
+            {
+                "期間": period,
+                "レース数": m["races"],
+                "1着的中率": m["first_hit_rate"],
+                "買い目的中率": m["candidate_hit_rate"],
+                "表示した的中確率(平均)": (
+                    float(hit_prob.mean()) if hit_prob.notna().any() else np.nan
+                ),
+                "投資": m["total_stake"],
+                "払戻": m["total_payout"],
+                "収支": m["profit"],
+                "回収率": m["roi"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def hit_probability_calibration_table(df):
+    """表示した買い目全体の的中確率と、実際の的中率を帯ごとに比べる。
+
+    的中は「固定した買い目のどれかが当たった」(candidate_hit)。全レースに
+    資金を配分するようになったので、購入した買い目の的中と同じ意味になる。
+    hit_probability を保存していない旧データは対象外。
+    """
+    columns = ["表示確率帯", "件数", "平均表示確率", "実際の的中率", "差"]
+    if df is None or len(df) == 0 or "hit_probability" not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    x = df.copy()
+    x["hit_probability"] = pd.to_numeric(x["hit_probability"], errors="coerce")
+    x = x.dropna(subset=["hit_probability"])
+    if len(x) == 0:
+        return pd.DataFrame(columns=columns)
+    x["hit"] = (
+        x["candidate_hit"].astype(str).str.strip().str.lower().isin(["true", "1"])
+        .astype(float)
+    )
+
+    bins = [0, .2, .3, .4, .5, .6, 1.000001]
+    labels = ["20%未満", "20-30%", "30-40%", "40-50%", "50-60%", "60%以上"]
+    x["表示確率帯"] = pd.cut(
+        x["hit_probability"], bins=bins, labels=labels,
+        include_lowest=True, right=False,
+    )
+    g = (
+        x.groupby("表示確率帯", observed=False)
+        .agg(
+            件数=("hit", "size"),
+            平均表示確率=("hit_probability", "mean"),
+            実際の的中率=("hit", "mean"),
+        )
+        .reset_index()
+    )
+    total = pd.DataFrame(
+        [
+            {
+                "表示確率帯": "全体",
+                "件数": int(len(x)),
+                "平均表示確率": float(x["hit_probability"].mean()),
+                "実際の的中率": float(x["hit"].mean()),
+            }
+        ]
+    )
+    g["表示確率帯"] = g["表示確率帯"].astype(str)
+    g = pd.concat([g, total], ignore_index=True)
+    g["差"] = g["実際の的中率"] - g["平均表示確率"]
+    for c in ("平均表示確率", "実際の的中率", "差"):
+        g[c] = (pd.to_numeric(g[c], errors="coerce") * 100).round(1)
+    return g[columns]
+
+
+# -----------------------------
 # Phase 4: 分析ビュー読込
 # -----------------------------
 

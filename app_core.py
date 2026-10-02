@@ -42,6 +42,11 @@ from result_tracker import (
     result_exists,
     metrics as validation_metrics,
     calibration_table,
+    hit_probability_calibration_table,
+    STAKE_PERIODS,
+    filter_by_stake_period,
+    load_stake_policy_switched_at,
+    stake_period_comparison,
     load_settings,
     save_settings,
     odds_tracking_available,
@@ -1449,6 +1454,46 @@ with tab4:
                     use_container_width=True,
                     hide_index=True,
                 )
+    if results_df is not None:
+        # 2026-10 に「1着確率差40ポイント未満は賭け金0円」をやめ、全レースへ
+        # 資金を配分する方式に切り替えた。成績は切り替え前後で分けて見る。
+        st.markdown("### 🔀 資金配分の切り替え前後")
+        switched_at = load_stake_policy_switched_at(results_df)
+        st.caption(
+            f"切り替え日時: {switched_at}（JST）" if switched_at
+            else "切り替え後の検証データはまだありません。"
+        )
+        stake_compare = stake_period_comparison(results_df)
+        for _c in ("1着的中率", "買い目的中率", "表示した的中確率(平均)", "回収率"):
+            stake_compare[_c] = pd.to_numeric(stake_compare[_c], errors="coerce") * 100
+        st.dataframe(
+            stake_compare,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "1着的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                "買い目的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                "表示した的中確率(平均)": st.column_config.NumberColumn(format="%.1f%%"),
+                "投資": st.column_config.NumberColumn(format="%d円"),
+                "払戻": st.column_config.NumberColumn(format="%d円"),
+                "収支": st.column_config.NumberColumn(format="%+d円"),
+                "回収率": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+        st.caption(
+            "切り替え前は非推奨レースの投資額が0円のため、投資・払戻・回収率は推奨レースだけの成績です。"
+            "前後の判定は固定時に保存した資金配分方針で行うため、切り替え当日のレースも正しく分かれます。"
+        )
+        stake_period = st.radio(
+            "以下の集計期間",
+            STAKE_PERIODS,
+            horizontal=True,
+            key="stake_period",
+        )
+        results_df = filter_by_stake_period(results_df, stake_period)
+    else:
+        stake_period = STAKE_PERIODS[0]
+
     vm = validation_metrics(results_df) if results_df is not None else None
 
     if results_load_error is not None:
@@ -1506,6 +1551,26 @@ with tab4:
         st.markdown("#### 1着予測の確率校正")
         cal = calibration_table(results_df)
         st.dataframe(cal, use_container_width=True, hide_index=True)
+
+        st.markdown("#### 🎯 表示した的中確率と実際の的中率")
+        hit_cal = hit_probability_calibration_table(results_df)
+        if hit_cal.empty:
+            st.info("的中確率を表示したレースの結果はまだありません（切り替え後のレースから集計します）。")
+        else:
+            st.dataframe(
+                hit_cal,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "平均表示確率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "実際の的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "差": st.column_config.NumberColumn(format="%+.1fpt"),
+                },
+            )
+            st.caption(
+                "固定時に「この買い目の的中確率」として表示した値と、買い目のどれかが実際に当たった割合です。"
+                "差がプラスなら表示より当たっている（控えめな表示）、マイナスなら表示ほど当たっていません。"
+            )
 
         st.markdown("#### 🧪 仮想バックテスト")
         st.caption(
@@ -1607,7 +1672,7 @@ with tab4:
 
         show_cols = [
             "race_date","venue","race_no","trifecta_actual","p1_lane","p1_prob",
-            "candidate_count","candidate_hit","candidate_hit_rank",
+            "hit_probability","candidate_count","candidate_hit","candidate_hit_rank",
             "total_stake","payout","profit","roi"
         ]
         show_cols = [c for c in show_cols if c in results_df.columns]
@@ -1620,6 +1685,7 @@ with tab4:
             "trifecta_actual":"実3連単",
             "p1_lane":"AI本命",
             "p1_prob":"本命確率",
+            "hit_probability":"表示的中確率",
             "candidate_count":"候補点数",
             "candidate_hit":"予想的中",
             "candidate_hit_rank":"的中順位",
@@ -1631,7 +1697,7 @@ with tab4:
 
         _preferred_show_cols = [
             "日付", "場", "R", "実3連単", "AI本命", "本命確率",
-            "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
+            "表示的中確率", "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
         ]
         show = show[[c for c in _preferred_show_cols if c in show.columns]]
 
@@ -1651,7 +1717,9 @@ with tab4:
         csv_export_results = results_df.copy()
         if csv_include_lane_probs:
             try:
-                csv_export_results = load_results_full().copy()
+                csv_export_results = filter_by_stake_period(
+                    load_results_full(), stake_period
+                ).copy()
             except ResultsLoadError as e:
                 st.error(f"⚠️ 詳細データを取得できなかったため、詳細列なしのCSVになります。（{e}）")
         for _c in ("trifecta_actual", "top_ticket"):
