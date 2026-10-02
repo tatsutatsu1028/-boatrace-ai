@@ -27,7 +27,11 @@ from prediction import (
     lane_agnostic_strongest,
     lane_agnostic_snapshot,
 )
-from stake_allocator import allocate_stakes_smart
+from stake_allocator import (
+    STAKE_POLICY_ALL_RACES,
+    allocate_stakes_smart,
+    ticket_hit_probability,
+)
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -281,6 +285,9 @@ def _snapshot_payload(
         "tickets": ticket_rows,
         "research": research_payload,
         "race_features": [],
+        # 手動固定と同じく、買い目全体の的中確率と資金配分方針を残す。
+        "hit_probability": ticket_hit_probability(tickets),
+        "stake_policy": STAKE_POLICY_ALL_RACES,
     }
     if race_features is not None and len(race_features):
         for _, row in race_features.sort_values("lane").iterrows():
@@ -575,11 +582,9 @@ def _process_candidate(
         hedge_lane=hedge_lane,
         use_odds=False,
         first=final,
-        min_first_margin=0.40,
         min_second_coverage=ticket_plan["min_second_coverage"],
         close_third_gap=None,
         close_third_coverage=4,
-        include_nonrecommended=True,
         second_favorite_n=2,
     )
     if len(tickets) != target_points:
@@ -597,12 +602,6 @@ def _process_candidate(
         use_odds=False,
         guarantee_col="second_favorite",
     )
-    if (
-        "recommended" in tickets.columns
-        and not tickets["recommended"].fillna(True).all()
-    ):
-        tickets["stake"] = 0
-        tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
 
     # 艇番なしモデルの最強艇は検証用に保存するだけで、予想・買い目には使わない。
     lane_agnostic = None

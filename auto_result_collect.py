@@ -42,6 +42,7 @@ RESULT_COLUMNS = [
     "hit_top_ticket", "hit_any_ticket", "predicted_first_hit",
     "candidate_count", "candidate_hit", "candidate_hit_rank",
     "hit_within_8", "hit_within_9", "hit_within_10",
+    "hit_probability", "stake_policy",
     "tickets_json", "lane_probs_json",
 ]
 
@@ -276,6 +277,10 @@ def _build_record(snapshot, official):
                 item[c] = v
         ticket_payload.append(item)
 
+    # 固定時に表示した的中確率と資金配分方針。旧方式の固定予想には無いので空。
+    hit_probability = _safe_float(payload.get("hit_probability"), None)
+    stake_policy = str(payload.get("stake_policy") or "").strip() or None
+
     lane_payload = []
     for row in final_rows:
         if isinstance(row, dict):
@@ -311,6 +316,8 @@ def _build_record(snapshot, official):
         "hit_within_9": bool(candidate_hit_rank and candidate_hit_rank <= 9),
         "hit_within_10": bool(candidate_hit_rank and candidate_hit_rank <= 10),
         "predicted_first_hit": int(official["first"]) == p1_lane,
+        "hit_probability": hit_probability,
+        "stake_policy": stake_policy,
         "tickets_json": json.dumps(ticket_payload, ensure_ascii=False),
         "lane_probs_json": json.dumps({
             "final": lane_payload,
