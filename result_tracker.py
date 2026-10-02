@@ -10,6 +10,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from prediction import SECOND_FAVORITE_POLICY, second_favorite_n_for
 from stake_allocator import STAKE_POLICY_ALL_RACES, ticket_hit_probability
 
 
@@ -457,6 +458,9 @@ def _snapshot_payload(final, tickets, research_variants=None, race_features=None
         # 実際の的中率と比べるため、固定時点の値をそのまま残す。
         "hit_probability": ticket_hit_probability(tickets),
         "stake_policy": STAKE_POLICY_ALL_RACES,
+        # 2番手候補1着の買い目確保の方針と、このレースで使ったN。
+        "second_favorite_policy": SECOND_FAVORITE_POLICY,
+        "second_favorite_n": second_favorite_n_for(final),
     }
 
 

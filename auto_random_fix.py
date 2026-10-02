@@ -26,6 +26,8 @@ from prediction import (
     train_lane_agnostic,
     lane_agnostic_strongest,
     lane_agnostic_snapshot,
+    second_favorite_n_for,
+    SECOND_FAVORITE_POLICY,
 )
 from stake_allocator import (
     STAKE_POLICY_ALL_RACES,
@@ -288,6 +290,9 @@ def _snapshot_payload(
         # 手動固定と同じく、買い目全体の的中確率と資金配分方針を残す。
         "hit_probability": ticket_hit_probability(tickets),
         "stake_policy": STAKE_POLICY_ALL_RACES,
+        # 2番手候補1着の買い目確保の方針と、このレースで使ったN。
+        "second_favorite_policy": SECOND_FAVORITE_POLICY,
+        "second_favorite_n": second_favorite_n_for(final),
     }
     if race_features is not None and len(race_features):
         for _, row in race_features.sort_values("lane").iterrows():
@@ -585,7 +590,7 @@ def _process_candidate(
         min_second_coverage=ticket_plan["min_second_coverage"],
         close_third_gap=None,
         close_third_coverage=4,
-        second_favorite_n=2,
+        second_favorite_n=second_favorite_n_for(final),
     )
     if len(tickets) != target_points:
         raise RuntimeError(

@@ -1907,6 +1907,35 @@ def adaptive_ticket_plan(first):
     return plan
 
 
+# 2番手候補1着の買い目確保（rank_tickets の second_favorite_n）の本番方針。
+# 2026-10-03 に「全レースN=2」から「2番手の1着確率0.25以上のレースだけN=2、
+# それ以外はN=0」へ切り替えた。9/8〜10/1の1,179レースの比較で、全レースN=2は
+# 候補内的中率・回収率ともN=0を下回り、この条件だけが全指標でN=0と同等以上
+# だったため（差は誤差の範囲）。固定予想には second_favorite_policy としてこの
+# 値を保存し、切り替え前（値なし）と後を日付ではなく保存値で分けて比較する
+# （tools/compare_second_favorite_n.py）。
+SECOND_FAVORITE_POLICY = "p2_ge_0.25"
+SECOND_FAVORITE_POLICY_SINCE = "2026-10-03"
+SECOND_FAVORITE_MIN_P_FIRST = 0.25
+SECOND_FAVORITE_N = 2
+
+
+def second_favorite_n_for(first):
+    """本番方針で使う second_favorite_n を返す。
+
+    1着確率2位の艇の p_first（6艇合計を1に正規化）が
+    SECOND_FAVORITE_MIN_P_FIRST 以上なら SECOND_FAVORITE_N、未満なら0。
+    """
+    if first is None or not len(first) or "p_first" not in first.columns:
+        return 0
+    p = pd.to_numeric(first["p_first"], errors="coerce").dropna()
+    total = float(p.sum())
+    if len(p) < 2 or total <= 0:
+        return 0
+    second = float(p.sort_values(ascending=False).iloc[1]) / total
+    return SECOND_FAVORITE_N if second >= SECOND_FAVORITE_MIN_P_FIRST else 0
+
+
 def rank_tickets(
     tri,
     odds=None,
