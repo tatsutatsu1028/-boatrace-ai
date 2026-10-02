@@ -26,7 +26,7 @@ from official_fetcher import (
 )
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants
-from stake_allocator import allocate_stakes_smart
+from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 # 固定保存は旧スナップショット形式との互換性を維持する。
 from result_tracker import (
@@ -1036,7 +1036,7 @@ with tab3:
 
     st.info(
         "🎯 的中率重視モード：条件付き2着確率と3着候補の接戦度から、"
-        "推奨買い目を1レース8〜10点に自動調整します。"
+        "買い目を1レース8〜10点に自動調整します。"
     )
 
     main_n, cover_n, hole_n = 4, 4, 0
@@ -1499,7 +1499,7 @@ with tab4:
                     f"{value*100:.1f}%" if pd.notna(value) else "-",
                 )
         st.caption(
-            "投資額・推奨／非推奨に関係なく、固定時の候補上位に実結果が含まれた割合です。"
+            "投資額に関係なく、固定時の候補上位に実結果が含まれた割合です。"
             "回収率は別のシミュレーション指標として扱います。"
         )
 
@@ -2754,36 +2754,38 @@ with tab1:
                 st.subheader(f"{VENUES[jcd]} {rno}R AI最終予想")
 
                 total_stake_metric = int(tickets["stake"].sum())
-                mc1, mc2, mc3 = st.columns(3)
+                ticket_plan = result.get("ticket_plan") or {}
+                point_count = len(tickets)
+                plan_reason = ticket_plan.get("reason", "固定済みの買い目構成")
+
+                # 買い目全体の的中確率（各買い目の3連単確率の合計）を一番目立つ位置に出す。
+                # 同じ値を固定予想（prediction_snapshots）にも保存し、後で実際の的中率と比べる。
+                hit_prob = ticket_hit_probability(tickets)
+                if hit_prob is not None:
+                    st.markdown(
+                        f"""<div style="border:2px solid #2563eb;border-radius:12px;padding:14px 16px;margin:4px 0 12px 0;background:rgba(37,99,235,0.08);">
+    <div style="font-size:15px;">🎯 この買い目の的中確率（{point_count}点）</div>
+    <div style="font-size:34px;font-weight:700;line-height:1.3;">約{hit_prob*100:.0f}%</div>
+    <div style="font-size:12px;opacity:0.75;">各買い目の3連単確率の合計です。</div>
+    </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                mc1, mc2 = st.columns(2)
                 with mc1:
                     st.metric("AI総合信頼度", confidence(final, work_result))
                 with mc2:
                     st.metric(
-                        "推奨投資額（シミュレーション）",
+                        "投資額（シミュレーション）",
                         f"{total_stake_metric:,}円",
                     )
-                with mc3:
-                    st.metric(
-                        "推奨判定",
-                        "非推奨" if total_stake_metric == 0 else "推奨",
-                    )
 
-                ticket_plan = result.get("ticket_plan") or {}
-                point_count = len(tickets)
-                plan_reason = ticket_plan.get("reason", "固定済みの買い目構成")
-                st.info(f"🎯 推奨買い目 {point_count}点：{plan_reason}")
-
-                if total_stake_metric == 0:
-                    st.warning(
-                        "⚠️ 非推奨レースです。予想は通常どおり表示しますが、"
-                        "1着確率1位と2位の差が40ポイント未満のため、"
-                        "買い目は検証用予想として表示し、推奨投資額を0円としています。"
-                    )
+                st.info(f"🎯 買い目 {point_count}点：{plan_reason}")
 
                 # -------------------------------------------------
                 # note投稿管理（オーナー専用）
                 # -------------------------------------------------
-                # 推奨レース、または本命1着確率70%以上だけを投稿候補にする。
+                # 記事投稿の最終判断はオーナーが行うため、全レースを投稿候補にする。
                 # 「記事用に確定」を押した時点でSupabase側が当日の通し番号を原子的に採番し、
                 # 1〜3本目=無料、4本目以降=有料300円に固定する。同一レースの再押下では増えない。
                 if IS_ADMIN:
@@ -2792,15 +2794,12 @@ with tab1:
                         _pub_top_idx = _pub_probs.idxmax()
                         _pub_p1_prob = float(_pub_probs.loc[_pub_top_idx])
                         _pub_p1_lane = int(final.loc[_pub_top_idx, "lane"])
-                        _pub_recommended = total_stake_metric > 0
                         # 記事投稿の最終判断はオーナーが行うため、全レースで投稿UIを表示する。
                         _pub_eligible = True
 
                         if _pub_eligible:
                             _pub_reason = (
-                                "推奨＋本命70%以上"
-                                if (_pub_recommended and _pub_p1_prob >= 0.70)
-                                else ("推奨" if _pub_recommended else ("本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"))
+                                "本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"
                             )
                             _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
 
@@ -2982,7 +2981,7 @@ with tab1:
                                             st.code(str(e))
                         else:
                             st.caption(
-                                f"📝 記事投稿対象外：本命 {_pub_p1_lane}号艇 {_pub_p1_prob:.1%} ／ 非推奨"
+                                f"📝 記事投稿対象外：本命 {_pub_p1_lane}号艇 {_pub_p1_prob:.1%}"
                             )
                     except Exception as e:
                         st.caption(f"記事投稿判定を表示できませんでした: {e}")
@@ -3267,7 +3266,7 @@ with tab1:
                             f"""<div class="ticket">
     <b>{row['combo']}</b>　的中確率 <b>{row['prob']*100:.2f}%</b><br>
     <span class="small">{oddtxt}{evtxt}</span><br>
-    <div class="money">💴 推奨 {stake_txt}</div>
+    <div class="money">💴 {stake_txt}</div>
     <span class="small">{row.get('stake_reason', '')}</span>
     </div>""",
                             unsafe_allow_html=True
@@ -3290,7 +3289,7 @@ with tab1:
                     )
                     st.success(f"購入合計：{int(buy_view['stake'].sum()):,}円")
                 else:
-                    st.info("購入推奨額はありません。")
+                    st.info("購入額はありません。")
 
                 csv_export = tickets.copy()
                 if "combo" in csv_export.columns:

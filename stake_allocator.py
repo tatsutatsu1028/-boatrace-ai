@@ -4,6 +4,31 @@ import numpy as np
 import pandas as pd
 
 
+# 資金配分の方針。2026-10 に「1着確率差40ポイント未満は非推奨（賭け金0円）」を
+# やめ、予想した全レースへ予算を配分する方式へ切り替えた。切り替え後の
+# 固定予想・検証結果には stake_policy としてこの値を保存し、検証画面で
+# 切り替え前（値なし）と後を分けて集計する。
+STAKE_POLICY_ALL_RACES = "all_races"
+
+
+def ticket_hit_probability(tickets):
+    """買い目全体の的中確率（各買い目の3連単確率の合計）を0〜1で返す。
+
+    3連単の各組み合わせは互いに排反なので、確率の単純な合計が
+    「いずれかの買い目が当たる確率」になる。同じ買い目が重複していても
+    二重に数えない。買い目が無い・確率が読めない場合は None。
+    """
+    if tickets is None or len(tickets) == 0 or "prob" not in tickets.columns:
+        return None
+    x = tickets
+    if "combo" in x.columns:
+        x = x.drop_duplicates("combo", keep="first")
+    probs = pd.to_numeric(x["prob"], errors="coerce")
+    if not probs.notna().any():
+        return None
+    return float(min(max(probs.fillna(0.0).clip(lower=0.0).sum(), 0.0), 1.0))
+
+
 GROUP_WEIGHT = {
     "本線": 1.00,
     "抑え": 0.62,
