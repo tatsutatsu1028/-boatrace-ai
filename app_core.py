@@ -2689,11 +2689,9 @@ with tab1:
                             longshot_min_prob=float(longshot_min_prob_pct) / 100.0,
                             hedge_lane=hedge_lane,
                             first=final,
-                            min_first_margin=0.40,
                             min_second_coverage=ticket_plan["min_second_coverage"],
                             close_third_gap=None,
                             close_third_coverage=4,
-                            include_nonrecommended=True,
                             second_favorite_n=2,
                         )
                         tickets = _complete_adaptive_tickets(
@@ -2717,12 +2715,6 @@ with tab1:
                             value_bias=float(value_bias),
                             guarantee_col="second_favorite",
                         )
-                        if (
-                            "recommended" in tickets.columns
-                            and not tickets["recommended"].fillna(True).all()
-                        ):
-                            tickets["stake"] = 0
-                            tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
                         st.session_state["result"] = {
                             "context": ctx,
                             "before": before,

@@ -575,11 +575,9 @@ def _process_candidate(
         hedge_lane=hedge_lane,
         use_odds=False,
         first=final,
-        min_first_margin=0.40,
         min_second_coverage=ticket_plan["min_second_coverage"],
         close_third_gap=None,
         close_third_coverage=4,
-        include_nonrecommended=True,
         second_favorite_n=2,
     )
     if len(tickets) != target_points:
@@ -597,12 +595,6 @@ def _process_candidate(
         use_odds=False,
         guarantee_col="second_favorite",
     )
-    if (
-        "recommended" in tickets.columns
-        and not tickets["recommended"].fillna(True).all()
-    ):
-        tickets["stake"] = 0
-        tickets["stake_reason"] = "非推奨のためシミュレーション投資なし"
 
     # 艇番なしモデルの最強艇は検証用に保存するだけで、予想・買い目には使わない。
     lane_agnostic = None
