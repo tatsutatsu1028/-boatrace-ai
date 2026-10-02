@@ -10,6 +10,8 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from stake_allocator import STAKE_POLICY_ALL_RACES, ticket_hit_probability
+
 
 # ローカル実行時のフォールバック用。
 # Streamlit Cloud では Supabase を優先して使う。
@@ -88,6 +90,10 @@ RESULT_COLUMNS = [
     "hit_within_9",
     "hit_within_10",
     "predicted_first_hit",
+    # 固定時に画面へ表示した買い目全体の的中確率と、資金配分の方針。
+    # 2026-10 の全レース配分への切り替え前の行はどちらも空。
+    "hit_probability",
+    "stake_policy",
     "tickets_json",
     "lane_probs_json",
 ]
@@ -447,7 +453,28 @@ def _snapshot_payload(final, tickets, research_variants=None, race_features=None
         "tickets": ticket_rows,
         "research": research_payload,
         "race_features": _snapshot_feature_rows(race_features),
+        # 画面に「この買い目の的中確率」として表示した値。結果確定後に
+        # 実際の的中率と比べるため、固定時点の値をそのまま残す。
+        "hit_probability": ticket_hit_probability(tickets),
+        "stake_policy": STAKE_POLICY_ALL_RACES,
     }
+
+
+def _snapshot_hit_fields(snapshot):
+    """固定予想に保存した的中確率と資金配分方針を取り出す（旧データは None）。"""
+    if not snapshot:
+        return None, None
+    try:
+        payload = json.loads(snapshot.get("payload_json") or "{}")
+    except Exception:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    hit_probability = _safe_float(payload.get("hit_probability"), np.nan)
+    if not math.isfinite(hit_probability):
+        hit_probability = None
+    stake_policy = str(payload.get("stake_policy") or "").strip() or None
+    return hit_probability, stake_policy
 
 
 def load_prediction_snapshot(race_key):
@@ -848,6 +875,14 @@ def save_race_result(
     if snapshot_used and snapshot_used.get("collector_name"):
         collector_name = snapshot_used.get("collector_name")
 
+    if snapshot_used:
+        # 固定時に表示した値を使う。旧方式の固定予想には無いので空のまま。
+        hit_probability, stake_policy = _snapshot_hit_fields(snapshot_used)
+    else:
+        # 固定予想を使わない保存は、いまのロジックで作った買い目そのもの。
+        hit_probability = ticket_hit_probability(tickets)
+        stake_policy = STAKE_POLICY_ALL_RACES
+
     final = final.copy()
     tickets = tickets.copy()
 
@@ -1108,6 +1143,8 @@ def save_race_result(
         "predicted_first_hit": bool(
             predicted_first_hit
         ),
+        "hit_probability": hit_probability,
+        "stake_policy": stake_policy,
         "tickets_json": json.dumps(
             ticket_payload,
             ensure_ascii=False,
