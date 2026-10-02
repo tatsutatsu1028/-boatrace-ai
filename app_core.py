@@ -113,11 +113,113 @@ except Exception:
 st.set_page_config(page_title="BOAT AI Mobile", page_icon="🚤", layout="centered", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
-.block-container{max-width:760px;padding-top:.8rem;padding-bottom:5rem}
-.stButton>button{width:100%;min-height:3rem;border-radius:14px;font-weight:700}
-.ticket{padding:.8rem 1rem;border:1px solid rgba(150,150,150,.28);border-radius:14px;margin:.45rem 0}
-.small{opacity:.72;font-size:.86rem}
-.money{margin-top:.45rem;font-size:1.02rem;font-weight:700}
+/* ===== テーマ「ナイトレース」（管理者・スタッフ共通）=====
+   配色の基本は .streamlit/config.toml。ここでは形・装飾・スマホでの読みやすさを整える。
+   画面の並びや機能には触れない。 */
+:root{
+  --nr-bg:#0B1220; --nr-card:#142036; --nr-card2:#1A2944; --nr-line:#2A3A57;
+  --nr-text:#F1F5F9; --nr-sub:#A7B4C8; --nr-orange:#FF7A1A; --nr-orange-hi:#FF9445;
+  --nr-cyan:#38BDF8; --nr-red:#FF6B6B;
+}
+html,body,.stApp{
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP","Yu Gothic UI",Meiryo,sans-serif;
+  -webkit-text-size-adjust:100%;
+}
+/* 背景：深い紺に、上からうっすらオレンジと水色の光（オリジナルの図形のみ） */
+.stApp{
+  background:
+    radial-gradient(900px 320px at 15% -60px, rgba(255,122,26,.13), transparent 70%),
+    radial-gradient(800px 300px at 95% -40px, rgba(56,189,248,.10), transparent 70%),
+    var(--nr-bg);
+  background-attachment:fixed;
+}
+/* 上部バーは透明にして、タイトルがバーの下に隠れないよう少し下げる */
+[data-testid="stHeader"]{background:transparent}
+.block-container{max-width:760px;padding-top:3.2rem;padding-bottom:5rem}
+p,li,label,.stMarkdown{line-height:1.6}
+
+/* 見出し：タイトルの下に、オレンジ→水色の「航跡」ライン */
+h1{font-weight:800!important;letter-spacing:.02em}
+[data-testid="stHeadingWithActionElements"] h1::after,
+.stApp h1::after{
+  content:"";display:block;height:4px;width:96px;margin-top:.45rem;border-radius:4px;
+  background:linear-gradient(90deg,var(--nr-orange),var(--nr-cyan));
+}
+h2,h3{font-weight:800!important}
+h3{padding-left:.6rem;border-left:4px solid var(--nr-orange);line-height:1.35!important}
+h4,h5,h6{font-weight:700!important;color:var(--nr-text)}
+a{color:var(--nr-cyan)}
+
+/* ボタン：押しやすい高さ（48px以上）と、はっきりした押下表現 */
+.stButton>button,.stDownloadButton>button,.stFormSubmitButton>button,.stLinkButton>a{
+  width:100%;min-height:3rem;border-radius:14px;font-weight:700;font-size:1rem;
+  background:var(--nr-card);border:1px solid var(--nr-line);color:var(--nr-text);
+  transition:border-color .15s,background .15s,transform .05s;
+}
+.stButton>button:hover,.stDownloadButton>button:hover,.stFormSubmitButton>button:hover{
+  border-color:var(--nr-orange);color:var(--nr-text);background:var(--nr-card2);
+}
+.stButton>button:active,.stDownloadButton>button:active,.stFormSubmitButton>button:active{transform:scale(.98)}
+.stButton>button:focus-visible,.stFormSubmitButton>button:focus-visible{outline:3px solid var(--nr-cyan);outline-offset:2px}
+/* メイン操作（primary）はオレンジ地に紺の文字。白文字だとコントラストが足りないため。 */
+button[kind="primary"],button[kind="primaryFormSubmit"],
+[data-testid="stBaseButton-primary"],[data-testid="stBaseButton-primaryFormSubmit"]{
+  background:linear-gradient(180deg,var(--nr-orange-hi),var(--nr-orange))!important;
+  border-color:var(--nr-orange)!important;color:#0B1220!important;
+  box-shadow:0 4px 14px rgba(255,122,26,.25);
+}
+button[kind="primary"] p,button[kind="primaryFormSubmit"] p,
+[data-testid="stBaseButton-primary"] p,[data-testid="stBaseButton-primaryFormSubmit"] p{color:#0B1220!important;font-weight:800}
+
+/* 入力欄：指で押しやすい高さ */
+[data-baseweb="input"],[data-baseweb="select"]>div,[data-baseweb="textarea"]{min-height:48px;border-radius:12px!important}
+input,textarea,[data-baseweb="select"]{font-size:16px!important}
+[data-testid="stCheckbox"] label,[data-testid="stRadio"] label{min-height:40px;align-items:center}
+
+/* タブ：横スクロールで切り替えやすく、選択中はオレンジの下線 */
+[data-baseweb="tab-list"]{gap:.25rem;border-bottom:1px solid var(--nr-line)}
+button[data-baseweb="tab"]{min-height:46px;padding:0 .8rem}
+button[data-baseweb="tab"] p{font-size:.98rem;font-weight:700}
+button[data-baseweb="tab"][aria-selected="true"] p{color:var(--nr-orange)}
+
+/* カード類：数字（metric）・折りたたみ・表・枠付きコンテナ */
+[data-testid="stMetric"]{
+  background:var(--nr-card);border:1px solid var(--nr-line);border-radius:14px;padding:.7rem .9rem;
+}
+[data-testid="stMetricLabel"] p{color:var(--nr-sub);font-weight:600}
+[data-testid="stMetricValue"]{font-weight:800;font-variant-numeric:tabular-nums}
+[data-testid="stExpander"] details{background:var(--nr-card);border:1px solid var(--nr-line)!important;border-radius:14px}
+[data-testid="stExpander"] summary{min-height:48px}
+[data-testid="stExpander"] summary p{font-weight:700}
+[data-testid="stVerticalBlockBorderWrapper"]{border-color:var(--nr-line)!important}
+[data-testid="stDataFrame"]{border:1px solid var(--nr-line);border-radius:12px;overflow:hidden}
+[data-testid="stAlert"]{border-radius:12px}
+[data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] p,.stCaption{color:var(--nr-sub)!important;opacity:1!important}
+hr{border-color:var(--nr-line)!important}
+
+/* 本体が直接指定している色を、暗い背景でも読みやすい明るさに合わせる */
+span[style*="#e53935"]{color:var(--nr-red)!important}
+div[style*="border:2px solid #2563eb"]{
+  border-color:var(--nr-orange)!important;
+  background:linear-gradient(135deg,rgba(255,122,26,.14),rgba(56,189,248,.08))!important;
+}
+
+.ticket{padding:.8rem 1rem;border:1px solid var(--nr-line);background:var(--nr-card);border-radius:14px;margin:.45rem 0}
+.small{color:var(--nr-sub);font-size:.88rem}
+.money{margin-top:.45rem;font-size:1.05rem;font-weight:800;color:var(--nr-orange-hi)}
+
+/* R選択ボタンはマス目いっぱいに広げて押しやすくする */
+div[class*="st-key-race_row_"] [data-testid="stColumn"]{width:auto!important;min-width:0!important;flex:none!important}
+div[class*="st-key-race_row_"] [data-testid="stColumn"] *:has(>.stButton),
+div[class*="st-key-race_row_"] [data-testid="stElementContainer"],
+div[class*="st-key-race_row_"] .stButton{width:100%!important}
+
+@media (max-width:480px){
+  html{font-size:16px}
+  h1{font-size:1.65rem!important}
+  h3{font-size:1.2rem!important}
+  .block-container{padding-left:.9rem;padding-right:.9rem}
+}
 /* 会場グリッドはスマホ幅でもStreamlit標準の縦積みにせず、
    横4列のまま表示する（狭い画面でも横スクロールなしで一覧できるように）。 */
 div[class*="st-key-venue_grid"] [data-testid="stHorizontalBlock"]{flex-wrap:nowrap!important;gap:.35rem!important}
@@ -2282,7 +2384,7 @@ with tab1:
             for rr in near_deadline:
                 css.append(
                     f".st-key-race_deadline_{rr} button p "
-                    "{color:#e53935 !important;font-weight:800 !important;}"
+                    "{color:#FF6B6B !important;font-weight:800 !important;}"
                 )
             css.append("</style>")
             st.markdown("".join(css), unsafe_allow_html=True)
@@ -2312,15 +2414,15 @@ with tab1:
             }
             div[class*="st-key-race_row_"] button{
                 width:100% !important;
-                min-height:50px !important;
-                height:50px !important;
+                min-height:52px !important;
+                height:52px !important;
                 padding:2px 0 !important;
                 border-radius:9px !important;
             }
             div[class*="st-key-race_row_"] button p{
                 margin:0 !important;
-                font-size:11px !important;
-                line-height:1.05 !important;
+                font-size:13px !important;
+                line-height:1.1 !important;
                 white-space:pre-line !important;
                 font-weight:800 !important;
             }
@@ -2329,11 +2431,11 @@ with tab1:
                     gap:4px !important;
                 }
                 div[class*="st-key-race_row_"] button{
-                    min-height:46px !important;
-                    height:46px !important;
+                    min-height:48px !important;
+                    height:48px !important;
                 }
                 div[class*="st-key-race_row_"] button p{
-                    font-size:10px !important;
+                    font-size:12px !important;
                 }
             }
             </style>
@@ -2356,7 +2458,7 @@ with tab1:
             for rr in near_deadline:
                 _near_css.append(
                     f".st-key-race_btn_wrap_{rr} button p "
-                    "{color:#e53935 !important;font-weight:900 !important;}"
+                    "{color:#FF6B6B !important;font-weight:900 !important;}"
                 )
             _near_css.append("</style>")
             st.markdown("".join(_near_css), unsafe_allow_html=True)
