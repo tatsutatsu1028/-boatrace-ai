@@ -7,3 +7,4 @@ sample_history.csv
 history_full.csv
 data/
 _data/
+.streamlit/secrets.toml
