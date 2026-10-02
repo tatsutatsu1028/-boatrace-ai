@@ -395,6 +395,12 @@ def _build_result_record(
     profit = int(received) - int(total_stake)
     roi = (received / total_stake) if total_stake > 0 else None
 
+    # 固定時に画面へ表示した買い目全体の的中確率と資金配分方針
+    # （result_tracker.save_race_result / auto_result_collect と同じ扱い）。
+    # 全レース配分へ切り替える前の固定予想には無いので空のまま。
+    hit_probability = _safe_float(payload.get("hit_probability"), None)
+    stake_policy = str(payload.get("stake_policy") or "").strip() or None
+
     ticket_keep = (
         "combo",
         "group",
@@ -467,6 +473,8 @@ def _build_result_record(
         "hit_top_ticket": bool(hit_top_ticket),
         "hit_any_ticket": bool(hit_any_ticket),
         "predicted_first_hit": bool(predicted_first_hit),
+        "hit_probability": hit_probability,
+        "stake_policy": stake_policy,
         "tickets_json": json.dumps(
             ticket_payload,
             ensure_ascii=False,
