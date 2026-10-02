@@ -27,6 +27,13 @@ from official_fetcher import (
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
+from race_visuals import (
+    ANIMATION_HEIGHT,
+    build_visual_rows,
+    probability_chart_html,
+    start_animation_html,
+    start_summary_text,
+)
 from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 # 固定保存は旧スナップショット形式との互換性を維持する。
 from result_tracker import (
@@ -3258,6 +3265,27 @@ with tab1:
                         f"🛟 {hedge_lane}号艇（本命）に不安要素あり（{' / '.join(risk_reasons)}）のため、"
                         f"穴の1点を{hedge_lane}号艇を含まない保険買い目に差し替えています。"
                     )
+
+                # 確率グラフとスタート〜1マークのイメージ（表示のみ。予想・買い目には影響しない）。
+                try:
+                    visual_rows = build_visual_rows(final, work_result)
+                    if visual_rows:
+                        st.markdown("### 📊 確率グラフ")
+                        st.markdown(
+                            probability_chart_html(visual_rows),
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown("### 🚤 スタート〜1マークのイメージ")
+                        components.html(
+                            start_animation_html(visual_rows),
+                            height=ANIMATION_HEIGHT,
+                        )
+                        st.caption(
+                            "スタートの早さは平均STと展示ST、1マークの並びは1着確率の高い順で表しています。"
+                        )
+                        st.caption(start_summary_text(visual_rows))
+                except Exception as e:
+                    st.caption(f"確率グラフ・イメージを表示できませんでした: {e}")
 
                 st.markdown("### 1着確率")
                 for _, row in merged.iterrows():
