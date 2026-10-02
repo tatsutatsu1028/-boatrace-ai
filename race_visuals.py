@@ -61,11 +61,35 @@ def expected_st(avg_st, exhibition_st):
     return sum(values) / len(values)
 
 
-def build_visual_rows(final, work=None):
+def parse_combo(combo):
+    """3連単の買い目文字列（例 "1-4-2"）を枠番のリストにする。不正ならNone。"""
+    parts = [p.strip() for p in str(combo or "").split("-")]
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    lanes = [int(p) for p in parts]
+    if len(set(lanes)) != 3 or any(l not in LANE_COLORS for l in lanes):
+        return None
+    return lanes
+
+
+def top_trifecta_combo(tri):
+    """3連単の確率表から、最も確率の高い買い目を返す。取れなければNone。"""
+    if tri is None or len(tri) == 0 or "combo" not in tri.columns or "prob" not in tri.columns:
+        return None
+    probs = pd.to_numeric(tri["prob"], errors="coerce")
+    if probs.notna().sum() == 0:
+        return None
+    combo = str(tri.loc[probs.idxmax(), "combo"])
+    return combo if parse_combo(combo) else None
+
+
+def build_visual_rows(final, work=None, top_combo=None):
     """6艇分の表示用データ（枠番順）を作る。
 
-    turn_rank は第1ターンマークでの並び（1着確率の高い順、0が先頭）。
-    同じ確率なら内側の艇を前にする。
+    turn_rank は第1ターンマークを回る順番（0が先頭）。top_combo（最も確率の高い
+    3連単＝本線の予想順）があれば、その1〜3着を先頭3艇にし、残りの艇は1着確率の
+    高い順に並べる。top_combo がなければ全艇を1着確率の高い順にする。
+    p1_rank は1着確率の順位（0が本命）。同じ確率なら内側の艇を前にする。
     """
     if final is None or len(final) == 0 or "lane" not in final.columns:
         return []
@@ -96,10 +120,27 @@ def build_visual_rows(final, work=None):
             "st": expected_st(avg_st, ex_st),
         })
 
-    order = sorted(rows, key=lambda x: (-(x["p1"] or 0.0), x["lane"]))
+    by_p1 = sorted(rows, key=lambda x: (-(x["p1"] or 0.0), x["lane"]))
+    for rank, row in enumerate(by_p1):
+        row["p1_rank"] = rank
+
+    head = parse_combo(top_combo) or []
+    if not all(any(r["lane"] == l for r in rows) for l in head):
+        head = []
+    by_lane = {r["lane"]: r for r in rows}
+    order = [by_lane[l] for l in head] + [r for r in by_p1 if r["lane"] not in head]
     for rank, row in enumerate(order):
         row["turn_rank"] = rank
+        row["turn_by_trifecta"] = bool(head)
     return sorted(rows, key=lambda x: x["lane"])
+
+
+def turn_order_label(rows):
+    """1マークを回る順番の説明（例「本線の予想順 1-4-2（残り 3-5-6）」）。"""
+    order = [str(r["lane"]) for r in sorted(rows, key=lambda x: x["turn_rank"])]
+    if rows and rows[0].get("turn_by_trifecta"):
+        return f"本線の予想順 {'-'.join(order[:3])}（残り {'-'.join(order[3:])}）"
+    return "1着確率順 " + "-".join(order)
 
 
 def _fmt_st(v):
@@ -130,7 +171,7 @@ def probability_chart_html(rows):
     for r in rows:
         fill, ink = LANE_COLORS[r["lane"]]
         name = html.escape(r["name"])
-        top = ' <span style="font-size:11px;opacity:0.7;">◎本命</span>' if r["turn_rank"] == 0 else ""
+        top = ' <span style="font-size:11px;opacity:0.7;">◎本命</span>' if r["p1_rank"] == 0 else ""
         parts.append(
             '<div style="display:flex;align-items:center;gap:8px;margin:8px 0 2px 0;">'
             f'<span style="display:inline-block;min-width:22px;height:22px;line-height:22px;'
@@ -191,6 +232,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
 <script>
 (function(){
   const BOATS = __BOATS__;
+  const ORDER_LABEL = __ORDER_LABEL__;
   const H = 260, DURATION = 7.0, T_MARK = 3.7, TURN_SPEED = 90;
   const canvas = document.getElementById("c");
   const ctx = canvas.getContext("2d");
@@ -247,8 +289,10 @@ _ANIMATION_TEMPLATE = """<!doctype html>
       return [mx + g.R * Math.cos(th), my + g.R * Math.sin(th)];
     }
     // 回り切ったあとはバックストレッチへ向かって左へ進む。
+    // 画面の左端が近づいたらなめらかに減速し、狭い画面でもはみ出さないようにする。
     const d = (t - g.tEnter - g.tTurn) * TURN_SPEED;
-    return [mx - d, my - g.R];
+    const room = Math.max(1, mx - 20);
+    return [mx - room * (1 - Math.exp(-d / room)), my - g.R];
   }
 
   function resize(){
@@ -339,8 +383,7 @@ _ANIMATION_TEMPLATE = """<!doctype html>
   function drawOrder(){
     ctx.font = "bold 11px sans-serif";
     ctx.textAlign = "left";
-    const order = geo.boats.slice().sort((a, b) => a.b.turn_rank - b.b.turn_rank);
-    const label = "1マーク回り切り " + order.map(g => g.b.lane).join("-");
+    const label = ORDER_LABEL;
     ctx.fillStyle = "rgba(0,0,0,0.45)";
     ctx.fillRect(6, 6, ctx.measureText(label).width + 10, 18);
     ctx.fillStyle = "#ffffff";
@@ -399,4 +442,5 @@ def start_animation_html(rows):
             "ink": ink,
         })
     data = json.dumps(boats, ensure_ascii=False).replace("</", "<\\/")
-    return _ANIMATION_TEMPLATE.replace("__BOATS__", data)
+    label = json.dumps(turn_order_label(rows), ensure_ascii=False).replace("</", "<\\/")
+    return _ANIMATION_TEMPLATE.replace("__BOATS__", data).replace("__ORDER_LABEL__", label)
