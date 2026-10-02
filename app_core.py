@@ -33,6 +33,7 @@ from race_visuals import (
     probability_chart_html,
     start_animation_html,
     start_summary_text,
+    top_trifecta_combo,
 )
 from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 # 固定保存は旧スナップショット形式との互換性を維持する。
@@ -3268,7 +3269,16 @@ with tab1:
 
                 # 確率グラフとスタート〜1マークのイメージ（表示のみ。予想・買い目には影響しない）。
                 try:
-                    visual_rows = build_visual_rows(final, work_result)
+                    # 1マークを回る順番は、買い目と同じ3連単確率表の最上位（本線の予想順）を使う。
+                    try:
+                        visual_top_combo = top_trifecta_combo(trifecta(final))
+                    except Exception:
+                        visual_top_combo = None
+                    if visual_top_combo is None:
+                        visual_top_combo = top_trifecta_combo(tickets)
+                    visual_rows = build_visual_rows(
+                        final, work_result, top_combo=visual_top_combo
+                    )
                     if visual_rows:
                         st.markdown("### 📊 確率グラフ")
                         st.markdown(
@@ -3281,7 +3291,13 @@ with tab1:
                             height=ANIMATION_HEIGHT,
                         )
                         st.caption(
-                            "スタートの早さは平均STと展示ST、1マークを回る順番は1着確率の高い順で表しています。"
+                            "スタートの早さは平均STと展示ST、1マークを回る順番は"
+                            + (
+                                "最も確率の高い3連単（本線の予想順）の1〜3着、残りの艇は1着確率の高い順"
+                                if visual_rows[0].get("turn_by_trifecta")
+                                else "1着確率の高い順"
+                            )
+                            + "で表しています。"
                         )
                         st.caption(start_summary_text(visual_rows))
                 except Exception as e:
