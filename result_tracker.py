@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import json
 import math
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,7 @@ SUPABASE_TABLE = "prediction_results"
 SUPABASE_SETTINGS_TABLE = "app_settings"
 SUPABASE_SNAPSHOT_TABLE = "prediction_snapshots"
 SUPABASE_SCHEDULE_TABLE = "daily_schedule"
+JST = ZoneInfo("Asia/Tokyo")
 CONDITIONAL_THIRD_COLUMNS = [
     f"p_third_given_{first_lane}_{second_lane}"
     for first_lane in range(1, 7)
@@ -483,8 +486,9 @@ def _snapshot_hit_fields(snapshot):
 
 def load_prediction_snapshot(race_key):
     """
-    race_key に対してレース前に固定した予想を1件取得する。
-    テーブル未作成・未設定時は None。
+    race_key に対して保存した予想（締切前に最後に保存したもの）を1件取得する。
+    テーブル未作成・未設定時は None。payload_json を含むので1件約22KB。
+    状態表示だけなら load_prediction_snapshot_meta() を使う。
     """
     if not _use_supabase():
         return None
@@ -494,10 +498,7 @@ def load_prediction_snapshot(race_key):
         f"{url}/rest/v1/{SUPABASE_SNAPSHOT_TABLE}"
         f"?race_key=eq.{requests.utils.quote(str(race_key), safe='')}"
         "&select=*"
-        # 同じレースで固定が二重に入ってしまった場合でも、
-        # 必ず「一番最初に固定したもの（＝レース前の予想）」を採用する。
-        # order を指定しないと、どちらが返るかは不定になる。
-        "&order=saved_at.asc"
+        # race_key が主キーなので1レース1件。上書きは締切前に限られる。
         "&limit=1"
     )
 
@@ -528,81 +529,107 @@ def prediction_snapshot_exists(race_key):
     return load_prediction_snapshot(race_key) is not None
 
 
-def save_prediction_snapshot(
-    race_key,
-    race_date,
-    venue,
-    race_no,
+# 保存済み予想の状態表示だけに使う軽い列。payload_json（1件約22KB）は含めない。
+SNAPSHOT_META_COLUMNS = (
+    "race_key,saved_at,snapshot_kind,collector_name,"
+    "pre_exhibition,payload_hash,update_count"
+)
+
+
+def load_prediction_snapshot_meta(race_key):
+    """
+    保存済み予想の有無と保存時刻などだけを取得する（payload_json は取らない）。
+    未保存なら None。取得に失敗した場合は例外を投げる。
+    """
+    if not _use_supabase():
+        return None
+
+    url, _ = _supabase_config()
+    r = requests.get(
+        f"{url}/rest/v1/{SUPABASE_SNAPSHOT_TABLE}",
+        params={
+            "race_key": f"eq.{race_key}",
+            "select": SNAPSHOT_META_COLUMNS,
+            "limit": "1",
+        },
+        headers=_headers(),
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json() or []
+    return data[0] if data else None
+
+
+def build_snapshot_payload_json(
     final,
     tickets,
     research_variants=None,
     race_features=None,
-    snapshot_kind="same_day",
-    collector_name="owner",
+    pre_exhibition=False,
 ):
-    """
-    AI予想を「その時点のまま」固定する。
-
-    同じ race_key が既に固定済みなら上書きしない。
-    これによりレース終了後に再取得・再計算しても、
-    検証保存では最初に固定した予想を使える。
-    """
-    existing = load_prediction_snapshot(race_key)
-    if existing is not None:
-        return existing
-
-    if not _use_supabase():
-        raise RuntimeError(
-            "予想スナップショットはSupabase接続時のみ利用できます。"
-        )
-
+    """保存する payload_json の文字列と、その SHA-256 を返す。"""
     payload = _snapshot_payload(
         final.copy(),
         tickets.copy(),
         research_variants=research_variants,
         race_features=race_features.copy() if race_features is not None else None,
     )
+    # 展示データが揃う前の予想かどうか。列（pre_exhibition）と同じ値を中にも残す。
+    payload["pre_exhibition"] = bool(pre_exhibition)
+    text = json.dumps(payload, ensure_ascii=False)
+    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    record = {
-        "race_key": str(race_key),
-        "collector_name": str(collector_name or "owner"),
-        "saved_at": datetime.now().isoformat(timespec="seconds"),
-        "race_date": str(race_date),
-        "venue": str(venue),
-        "race_no": int(race_no),
-        "snapshot_kind": str(snapshot_kind),
-        "payload_json": json.dumps(
-            payload,
-            ensure_ascii=False,
-        ),
-    }
+
+def save_latest_prediction_snapshot(
+    race_key,
+    venue,
+    payload_json,
+    payload_hash,
+    pre_exhibition=False,
+    collector_name="owner",
+):
+    """
+    「AI最終予想」を押した時点の予想を保存する。
+
+    * 未保存なら新しく保存する（当日レースの締切後は保存しない）
+    * 保存済みでも締切前なら、最新の予想で上書きする
+    * 締切後・過去日・結果保存済みのレースは上書きしない
+    * 内容が同じなら書き込まない
+
+    判定は Supabase の save_latest_prediction_snapshot() 関数が行い、
+    status（inserted / updated / unchanged / closed）と保存済み予想の
+    時刻などだけを返す（payload_json は送り返さない）。
+    """
+    if not _use_supabase():
+        raise RuntimeError(
+            "予想の保存はSupabase接続時のみ利用できます。"
+        )
 
     url, _ = _supabase_config()
-    endpoint = f"{url}/rest/v1/{SUPABASE_SNAPSHOT_TABLE}"
-
     r = requests.post(
-        endpoint,
-        headers=_headers("return=representation"),
-        json=record,
+        f"{url}/rest/v1/rpc/save_latest_prediction_snapshot",
+        headers=_headers(),
+        json={
+            "p_race_key": str(race_key),
+            "p_venue": str(venue),
+            "p_collector_name": str(collector_name or "owner"),
+            "p_saved_at": datetime.now(JST).isoformat(timespec="seconds"),
+            "p_payload_json": payload_json,
+            "p_payload_hash": payload_hash,
+            "p_pre_exhibition": bool(pre_exhibition),
+        },
         timeout=20,
     )
-
-    # 同時操作等で先に作成された場合は、その既存値を採用。
-    if r.status_code == 409:
-        existing = load_prediction_snapshot(race_key)
-        if existing is not None:
-            return existing
-
     r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, dict) or not data.get("status"):
+        raise RuntimeError(f"予想の保存結果を読み取れませんでした: {data}")
+    return data
 
-    try:
-        data = r.json()
-        if isinstance(data, list) and data:
-            return data[0]
-    except Exception:
-        pass
 
-    return record
+def restore_snapshot_frames(snapshot):
+    """保存済み予想の final / tickets / research を DataFrame に戻す。"""
+    return _restore_snapshot_frames(snapshot)
 
 
 def _restore_snapshot_frames(snapshot):
