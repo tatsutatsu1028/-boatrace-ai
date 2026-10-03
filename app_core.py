@@ -74,6 +74,7 @@ try:
     from threads_poster import (
         build_post_text as threads_build_post_text,
         build_daily_summary_text as threads_build_daily_summary_text,
+        build_daily_summary_note_texts as threads_build_daily_summary_note_texts,
         fetch_daily_publication_results as threads_fetch_daily_publication_results,
         post_text as threads_post_text,
         load_config as threads_load_config,
@@ -95,6 +96,9 @@ except Exception:
 
     def threads_build_daily_summary_text(*args, **kwargs):
         return ""
+
+    def threads_build_daily_summary_note_texts(*args, **kwargs):
+        return []
 
     def threads_fetch_daily_publication_results(*args, **kwargs):
         raise RuntimeError("threads_poster.py が未導入です。")
@@ -1511,6 +1515,69 @@ with tab3:
                             "トークンが失効している可能性があります。"
                             "上から再登録してください。"
                         )
+
+                # note記事用のまとめ。3パターンから選んでコピーして使う。
+                _note_variants = threads_build_daily_summary_note_texts(
+                    race_date=_sum_date,
+                    records=_sum_records,
+                    payouts=_sum_loaded.get("payouts"),
+                    include_pending=_include_pending,
+                )
+                if _note_variants:
+                    st.markdown("#### 📝 note用まとめ（3パターン）")
+                    st.caption("使いたいパターンのタブを開き、コピーボタンでnoteに貼り付けてください。")
+                    _note_tabs = st.tabs([v["label"] for v in _note_variants])
+                    for _vi, (_note_tab, _variant) in enumerate(zip(_note_tabs, _note_variants)):
+                        with _note_tab:
+                            _vkey = f"{_sum_date_str}_{int(_include_pending)}_{_vi}"
+                            _v_title = st.text_input(
+                                "noteタイトル",
+                                value=_variant["title"],
+                                key=f"note_summary_title_{_vkey}",
+                            )
+                            _v_body = st.text_area(
+                                "note本文（そのままコピー用）",
+                                value=_variant["body"],
+                                height=360,
+                                key=f"note_summary_body_{_vkey}",
+                            )
+                            _v_payload = json.dumps(
+                                {"title": _v_title, "body": _v_body},
+                                ensure_ascii=False,
+                            ).replace("</", "<\\/")
+                            components.html(
+                                f"""
+                                <style>
+                                  body {{ margin:0; }}
+                                  .copy-row {{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:2px 0 4px 0; }}
+                                  .copy-row button {{ min-height:44px; padding:6px 4px; cursor:pointer; font-size:13px; border-radius:10px; white-space:nowrap; }}
+                                  #copy-status {{ font-size:13px; color:#9fe7a9; min-height:18px; text-align:center; }}
+                                </style>
+                                <div class="copy-row">
+                                  <button id="copy-title">📋 タイトル</button>
+                                  <button id="copy-body">📋 本文</button>
+                                  <button id="copy-all">📋 まとめて</button>
+                                </div>
+                                <div id="copy-status"></div>
+                                <script>
+                                const data = {_v_payload};
+                                const status = document.getElementById("copy-status");
+                                async function copyText(value) {{
+                                  try {{
+                                    await navigator.clipboard.writeText(value);
+                                    status.textContent = "コピーしました";
+                                  }} catch (e) {{
+                                    status.textContent = "コピーできませんでした";
+                                  }}
+                                  setTimeout(() => status.textContent = "", 1800);
+                                }}
+                                document.getElementById("copy-title").onclick = () => copyText(data.title);
+                                document.getElementById("copy-body").onclick = () => copyText(data.body);
+                                document.getElementById("copy-all").onclick = () => copyText(data.title + "\\n\\n" + data.body);
+                                </script>
+                                """,
+                                height=76,
+                            )
 
 
 # 収集スタッフは画面上の一時操作で予想条件を変えられないよう、

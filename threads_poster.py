@@ -667,3 +667,164 @@ def build_daily_summary_text(
 
     text = "\n\n".join(parts)
     return text[:TEXT_LIMIT]
+
+
+# -------------------------------------------------
+# 1日の発信まとめ（note記事用）
+# -------------------------------------------------
+NOTE_SUMMARY_HASHTAGS = "#ボートレース #競艇 #展示 #予想 #今日の結果"
+
+
+def _summary_counts(records, include_pending):
+    records = list(records or [])
+    settled = [r for r in records if r.get("settled")]
+    pending = [r for r in records if not r.get("settled")]
+    hits = [r for r in settled if r.get("hit")]
+    shown = records if include_pending else settled
+    return records, settled, pending, hits, shown
+
+
+def _note_result_line(r, payouts, with_actual=True):
+    label = _race_label(r.get("venue"), r.get("race_no"))
+    if not r.get("settled"):
+        return f"⏳ {label}　結果待ち"
+    mark = "⭕" if r.get("hit") else "❌"
+    line = f"{mark} {label}"
+    if with_actual:
+        line += f"　{r.get('trifecta_actual')}"
+    payout = _num(payouts.get(r.get("race_key")), 0.0)
+    if r.get("hit") and payout > 0:
+        line += f"（{int(payout):,}円）"
+    return line
+
+
+def _hit_rate_text(hits, settled):
+    if not settled:
+        return "—"
+    return f"{len(hits) / len(settled) * 100:.0f}%"
+
+
+def _closing_by_rate(hits, settled):
+    """Threadsまとめと同じ的中率の分岐で締めの一言を返す。"""
+    if not settled:
+        return "結果が出そろったら、あらためて振り返ります。"
+    if len(hits) * 2 > len(settled):
+        return "明日の予想もお楽しみに✨"
+    if len(hits) * 2 == len(settled):
+        return "五分五分でした、明日に繋げます🙏"
+    return "もっと予想精度上げれる様に頑張ります💪"
+
+
+def build_daily_summary_note_texts(
+    race_date,
+    records,
+    payouts=None,
+    include_pending=True,
+):
+    """1日まとめのnote記事を3パターン作る。
+
+    戻り値は {"label", "title", "body"} の dict を3つ並べたリスト。
+    パターンは「シンプル結果報告」「振り返り（数字多め）」「ひとこと＋結果」。
+    集計の考え方（結果待ちは的中率の分母に入れない等）は
+    build_daily_summary_text() と同じ。
+    """
+    payouts = payouts or {}
+    records, settled, pending, hits, shown = _summary_counts(records, include_pending)
+    day = _short_date(race_date)
+
+    if not records:
+        body = "本日のnote発信はありませんでした。\n\nまた次回の予想でお会いしましょう。"
+        return [
+            {"label": label, "title": f"【{day}】本日の予想まとめ", "body": body}
+            for label in ("① シンプル結果報告", "② 振り返り（数字多め）", "③ ひとこと＋結果")
+        ]
+
+    if pending:
+        score = f"確定{len(settled)}R中{len(hits)}的中（{len(pending)}R結果待ち）"
+    else:
+        score = f"{len(records)}R中{len(hits)}的中"
+    pending_note = "残りのレースは結果が出たら追記します。" if pending else ""
+    result_lines = "\n".join(_note_result_line(r, payouts) for r in shown)
+    hit_payouts = [
+        int(_num(payouts.get(r.get("race_key")), 0.0))
+        for r in hits
+        if _num(payouts.get(r.get("race_key")), 0.0) > 0
+    ]
+    closing = _closing_by_rate(hits, settled)
+
+    # ① シンプル結果報告
+    p1 = [
+        f"{day}の予想結果をまとめました。",
+        f"■ 本日の成績\n{score}",
+        f"■ レース別結果\n{result_lines}" if result_lines else "",
+        pending_note,
+        closing,
+        NOTE_SUMMARY_HASHTAGS,
+    ]
+
+    # ② 振り返り（数字多め）
+    top_hits = [r for r in settled if r.get("hit_top_ticket")]
+    stats = [
+        f"・発信レース数：{len(records)}R",
+        f"・結果確定：{len(settled)}R",
+        f"・的中：{len(hits)}R（的中率 {_hit_rate_text(hits, settled)}）",
+        f"・本線（最上位の買い目）的中：{len(top_hits)}R",
+    ]
+    if hit_payouts:
+        stats.append(f"・最高払戻（3連単100円あたり）：{max(hit_payouts):,}円")
+    if pending:
+        stats.append(f"・結果待ち：{len(pending)}R")
+    if hits:
+        review = "的中したレースは、展示から読んだ展開がハマった形でした。"
+    else:
+        review = "今日は展示から読んだ展開が結果に結びつきませんでした。"
+    if len(hits) < len(settled):
+        review += "外れたレースは、どこで読みがズレたかを見直して次に活かします。"
+    p2 = [
+        f"{day}の発信レースを数字で振り返ります。",
+        "■ 本日の数字\n" + "\n".join(stats),
+        f"■ レース別結果（3連単の着順）\n{result_lines}" if result_lines else "",
+        f"■ ひとこと振り返り\n{review}",
+        pending_note,
+        closing,
+        NOTE_SUMMARY_HASHTAGS,
+    ]
+
+    # ③ ひとこと＋結果（短め）
+    if hits and hit_payouts:
+        lead = f"今日は{len(hits)}本的中🎯 最高{max(hit_payouts):,}円の払戻でした。"
+    elif hits:
+        lead = f"今日は{len(hits)}本的中🎯"
+    elif settled:
+        lead = "今日は的中なし…悔しい一日でした。"
+    else:
+        lead = "今日の発信レースはまだ結果待ちです。"
+    short_lines = "\n".join(_note_result_line(r, payouts, with_actual=False) for r in shown)
+    p3 = [
+        f"{day}もお疲れさまでした！\n{lead}",
+        short_lines,
+        pending_note,
+        "明日も展示を見てから予想を出します。\nフォローしてお待ちください☝️",
+        NOTE_SUMMARY_HASHTAGS,
+    ]
+
+    def _join(parts):
+        return "\n\n".join(p for p in parts if p)
+
+    return [
+        {
+            "label": "① シンプル結果報告",
+            "title": f"【{day}｜本日の予想結果】{score}",
+            "body": _join(p1),
+        },
+        {
+            "label": "② 振り返り（数字多め）",
+            "title": f"【{day}｜予想振り返り】的中率{_hit_rate_text(hits, settled)}・{score}",
+            "body": _join(p2),
+        },
+        {
+            "label": "③ ひとこと＋結果",
+            "title": f"【{day}】今日の結果まとめ｜{len(hits)}本的中" if hits else f"【{day}】今日の結果まとめ",
+            "body": _join(p3),
+        },
+    ]
