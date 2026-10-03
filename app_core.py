@@ -1061,6 +1061,10 @@ def _auto_save_prediction(ctx, d, jcd, venue, rno, deadlines, odds, result):
     if meta is None:
         return {"status": "error", "message": "保存済み予想の確認に失敗しました。"}
 
+    if meta["exists"] and meta.get("snapshot_kind") == "auto_random":
+        # 自動固定で保存済みのレースは、締切前でも上書きしない。
+        return {"status": "auto_fixed", "meta": meta}
+
     is_past = d < _today_jst()
     if _deadline_passed(d, deadlines, rno) and (meta["exists"] or not is_past):
         # 締切後は上書きしない。過去日で未保存のときだけバックテストとして保存する。
@@ -3183,6 +3187,12 @@ with tab1:
                     )
                 elif _save_status == "unchanged":
                     st.success("📌 保存済みの予想と同じ内容です。" + _saved_label)
+                elif _save_status == "auto_fixed":
+                    st.info(
+                        "🤖 このレースは自動固定で保存済みのため、上書きしていません。"
+                        "結果保存・note・スレッズには自動固定の予想を使います。"
+                        + _saved_label
+                    )
                 elif _save_status == "closed":
                     if _saved_meta.get("exists"):
                         st.info(
