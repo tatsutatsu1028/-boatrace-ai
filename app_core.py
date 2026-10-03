@@ -3165,7 +3165,9 @@ with tab1:
                 # -------------------------------------------------
                 _save = result.get("save") or {}
                 _save_status = _save.get("status")
-                _saved_meta = _cached_snapshot_meta(ctx) or {}
+                # オーナー画面（note・スレッズ）は他の人の上書きも反映するため毎回取り直す。
+                # 取るのは時刻などの数百バイトだけで、予想本体は読まない。
+                _saved_meta = _cached_snapshot_meta(ctx, refresh=IS_ADMIN) or {}
                 _saved_label = ""
                 if _saved_meta.get("exists"):
                     _saved_label = f" 保存時刻: {_saved_meta.get('saved_at', '-')}"
@@ -3208,9 +3210,11 @@ with tab1:
                             "締切後データが混ざる可能性があるため参考値として扱ってください。"
                         )
 
-                # note・スレッズは保存された最新の予想を使う。
+                # note・スレッズ（オーナーのみ）は保存された最新の予想を使う。
+                _saved_final, _saved_tickets = None, None
                 try:
-                    _saved_final, _saved_tickets = _saved_prediction_frames(ctx, result)
+                    if IS_ADMIN:
+                        _saved_final, _saved_tickets = _saved_prediction_frames(ctx, result)
                 except Exception as e:
                     print("[SNAPSHOT] saved prediction load error:", type(e).__name__, str(e), flush=True)
                     _saved_final, _saved_tickets = None, None
