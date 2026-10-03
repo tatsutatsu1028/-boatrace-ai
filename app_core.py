@@ -36,7 +36,7 @@ from race_visuals import (
     top_trifecta_combo,
 )
 from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
-# 固定保存は旧スナップショット形式との互換性を維持する。
+# 予想の保存は旧スナップショット形式との互換性を維持する。
 from result_tracker import (
     load_results,
     load_results_full,
@@ -64,7 +64,10 @@ from result_tracker import (
     snapshot_payout_from_official,
     deactivate_odds_watchlist,
     load_prediction_snapshot,
-    save_prediction_snapshot,
+    load_prediction_snapshot_meta,
+    build_snapshot_payload_json,
+    save_latest_prediction_snapshot,
+    restore_snapshot_frames,
     supabase_config,
     fetch_daily_schedule_supabase,
 )
@@ -981,6 +984,153 @@ def _deadline_minutes_left(d, hhmm):
         return (deadline - datetime.now(JST)).total_seconds() / 60.0
     except Exception:
         return None
+
+
+def _exhibition_ready(race):
+    """全艇の展示タイムが揃っているか（自動固定の判定と同じ基準）。"""
+    if race is None or len(race) == 0 or "exhibition_time" not in race.columns:
+        return False
+    times = pd.to_numeric(race["exhibition_time"], errors="coerce")
+    return bool(times.notna().all())
+
+
+def _snapshot_meta_cache():
+    return st.session_state.setdefault("_snapshot_meta_by_race", {})
+
+
+def _cached_snapshot_meta(ctx, refresh=False):
+    """
+    保存済み予想の状態（時刻・展示前フラグ等）をセッション内で使い回す。
+    payload_json は取らないので、再描画のたびに約22KBを読み直さずに済む。
+    取得に失敗した場合は None（未保存扱いにはせず、表示側で区別する）。
+    """
+    cache = _snapshot_meta_cache()
+    cached = cache.get(ctx)
+    if not refresh and cached is not None:
+        # 「未保存」は自動固定や他の端末で保存されることがあるので、1分だけ使い回す。
+        if cached.get("exists") or time.time() - cached.get("_checked_at", 0) < 60:
+            return cached
+    try:
+        meta = load_prediction_snapshot_meta(ctx)
+    except Exception as e:
+        print("[SNAPSHOT] meta load error:", type(e).__name__, str(e), flush=True)
+        return None
+    cache[ctx] = (
+        {"exists": False, "_checked_at": time.time()}
+        if meta is None
+        else {**meta, "exists": True}
+    )
+    return cache[ctx]
+
+
+def _deadline_passed(d, deadlines, rno):
+    """当日レースの締切を過ぎていれば True。過去日も True。"""
+    if d < _today_jst():
+        return True
+    if d > _today_jst():
+        return False
+    hhmm = (deadlines or {}).get(rno)
+    mins = _deadline_minutes_left(d, hhmm) if hhmm else None
+    return mins is not None and mins <= 0
+
+
+def _auto_save_prediction(ctx, d, jcd, venue, rno, deadlines, odds, result):
+    """
+    「AI最終予想」を押した時点の予想を prediction_snapshots へ保存する。
+
+    締切前なら最新の予想で上書きし、締切後は上書きしない。
+    同じ内容の再押下では書き込まず、payload_json も送らない。
+    戻り値は表示用の dict（status / message / meta）。
+    """
+    # AI総合信頼度(A/B/C)は confidence() を呼んだ時に final へ記録されるので、
+    # 画面表示より先に保存する今は、ここで一度計算して payload に含める。
+    try:
+        confidence(result["final"], result.get("work"))
+    except Exception:
+        pass
+    payload_json, payload_hash = build_snapshot_payload_json(
+        result["final"],
+        result["tickets"],
+        research_variants=result.get("research_variants") or {},
+        race_features=result.get("work"),
+        pre_exhibition=result.get("pre_exhibition", False),
+    )
+    result["payload_hash"] = payload_hash
+
+    meta = _cached_snapshot_meta(ctx, refresh=True)
+    if meta is None:
+        return {"status": "error", "message": "保存済み予想の確認に失敗しました。"}
+
+    is_past = d < _today_jst()
+    if _deadline_passed(d, deadlines, rno) and (meta["exists"] or not is_past):
+        # 締切後は上書きしない。過去日で未保存のときだけバックテストとして保存する。
+        return {"status": "closed", "meta": meta}
+    if (
+        meta["exists"]
+        and meta.get("payload_hash") == payload_hash
+        and bool(meta.get("pre_exhibition")) == bool(result.get("pre_exhibition"))
+    ):
+        return {"status": "unchanged", "meta": meta}
+
+    try:
+        saved = save_latest_prediction_snapshot(
+            race_key=ctx,
+            venue=venue,
+            payload_json=payload_json,
+            payload_hash=payload_hash,
+            pre_exhibition=result.get("pre_exhibition", False),
+            collector_name=COLLECTOR_NAME,
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    status = saved.get("status")
+    _snapshot_meta_cache()[ctx] = saved
+    out = {"status": status, "meta": saved}
+
+    # 当日レースを初めて保存したら、オッズ追跡にも登録する（従来の固定と同じ）。
+    if status == "inserted" and saved.get("snapshot_kind") == "same_day" and odds_tracking_available():
+        ok, msg = add_to_odds_watchlist(d.strftime("%Y%m%d"), jcd, rno)
+        if ok:
+            saved_now, save_msg = save_odds_snapshot_now(
+                d.strftime("%Y%m%d"), jcd, rno, odds
+            )
+            out["odds_message"] = (
+                "📈 オッズ自動追跡も開始しました。"
+                + (f" {save_msg}" if saved_now else "")
+            )
+        else:
+            out["odds_warning"] = f"オッズ追跡の開始に失敗しました。 {msg}"
+    return out
+
+
+def _saved_prediction_frames(ctx, result):
+    """
+    note・スレッズ用に、保存された最新の予想（final, tickets）を返す。
+    画面の予想と保存済みが同じならそのまま使い、違えば保存済みを1回だけ読み込む。
+    保存済み予想が無い（または読めない）場合は (None, None)。
+    """
+    meta = _cached_snapshot_meta(ctx)
+    if not meta or not meta.get("exists"):
+        return None, None
+    saved_hash = meta.get("payload_hash")
+    if saved_hash and saved_hash == result.get("payload_hash"):
+        return result["final"], result["tickets"]
+
+    cache = st.session_state.setdefault("_saved_frames_by_race", {})
+    cache_key = (saved_hash, meta.get("saved_at"))
+    cached = cache.get(ctx)
+    if cached and cached[0] == cache_key:
+        return cached[1], cached[2]
+
+    snapshot = load_prediction_snapshot(ctx)
+    final_df, tickets_df, _ = restore_snapshot_frames(snapshot)
+    if final_df is None or tickets_df is None or not len(final_df) or not len(tickets_df):
+        return None, None
+    if "stake" in tickets_df.columns:
+        tickets_df["stake"] = pd.to_numeric(tickets_df["stake"], errors="coerce").fillna(0).astype(int)
+    cache[ctx] = (cache_key, final_df, tickets_df)
+    return final_df, tickets_df
 
 
 def _deadline_html(rno, hhmm, d):
@@ -2970,7 +3120,16 @@ with tab1:
                             "risk_reasons": risk_reasons,
                             "research_variants": research_variants,
                             "ticket_plan": ticket_plan,
+                            # 展示データが揃う前の予想かどうか（保存する予想にも印を付ける）。
+                            "pre_exhibition": not _exhibition_ready(work),
                         }
+                    # 予想を出した時点で自動保存する。締切前の再押下は最新予想で上書きし、
+                    # 締切後は上書きしない（スタッフが押した場合も同じ）。
+                    with st.spinner("予想を保存しています…"):
+                        st.session_state["result"]["save"] = _auto_save_prediction(
+                            ctx, d, jcd, VENUES[jcd], rno, deadlines, odds,
+                            st.session_state["result"],
+                        )
                 except Exception as e:
                     st.error("AI予想でエラーが発生しました。")
                     st.code(str(e))
@@ -2997,6 +3156,64 @@ with tab1:
 
                 st.divider()
                 st.subheader(f"{VENUES[jcd]} {rno}R AI最終予想")
+
+                if result.get("pre_exhibition"):
+                    st.warning("⏳ 展示前の予想です。展示後にもう一度押してください")
+
+                # -------------------------------------------------
+                # 予想の自動保存の結果
+                # -------------------------------------------------
+                _save = result.get("save") or {}
+                _save_status = _save.get("status")
+                _saved_meta = _cached_snapshot_meta(ctx) or {}
+                _saved_label = ""
+                if _saved_meta.get("exists"):
+                    _saved_label = f" 保存時刻: {_saved_meta.get('saved_at', '-')}"
+                    if _saved_meta.get("snapshot_kind") == "backtest":
+                        _saved_label += "（過去レース・バックテスト）"
+                    if _saved_meta.get("pre_exhibition"):
+                        _saved_label += "【展示前】"
+                if _save_status in {"inserted", "updated"}:
+                    st.success(
+                        "📌 この予想を保存しました。"
+                        + ("（締切前のため最新の予想で上書き）" if _save_status == "updated" else "")
+                        + _saved_label
+                    )
+                elif _save_status == "unchanged":
+                    st.success("📌 保存済みの予想と同じ内容です。" + _saved_label)
+                elif _save_status == "closed":
+                    if _saved_meta.get("exists"):
+                        st.info(
+                            "🔒 締切後のため、保存済みの予想は上書きしていません。"
+                            "結果保存・note・スレッズには保存済みの予想を使います。"
+                            + _saved_label
+                        )
+                    else:
+                        st.warning("🔒 締切後のため、この予想は保存していません。")
+                elif _save_status is None and _saved_meta.get("exists"):
+                    st.caption("📌 このレースは予想を保存済みです。" + _saved_label)
+                elif _save_status == "error":
+                    st.error(
+                        "予想の保存に失敗しました。もう一度「AI最終予想」を押してください。"
+                    )
+                    st.code(str(_save.get("message", "")))
+                if _save.get("odds_message"):
+                    st.caption(_save["odds_message"])
+                if _save.get("odds_warning"):
+                    st.warning(_save["odds_warning"])
+                if _saved_meta.get("exists") and _save_status in {"inserted", "updated", "unchanged"}:
+                    if d < _today_jst():
+                        st.caption(
+                            "過去レースの予想はバックテスト扱いです。"
+                            "締切後データが混ざる可能性があるため参考値として扱ってください。"
+                        )
+
+                # note・スレッズは保存された最新の予想を使う。
+                try:
+                    _saved_final, _saved_tickets = _saved_prediction_frames(ctx, result)
+                except Exception as e:
+                    print("[SNAPSHOT] saved prediction load error:", type(e).__name__, str(e), flush=True)
+                    _saved_final, _saved_tickets = None, None
 
                 total_stake_metric = int(tickets["stake"].sum())
                 ticket_plan = result.get("ticket_plan") or {}
@@ -3033,12 +3250,14 @@ with tab1:
                 # 記事投稿の最終判断はオーナーが行うため、全レースを投稿候補にする。
                 # 「記事用に確定」を押した時点でSupabase側が当日の通し番号を原子的に採番し、
                 # 1〜3本目=無料、4本目以降=有料300円に固定する。同一レースの再押下では増えない。
-                if IS_ADMIN:
+                if IS_ADMIN and _saved_final is None:
+                    st.caption("📝 保存された予想が無いため、note記事用の確定は使えません。")
+                elif IS_ADMIN:
                     try:
-                        _pub_probs = pd.to_numeric(final["p_first"], errors="coerce")
+                        _pub_probs = pd.to_numeric(_saved_final["p_first"], errors="coerce")
                         _pub_top_idx = _pub_probs.idxmax()
                         _pub_p1_prob = float(_pub_probs.loc[_pub_top_idx])
-                        _pub_p1_lane = int(final.loc[_pub_top_idx, "lane"])
+                        _pub_p1_lane = int(_saved_final.loc[_pub_top_idx, "lane"])
                         # 記事投稿の最終判断はオーナーが行うため、全レースで投稿UIを表示する。
                         _pub_eligible = True
 
@@ -3049,8 +3268,8 @@ with tab1:
                             _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
 
                             _pub_groups = {"本線": [], "抑え": [], "穴": []}
-                            if "combo" in tickets.columns:
-                                for _, _pub_row in tickets.iterrows():
+                            if "combo" in _saved_tickets.columns:
+                                for _, _pub_row in _saved_tickets.iterrows():
                                     _pub_combo = str(_pub_row.get("combo", "") or "").strip()
                                     _pub_group = str(_pub_row.get("group", "抑え") or "抑え").strip()
                                     if _pub_combo:
@@ -3154,7 +3373,8 @@ with tab1:
                                 )
                                 _note_body = st.text_area(
                                     "note本文（そのままコピー用）",
-                                    value=_existing_pub.get("article_text") or _pub_article,
+                                    # 確定後に締切前の再予想で保存内容が変わっても、最新の保存予想で作り直す。
+                                    value=_pub_article,
                                     height=420,
                                     key=f"note_body_{ctx}",
                                 )
@@ -3246,18 +3466,20 @@ with tab1:
                     else None
                 )
 
-                if _threads_cfg:
+                if _threads_cfg and _saved_final is None:
+                    st.caption("🧵 保存された予想が無いため、スレッズ投稿は使えません。")
+                elif _threads_cfg:
                     with st.expander("🧵 スレッズに投稿", expanded=False):
                         _default_text = threads_build_post_text(
                             race_date=d.strftime("%-m/%-d") if hasattr(d, "strftime") else str(d),
                             venue=VENUES[jcd],
                             race_no=rno,
-                            final=final,
-                            tickets=tickets,
+                            final=_saved_final,
+                            tickets=_saved_tickets,
                             deadline=(deadlines or {}).get(rno),
                             publication_type=(
-                                str(_pub_existing.get("publication_type") or "FREE")
-                                if "_pub_existing" in locals() and _pub_existing
+                                str(_existing_pub.get("publication_type") or "FREE")
+                                if "_existing_pub" in locals() and _existing_pub
                                 else "FREE"
                             ),
                         )
@@ -3302,103 +3524,6 @@ with tab1:
                                     "トークンが失効している可能性があります。"
                                     "設定タブから再登録してください。"
                                 )
-
-                snapshot = load_prediction_snapshot(ctx)
-                if snapshot:
-                    kind_label = (
-                        "過去レース・バックテスト"
-                        if snapshot.get("snapshot_kind") == "backtest"
-                        else "当日予想"
-                    )
-                    st.success(
-                        "📌 検証用予想は固定済みです。"
-                        f" 固定時刻: {snapshot.get('saved_at', '-')} / {kind_label}。"
-                        "このあとAIを再計算しても、結果保存では固定済み予想を使います。"
-                    )
-                else:
-                    if d < _today_jst():
-                        st.warning(
-                            "📌 このレースは過去レースです。ここで固定するとバックテスト扱いになります。"
-                            "買い目・回収率は締切後データが混ざる可能性があるため参考値として扱ってください。"
-                        )
-                        snapshot_kind = "backtest"
-                    else:
-                        st.warning(
-                            "📌 レース前に『この予想を検証用に固定』を押してください。"
-                            "固定後はレース終了後に再取得・再予想しても、検証成績はこの時点の予想で判定します。"
-                        )
-                        snapshot_kind = "same_day"
-
-                    if st.button(
-                        "📌 この予想を検証用に固定",
-                        key=f"lock_prediction_{ctx}",
-                    ):
-                        try:
-                            # 当日レースは締切後の固定を禁止する。
-                            # 結果や直前確定情報を見た後の予想が検証データへ混ざるのを防ぐ。
-                            if snapshot_kind == "same_day" and d == _today_jst():
-                                _lock_hhmm = deadlines.get(rno) if deadlines else None
-                                _lock_mins = _deadline_minutes_left(d, _lock_hhmm) if _lock_hhmm else None
-                                if _lock_mins is not None and _lock_mins <= 0:
-                                    raise ValueError(
-                                        "締切時刻を過ぎているため、本番検証用の予想は固定できません。"
-                                    )
-
-                            snap = save_prediction_snapshot(
-                                race_key=ctx,
-                                race_date=d.isoformat(),
-                                venue=VENUES[jcd],
-                                race_no=rno,
-                                final=final,
-                                tickets=tickets,
-                                research_variants=st.session_state["result"].get(
-                                    "research_variants",
-                                    {},
-                                ),
-                                race_features=work_result,
-                                snapshot_kind=snapshot_kind,
-                                collector_name=COLLECTOR_NAME,
-                            )
-                            st.success(
-                                "検証用予想を固定しました。"
-                                f" 固定時刻: {snap.get('saved_at', '-')}"
-                            )
-
-                            # 本番（当日・レース前）で予想を固定したら、
-                            # 同じレースをオッズ追跡対象へ自動登録する。
-                            # バックテストでは終了後オッズを追跡しても意味がないため登録しない。
-                            if snapshot_kind == "same_day" and odds_tracking_available():
-                                ok, msg = add_to_odds_watchlist(
-                                    d.strftime("%Y%m%d"),
-                                    jcd,
-                                    rno,
-                                )
-                                if ok:
-                                    st.success(
-                                        "📈 オッズ自動追跡も開始しました。"
-                                        " GitHub Actionsが数分おきに記録します。"
-                                    )
-                                    saved_now, save_msg = save_odds_snapshot_now(
-                                        d.strftime("%Y%m%d"), jcd, rno, odds
-                                    )
-                                    if saved_now:
-                                        st.success(f"⚡ {save_msg}")
-                                    else:
-                                        st.warning(
-                                            f"{save_msg} 定期追跡は開始済みなので、"
-                                            "次回のGitHub Actionsでも保存を試みます。"
-                                        )
-                                else:
-                                    # 予想固定自体は成功済みなので、追跡登録の失敗だけを警告する。
-                                    st.warning(
-                                        "予想の固定は成功しましたが、"
-                                        f"オッズ追跡の開始に失敗しました。 {msg}"
-                                    )
-
-                            st.rerun()
-                        except Exception as e:
-                            st.error("検証用予想の固定に失敗しました。")
-                            st.code(str(e))
 
                 merged = final.merge(before[["lane","p_first"]], on="lane", suffixes=("_after","_before"))
                 merged["変化"] = merged["p_first_after"] - merged["p_first_before"]
@@ -3620,7 +3745,7 @@ with tab1:
 
                     if snapshot_for_auto is None:
                         st.error(
-                            "⚠️ このレースは検証用予想が固定されていません。"
+                            "⚠️ このレースは予想が保存されていません。"
                             "レース終了後の再予想が混ざるのを防ぐため、自動保存は行いません。"
                         )
                     else:
@@ -3745,42 +3870,48 @@ with tab1:
                 if len({actual_1, actual_2, actual_3}) < 3:
                     st.warning("1着・2着・3着は別々の艇を選んでください。")
                 else:
-                    snapshot_for_result = load_prediction_snapshot(ctx)
+                    # 保存の有無は軽い状態確認だけで判定し、予想本体（約22KB）は
+                    # 保存ボタンを押した時だけ読み込む。
+                    _result_meta = _cached_snapshot_meta(ctx) or {}
 
-                    if snapshot_for_result is None:
+                    if not _result_meta.get("exists"):
                         st.error(
-                            "⚠️ このレースは検証用予想が固定されていません。"
+                            "⚠️ このレースは予想が保存されていません。"
                             "レース終了後の再予想が混ざるのを防ぐため、結果保存は行いません。"
                         )
                     elif st.button("💾 実結果を検証履歴へ保存", key=f"save_result_{ctx}"):
-                        rec = save_race_result(
-                            race_key=ctx,
-                            race_date=d.isoformat(),
-                            venue=VENUES[jcd],
-                            race_no=rno,
-                            final=final,
-                            tickets=tickets,
-                            first_actual=actual_1,
-                            second_actual=actual_2,
-                            third_actual=actual_3,
-                            payout=int(payout_input),
-                            research_variants=st.session_state["result"].get("research_variants", {}),
-                            prefer_snapshot=True,
-                            snapshot=snapshot_for_result,
-                            require_snapshot=True,
-                            collector_name=COLLECTOR_NAME,
-                        )
-                        hit_text = "的中" if rec["hit_any_ticket"] else "不的中"
-                        source_text = (
-                            "固定予想で判定"
-                            if rec.get("_used_snapshot")
-                            else "現在予想で判定"
-                        )
-                        st.success(
-                            f"保存しました：実結果 {rec['trifecta_actual']} / "
-                            f"購入買い目 {hit_text} / 収支 {rec['profit']:+,}円 / "
-                            f"{source_text}"
-                        )
+                        snapshot_for_result = load_prediction_snapshot(ctx)
+                        if snapshot_for_result is None:
+                            st.error("保存済みの予想を読み込めませんでした。もう一度お試しください。")
+                        else:
+                            rec = save_race_result(
+                                race_key=ctx,
+                                race_date=d.isoformat(),
+                                venue=VENUES[jcd],
+                                race_no=rno,
+                                final=final,
+                                tickets=tickets,
+                                first_actual=actual_1,
+                                second_actual=actual_2,
+                                third_actual=actual_3,
+                                payout=int(payout_input),
+                                research_variants=st.session_state["result"].get("research_variants", {}),
+                                prefer_snapshot=True,
+                                snapshot=snapshot_for_result,
+                                require_snapshot=True,
+                                collector_name=COLLECTOR_NAME,
+                            )
+                            hit_text = "的中" if rec["hit_any_ticket"] else "不的中"
+                            source_text = (
+                                "固定予想で判定"
+                                if rec.get("_used_snapshot")
+                                else "現在予想で判定"
+                            )
+                            st.success(
+                                f"保存しました：実結果 {rec['trifecta_actual']} / "
+                                f"購入買い目 {hit_text} / 収支 {rec['profit']:+,}円 / "
+                                f"{source_text}"
+                            )
 
                 st.warning("AI予想は確率推定であり、的中・利益を保証しません。オッズ変動、欠場・返還、展示と本番の進入差にも注意してください。")
 
