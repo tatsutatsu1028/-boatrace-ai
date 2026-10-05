@@ -1,0 +1,76 @@
+name: Hindcast
+
+# 全レースの事後予想（hindcast.py）。前日の全レースを今の本番の予想ロジックで
+# 予想し直し、結果と突き合わせて Supabase の hindcast_* テーブルへ保存する。
+#
+# 起動は Supabase の pg_cron から workflow_dispatch で行う
+# （supabase/migrations/20261006000100_trigger_hindcast_via_pg_cron.sql）。
+# 毎日 01:40 JST。00:32 JST の日次収集（Collect History、約15分）が
+# history_full.csv に前日分を足した後に動く。
+# 対象は 2026-08-18〜昨日のうち、この版の予想がまだ保存されていない日なので、
+# 初回は過去分をまとめて作り、止まった日や競走成績（K）が未公開だった日も
+# 次回以降に自動で埋まる。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "開始日 (YYYYMMDD)。空なら 20260818"
+        required: false
+        default: ""
+      end:
+        description: "終了日 (YYYYMMDD)。空なら昨日"
+        required: false
+        default: ""
+      redo:
+        description: "true なら保存済みの日も作り直す"
+        required: false
+        default: "false"
+
+concurrency:
+  group: hindcast
+  cancel-in-progress: false
+
+jobs:
+  hindcast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    # このリポジトリへは書き込まない（保存先は Supabase）
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 学習・過去データは非公開リポジトリにある。_data/ に取り出し、
+      # BOATRACE_DATA_DIR で各スクリプトへ渡す。
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas numpy scikit-learn joblib lhafile
+
+      # ログは誰でも見られるため、hindcast.py は日付・件数・所要時間だけを出す。
+      - name: Run hindcast
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+        run: |
+          ARGS="--max-minutes 300"
+          if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
+          if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
+          if [ "${{ inputs.redo }}" = "true" ]; then ARGS="$ARGS --redo"; fi
+          python hindcast.py $ARGS

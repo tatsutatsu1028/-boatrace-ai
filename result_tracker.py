@@ -156,6 +156,34 @@ def supabase_config():
     return _supabase_config()
 
 
+def supabase_service_config():
+    """
+    外から読めないようにしているテーブル（threads_config など）用の接続情報。
+
+    threads_config はスレッズのアクセストークンを持つため RLS で anon からの
+    読み書きを止めている。アプリからは Streamlit Secrets の service_key
+    （Supabase の Secret key、sb_secret_…）で読み書きする。Secrets はサーバー側に
+    しか無く、画面やブラウザには渡らない。
+
+    [supabase]
+    url = "https://xxxxx.supabase.co"
+    key = "..."            # 通常の読み書き（Publishable key）
+    service_key = "..."    # threads_config 用（Secret key）
+
+    未設定なら ("", "")。
+    """
+    try:
+        cfg = st.secrets.get("supabase", {})
+        url = str(cfg.get("url", "")).strip().rstrip("/")
+        key = str(cfg.get("service_key", "")).strip()
+        if url and key:
+            return url, key
+    except Exception:
+        pass
+
+    return "", ""
+
+
 def _supabase_config():
     """
     Streamlit Secrets に以下があれば Supabase を使用。

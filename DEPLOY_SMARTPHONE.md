@@ -7,6 +7,8 @@
 4. Advanced settings の Secrets に、既存の設定（`ADMIN_PIN`・`STAFF_<ID>_PIN`・`AUTH_COOKIE_SECRET`・
    `THREADS_APP_SECRET`・`[supabase]`）に加えて、学習データ取得用の
    `DATA_REPO_TOKEN`（データ用リポジトリの読み取り専用トークン）を入れる。
+   スレッズ連携を使う場合は、`[supabase]` に `service_key`（SupabaseのSecret key、`sb_secret_…`）も入れる。
+   スレッズのトークンを持つ `threads_config` は外から読めないようにしてあり、このキーでだけ読み書きできる。
 5. Deploy。
 6. 発行されたURLをスマホのSafari/Chromeで開く。
 7. 「ホーム画面に追加」。
