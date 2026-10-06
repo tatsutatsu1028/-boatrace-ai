@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
+from hit_calibration import CALIBRATED_RESULT_COLUMNS, snapshot_calibrated_fields
 from official_fetcher import fetch_race_result
 from today_schedule_fetcher import fetch_venue_deadlines
 
@@ -280,6 +281,8 @@ def _build_record(snapshot, official):
     # 固定時に表示した的中確率と資金配分方針。旧方式の固定予想には無いので空。
     hit_probability = _safe_float(payload.get("hit_probability"), None)
     stake_policy = str(payload.get("stake_policy") or "").strip() or None
+    # 画面に表示した補正後の的中確率と補正の id（補正前の固定予想には無い）。
+    calibrated_fields = snapshot_calibrated_fields(payload)
 
     lane_payload = []
     for row in final_rows:
@@ -318,6 +321,7 @@ def _build_record(snapshot, official):
         "predicted_first_hit": int(official["first"]) == p1_lane,
         "hit_probability": hit_probability,
         "stake_policy": stake_policy,
+        **calibrated_fields,
         "tickets_json": json.dumps(ticket_payload, ensure_ascii=False),
         "lane_probs_json": json.dumps({
             "final": lane_payload,
@@ -333,6 +337,8 @@ def _build_record(snapshot, official):
 def _upsert_result(record):
     url, _ = _cfg()
     body = {k: record.get(k) for k in RESULT_COLUMNS}
+    # 補正の列は値があるときだけ送る（マイグレーション前の DB でも保存できるように）。
+    body.update({k: record[k] for k in CALIBRATED_RESULT_COLUMNS if record.get(k) is not None})
     _request(
         "POST",
         f"{url}/rest/v1/prediction_results?on_conflict=race_key",

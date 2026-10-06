@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
+import hit_calibration
 from prediction import SECOND_FAVORITE_POLICY, second_favorite_n_for
 from stake_allocator import STAKE_POLICY_ALL_RACES, ticket_hit_probability
 
@@ -98,6 +99,10 @@ RESULT_COLUMNS = [
     # 2026-10 の全レース配分への切り替え前の行はどちらも空。
     "hit_probability",
     "stake_policy",
+    # 画面に表示した補正後の的中確率と、使った補正の id（hit_calibration）。
+    # hit_probability は補正前のまま残し、後で両方を実際の的中率と比べる。
+    "hit_probability_calibrated",
+    "hit_calibration_id",
     "tickets_json",
     "lane_probs_json",
 ]
@@ -108,6 +113,30 @@ RESULT_COLUMNS = [
 # 表示を選んだ時だけ、必要な列を追加取得する。
 DETAIL_ONLY_COLUMNS = ["tickets_json", "lane_probs_json"]
 LIST_COLUMNS = [c for c in RESULT_COLUMNS if c not in DETAIL_ONLY_COLUMNS]
+
+# 補正の列はマイグレーション前の DB には無い。読めなければ外して読み直す。
+_missing_optional_columns = set()
+
+
+def _readable_columns(columns):
+    return [c for c in columns if c not in _missing_optional_columns]
+
+
+def _get_result_rows(params, columns, timeout):
+    url, _ = _supabase_config()
+    r = requests.get(
+        f"{url}/rest/v1/{SUPABASE_TABLE}",
+        params={**params, "select": ",".join(_readable_columns(columns))},
+        headers=_headers(),
+        timeout=timeout,
+    )
+    optional = set(hit_calibration.CALIBRATED_RESULT_COLUMNS) & set(_readable_columns(columns))
+    if r.status_code == 400 and optional:
+        _missing_optional_columns.update(optional)
+        return _get_result_rows(params, columns, timeout)
+    r.raise_for_status()
+    return r.json() or []
+
 
 # PostgRESTは1リクエストあたり最大1,000行（max_rows）で打ち切るため、
 # 一覧はこの件数ずつ分割して取得する。
@@ -269,25 +298,18 @@ def _fetch_all_pages(columns, page_size=SUPABASE_PAGE_SIZE):
 
     ページ間で行が重複・欠落しないよう、一意な race_key を最後の並び順に含める。
     """
-    url, _ = _supabase_config()
-    endpoint = f"{url}/rest/v1/{SUPABASE_TABLE}"
-
     rows = []
     offset = 0
     while True:
-        r = requests.get(
-            endpoint,
-            params={
-                "select": ",".join(columns),
+        page = _get_result_rows(
+            {
                 "order": "race_date.desc,venue.asc,race_no.desc,race_key.asc",
                 "limit": str(page_size),
                 "offset": str(offset),
             },
-            headers=_headers(),
+            columns,
             timeout=30,
         )
-        r.raise_for_status()
-        page = r.json() or []
         rows.extend(page)
         # サーバー側のmax_rowsがpage_sizeより小さくても取りこぼさないよう、
         # 空ページが返るまで実際に受け取った件数だけ進める。
@@ -340,19 +362,11 @@ def _load_supabase_tickets_cached():
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_supabase_detail_cached(race_key):
-    url, _ = _supabase_config()
-    r = requests.get(
-        f"{url}/rest/v1/{SUPABASE_TABLE}",
-        params={
-            "select": ",".join(RESULT_COLUMNS),
-            "race_key": f"eq.{race_key}",
-            "limit": "1",
-        },
-        headers=_headers(),
+    data = _get_result_rows(
+        {"race_key": f"eq.{race_key}", "limit": "1"},
+        RESULT_COLUMNS,
         timeout=20,
     )
-    r.raise_for_status()
-    data = r.json() or []
     return dict(data[0]) if data else None
 
 
@@ -375,7 +389,12 @@ def _upsert_supabase(record):
     payload = {
         k: _json_safe(record.get(k))
         for k in RESULT_COLUMNS
+        if k not in hit_calibration.CALIBRATED_RESULT_COLUMNS
     }
+    # 補正の列は値があるときだけ送る（マイグレーション前の DB でも保存できるように）。
+    for k in hit_calibration.CALIBRATED_RESULT_COLUMNS:
+        if _json_safe(record.get(k)) is not None:
+            payload[k] = _json_safe(record.get(k))
 
     r = requests.post(
         endpoint,
@@ -485,9 +504,13 @@ def _snapshot_payload(final, tickets, research_variants=None, race_features=None
         "tickets": ticket_rows,
         "research": research_payload,
         "race_features": _snapshot_feature_rows(race_features),
-        # 画面に「この買い目の的中確率」として表示した値。結果確定後に
-        # 実際の的中率と比べるため、固定時点の値をそのまま残す。
+        # 「この買い目の的中確率」の補正前（3連単確率の合計）と、画面に表示した
+        # 補正後の値・使った補正の id。結果確定後に両方を実際の的中率と比べるため、
+        # 固定時点の値をそのまま残す。
         "hit_probability": ticket_hit_probability(tickets),
+        **hit_calibration.calibrated_hit_fields(
+            ticket_hit_probability(tickets), load_hit_calibration()
+        ),
         "stake_policy": STAKE_POLICY_ALL_RACES,
         # 2番手候補1着の買い目確保の方針と、このレースで使ったN。
         "second_favorite_policy": SECOND_FAVORITE_POLICY,
@@ -495,21 +518,39 @@ def _snapshot_payload(final, tickets, research_variants=None, race_features=None
     }
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_hit_calibration_cached():
+    url, key = _supabase_config()
+    return hit_calibration.fetch_latest(url, key)
+
+
+def load_hit_calibration():
+    """今の予想ロジックの版の最新の表示補正。無い・読めない場合は None（補正前のまま表示）。"""
+    try:
+        return _load_hit_calibration_cached()
+    except Exception as e:
+        print("[HIT_CAL] calibration load error:", type(e).__name__, str(e), flush=True)
+        return None
+
+
 def _snapshot_hit_fields(snapshot):
-    """固定予想に保存した的中確率と資金配分方針を取り出す（旧データは None）。"""
+    """固定予想に保存した的中確率（補正前）・資金配分方針・補正後の値を取り出す。
+
+    旧データは None / 空の dict。
+    """
     if not snapshot:
-        return None, None
+        return None, None, {}
     try:
         payload = json.loads(snapshot.get("payload_json") or "{}")
     except Exception:
-        return None, None
+        return None, None, {}
     if not isinstance(payload, dict):
-        return None, None
+        return None, None, {}
     hit_probability = _safe_float(payload.get("hit_probability"), np.nan)
     if not math.isfinite(hit_probability):
         hit_probability = None
     stake_policy = str(payload.get("stake_policy") or "").strip() or None
-    return hit_probability, stake_policy
+    return hit_probability, stake_policy, hit_calibration.snapshot_calibrated_fields(payload)
 
 
 def load_prediction_snapshot(race_key):
@@ -936,11 +977,14 @@ def save_race_result(
 
     if snapshot_used:
         # 固定時に表示した値を使う。旧方式の固定予想には無いので空のまま。
-        hit_probability, stake_policy = _snapshot_hit_fields(snapshot_used)
+        hit_probability, stake_policy, calibrated_fields = _snapshot_hit_fields(snapshot_used)
     else:
         # 固定予想を使わない保存は、いまのロジックで作った買い目そのもの。
         hit_probability = ticket_hit_probability(tickets)
         stake_policy = STAKE_POLICY_ALL_RACES
+        calibrated_fields = hit_calibration.calibrated_hit_fields(
+            hit_probability, load_hit_calibration()
+        )
 
     final = final.copy()
     tickets = tickets.copy()
@@ -1204,6 +1248,8 @@ def save_race_result(
         ),
         "hit_probability": hit_probability,
         "stake_policy": stake_policy,
+        "hit_probability_calibrated": calibrated_fields.get("hit_probability_calibrated"),
+        "hit_calibration_id": calibrated_fields.get("hit_calibration_id"),
         "tickets_json": json.dumps(
             ticket_payload,
             ensure_ascii=False,
@@ -1922,7 +1968,7 @@ def stake_period_comparison(df):
                 "レース数": m["races"],
                 "1着的中率": m["first_hit_rate"],
                 "買い目的中率": m["candidate_hit_rate"],
-                "表示した的中確率(平均)": (
+                "的中確率・補正前(平均)": (
                     float(hit_prob.mean()) if hit_prob.notna().any() else np.nan
                 ),
                 "投資": m["total_stake"],
@@ -1934,19 +1980,21 @@ def stake_period_comparison(df):
     return pd.DataFrame(rows)
 
 
-def hit_probability_calibration_table(df):
-    """表示した買い目全体の的中確率と、実際の的中率を帯ごとに比べる。
+def hit_probability_calibration_table(df, column="hit_probability"):
+    """買い目全体の的中確率と、実際の的中率を帯ごとに比べる。
 
+    column は hit_probability（補正前: 3連単確率の合計）か
+    hit_probability_calibrated（画面に表示した補正後の値）。
     的中は「固定した買い目のどれかが当たった」(candidate_hit)。全レースに
     資金を配分するようになったので、購入した買い目の的中と同じ意味になる。
-    hit_probability を保存していない旧データは対象外。
+    その値を保存していない旧データは対象外。
     """
-    columns = ["表示確率帯", "件数", "平均表示確率", "実際の的中率", "差"]
-    if df is None or len(df) == 0 or "hit_probability" not in df.columns:
+    columns = ["確率帯", "件数", "平均確率", "実際の的中率", "差"]
+    if df is None or len(df) == 0 or column not in df.columns:
         return pd.DataFrame(columns=columns)
 
     x = df.copy()
-    x["hit_probability"] = pd.to_numeric(x["hit_probability"], errors="coerce")
+    x["hit_probability"] = pd.to_numeric(x[column], errors="coerce")
     x = x.dropna(subset=["hit_probability"])
     if len(x) == 0:
         return pd.DataFrame(columns=columns)
@@ -1955,17 +2003,17 @@ def hit_probability_calibration_table(df):
         .astype(float)
     )
 
-    bins = [0, .2, .3, .4, .5, .6, 1.000001]
-    labels = ["20%未満", "20-30%", "30-40%", "40-50%", "50-60%", "60%以上"]
-    x["表示確率帯"] = pd.cut(
+    bins = [0, .2, .3, .4, .5, .6, .7, 1.000001]
+    labels = ["20%未満", "20-30%", "30-40%", "40-50%", "50-60%", "60-70%", "70%以上"]
+    x["確率帯"] = pd.cut(
         x["hit_probability"], bins=bins, labels=labels,
         include_lowest=True, right=False,
     )
     g = (
-        x.groupby("表示確率帯", observed=False)
+        x.groupby("確率帯", observed=False)
         .agg(
             件数=("hit", "size"),
-            平均表示確率=("hit_probability", "mean"),
+            平均確率=("hit_probability", "mean"),
             実際の的中率=("hit", "mean"),
         )
         .reset_index()
@@ -1973,17 +2021,17 @@ def hit_probability_calibration_table(df):
     total = pd.DataFrame(
         [
             {
-                "表示確率帯": "全体",
+                "確率帯": "全体",
                 "件数": int(len(x)),
-                "平均表示確率": float(x["hit_probability"].mean()),
+                "平均確率": float(x["hit_probability"].mean()),
                 "実際の的中率": float(x["hit"].mean()),
             }
         ]
     )
-    g["表示確率帯"] = g["表示確率帯"].astype(str)
+    g["確率帯"] = g["確率帯"].astype(str)
     g = pd.concat([g, total], ignore_index=True)
-    g["差"] = g["実際の的中率"] - g["平均表示確率"]
-    for c in ("平均表示確率", "実際の的中率", "差"):
+    g["差"] = g["実際の的中率"] - g["平均確率"]
+    for c in ("平均確率", "実際の的中率", "差"):
         g[c] = (pd.to_numeric(g[c], errors="coerce") * 100).round(1)
     return g[columns]
 

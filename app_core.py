@@ -26,6 +26,7 @@ from official_fetcher import (
 )
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants, second_favorite_n_for
+from hit_calibration import apply_calibration as apply_hit_calibration
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 from race_visuals import (
     ANIMATION_HEIGHT,
@@ -51,6 +52,7 @@ from result_tracker import (
     metrics as validation_metrics,
     calibration_table,
     hit_probability_calibration_table,
+    load_hit_calibration,
     STAKE_PERIODS,
     filter_by_stake_period,
     load_stake_policy_switched_at,
@@ -1799,7 +1801,7 @@ with tab4:
             else "切り替え後の検証データはまだありません。"
         )
         stake_compare = stake_period_comparison(results_df)
-        for _c in ("1着的中率", "買い目的中率", "表示した的中確率(平均)", "回収率"):
+        for _c in ("1着的中率", "買い目的中率", "的中確率・補正前(平均)", "回収率"):
             stake_compare[_c] = pd.to_numeric(stake_compare[_c], errors="coerce") * 100
         st.dataframe(
             stake_compare,
@@ -1808,7 +1810,7 @@ with tab4:
             column_config={
                 "1着的中率": st.column_config.NumberColumn(format="%.1f%%"),
                 "買い目的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                "表示した的中確率(平均)": st.column_config.NumberColumn(format="%.1f%%"),
+                "的中確率・補正前(平均)": st.column_config.NumberColumn(format="%.1f%%"),
                 "投資": st.column_config.NumberColumn(format="%d円"),
                 "払戻": st.column_config.NumberColumn(format="%d円"),
                 "収支": st.column_config.NumberColumn(format="%+d円"),
@@ -1888,24 +1890,36 @@ with tab4:
         st.dataframe(cal, use_container_width=True, hide_index=True)
 
         st.markdown("#### 🎯 表示した的中確率と実際の的中率")
-        hit_cal = hit_probability_calibration_table(results_df)
-        if hit_cal.empty:
-            st.info("的中確率を表示したレースの結果はまだありません（切り替え後のレースから集計します）。")
+        _hit_cal_config = {
+            "平均確率": st.column_config.NumberColumn(format="%.1f%%"),
+            "実際の的中率": st.column_config.NumberColumn(format="%.1f%%"),
+            "差": st.column_config.NumberColumn(format="%+.1fpt"),
+        }
+        st.markdown("##### 補正後（画面に表示した値）")
+        hit_cal_after = hit_probability_calibration_table(
+            results_df, column="hit_probability_calibrated"
+        )
+        if hit_cal_after.empty:
+            st.info("補正後の的中確率を表示したレースの結果はまだありません（補正を入れた後のレースから集計します）。")
         else:
             st.dataframe(
-                hit_cal,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "平均表示確率": st.column_config.NumberColumn(format="%.1f%%"),
-                    "実際の的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                    "差": st.column_config.NumberColumn(format="%+.1fpt"),
-                },
+                hit_cal_after, use_container_width=True, hide_index=True,
+                column_config=_hit_cal_config,
             )
-            st.caption(
-                "固定時に「この買い目の的中確率」として表示した値と、買い目のどれかが実際に当たった割合です。"
-                "差がプラスなら表示より当たっている（控えめな表示）、マイナスなら表示ほど当たっていません。"
+        st.markdown("##### 補正前（各買い目の3連単確率の合計）")
+        hit_cal = hit_probability_calibration_table(results_df)
+        if hit_cal.empty:
+            st.info("的中確率を保存したレースの結果はまだありません（切り替え後のレースから集計します）。")
+        else:
+            st.dataframe(
+                hit_cal, use_container_width=True, hide_index=True,
+                column_config=_hit_cal_config,
             )
+        st.caption(
+            "固定時の「この買い目の的中確率」と、買い目のどれかが実際に当たった割合です。"
+            "画面には、補正前の値（3連単確率の合計）を全レースの事後予想の実績で補正した値を表示しています。"
+            "差がプラスなら表示より当たっている、マイナスなら表示ほど当たっていません。"
+        )
 
         st.markdown("#### 🧪 仮想バックテスト")
         st.caption(
@@ -2007,7 +2021,8 @@ with tab4:
 
         show_cols = [
             "race_date","venue","race_no","trifecta_actual","p1_lane","p1_prob",
-            "hit_probability","candidate_count","candidate_hit","candidate_hit_rank",
+            "hit_probability_calibrated","hit_probability",
+            "candidate_count","candidate_hit","candidate_hit_rank",
             "total_stake","payout","profit","roi"
         ]
         show_cols = [c for c in show_cols if c in results_df.columns]
@@ -2020,7 +2035,8 @@ with tab4:
             "trifecta_actual":"実3連単",
             "p1_lane":"AI本命",
             "p1_prob":"本命確率",
-            "hit_probability":"表示的中確率",
+            "hit_probability_calibrated":"表示的中確率",
+            "hit_probability":"的中確率(補正前)",
             "candidate_count":"候補点数",
             "candidate_hit":"予想的中",
             "candidate_hit_rank":"的中順位",
@@ -2032,7 +2048,7 @@ with tab4:
 
         _preferred_show_cols = [
             "日付", "場", "R", "実3連単", "AI本命", "本命確率",
-            "表示的中確率", "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
+            "表示的中確率", "的中確率(補正前)", "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
         ]
         show = show[[c for c in _preferred_show_cols if c in show.columns]]
 
@@ -3238,15 +3254,29 @@ with tab1:
                 point_count = len(tickets)
                 plan_reason = ticket_plan.get("reason", "固定済みの買い目構成")
 
-                # 買い目全体の的中確率（各買い目の3連単確率の合計）を一番目立つ位置に出す。
-                # 同じ値を固定予想（prediction_snapshots）にも保存し、後で実際の的中率と比べる。
+                # 買い目全体の的中確率を一番目立つ位置に出す。各買い目の3連単確率の合計
+                # （補正前）は実際より低く出るため、全レースの事後予想の実績で作った補正
+                # （hit_calibration）で変換した値を表示する。補正が無いときは補正前のまま。
+                # 補正前・補正後の両方を固定予想（prediction_snapshots）にも保存し、
+                # 後で実際の的中率と比べる。買い目の選び方・資金配分には使わない。
                 hit_prob = ticket_hit_probability(tickets)
-                if hit_prob is not None:
+                _hit_cal = load_hit_calibration()
+                hit_prob_shown = apply_hit_calibration(hit_prob, _hit_cal)
+                if hit_prob_shown is not None:
+                    _hit_note = (
+                        f"各買い目の3連単確率の合計（{hit_prob*100:.0f}%）を、"
+                        f"過去{int(_hit_cal.get('sample_count') or 0):,}レースの事後予想の"
+                        "実際の的中率に合わせて補正した値です。"
+                    )
+                else:
+                    hit_prob_shown = hit_prob
+                    _hit_note = "各買い目の3連単確率の合計です。"
+                if hit_prob_shown is not None:
                     st.markdown(
                         f"""<div style="border:2px solid #2563eb;border-radius:12px;padding:14px 16px;margin:4px 0 12px 0;background:rgba(37,99,235,0.08);">
     <div style="font-size:15px;">🎯 この買い目の的中確率（{point_count}点）</div>
-    <div style="font-size:34px;font-weight:700;line-height:1.3;">約{hit_prob*100:.0f}%</div>
-    <div style="font-size:12px;opacity:0.75;">各買い目の3連単確率の合計です。</div>
+    <div style="font-size:34px;font-weight:700;line-height:1.3;">約{hit_prob_shown*100:.0f}%</div>
+    <div style="font-size:12px;opacity:0.75;">{_hit_note}</div>
     </div>""",
                         unsafe_allow_html=True,
                     )
