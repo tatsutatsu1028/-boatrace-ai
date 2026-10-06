@@ -26,6 +26,16 @@
   収集したデータもデータ用リポジトリへコミットします
 - 手元: データ用リポジトリのファイルをこのフォルダ直下に置くか、`BOATRACE_DATA_DIR` にその場所を指定します
 
+## 全レースの事後予想（hindcast）
+毎晩 01:40 JST（pg_cron → `hindcast.yml`）に、前日の全レースを今の本番の予想ロジックで予想し直し、
+結果と突き合わせて Supabase に保存します（`hindcast.py`）。そのレースの時点で分かっていた情報だけを使います。
+
+- `hindcast_predictions` … 1レース1行（1着確率・本命・買い目候補・実際の3連単・本命的中・候補内的中・モデルの版）
+- `hindcast_inputs` … 1艇1行（予想に使った入力。結果の列は入れない）
+- `hindcast_runs` … 1日1行（設定・学習データの範囲）
+
+対象は 2026-08-18（1着モデルの学習データ `sample_history.csv` の翌日）以降の未保存の日です。
+
 ## PCで起動
 ```bash
 pip install -r requirements.txt

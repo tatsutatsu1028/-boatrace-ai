@@ -69,6 +69,7 @@ from result_tracker import (
     save_latest_prediction_snapshot,
     restore_snapshot_frames,
     supabase_config,
+    supabase_service_config,
     fetch_daily_schedule_supabase,
 )
 # スレッズ投稿は任意機能。threads_poster.py を置いていない場合でも
@@ -1412,7 +1413,9 @@ with tab3:
         st.divider()
         st.subheader("🧵 スレッズ連携")
 
-        _sb_url, _sb_key = supabase_config()
+        # トークンを持つ threads_config は外から読めないようにしているため、
+        # Secrets の service_key（Secret key）で読み書きする。
+        _sb_url, _sb_key = supabase_service_config()
 
         if not THREADS_AVAILABLE:
             st.info(
@@ -1421,8 +1424,9 @@ with tab3:
             )
         elif not _sb_url or not _sb_key:
             st.info(
-                "スレッズ投稿はSupabaseの設定が必要です。"
-                "トークンを安全に保存し、自動更新するために使います。"
+                "スレッズ投稿には、Streamlit Secrets の [supabase] に service_key"
+                "（SupabaseのSecret key、sb_secret_…）の設定が必要です。"
+                "トークンを外から読めない場所に保存し、自動更新するために使います。"
             )
         else:
             _threads_cfg = threads_load_config(_sb_url, _sb_key)
@@ -3473,7 +3477,7 @@ with tab1:
                 # スレッズ投稿
                 # -------------------------------------------------
                 # 投稿できるのはオーナーだけ。収集スタッフの画面には出さない。
-                _sb_url, _sb_key = supabase_config()
+                _sb_url, _sb_key = supabase_service_config()
                 _threads_cfg = (
                     threads_load_config(_sb_url, _sb_key)
                     if (IS_ADMIN and THREADS_AVAILABLE and _sb_url and _sb_key)

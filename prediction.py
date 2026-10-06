@@ -228,7 +228,20 @@ def _pipeline(num_cols=None, cat_cols=None):
     return Pipeline([("prep", prep), ("clf", clf)])
 
 
-def train(history):
+def _before_as_of(df, as_of):
+    """as_of（YYYYMMDD）より前の日付のレースだけに絞る。as_of=Noneなら何もしない。"""
+    if as_of is None or "race_key" not in df.columns:
+        return df
+    return df[df["race_key"].astype(str).str[:8] < str(as_of)]
+
+
+def train(history, as_of=None):
+    """
+    as_of（YYYYMMDD）を渡すと、history_full.csv から読む2着・3着モデルと
+    決まり手プロファイルの学習データをその日より前のレースに限る。
+    事後予想（hindcast.py）で、その日の時点で分かっていた結果だけで
+    学習するために使う。既定のNoneなら従来どおり全件を使う。
+    """
     need = set(BASE_NUM + BASE_CAT + ["finish"])
     missing = need - set(history.columns)
 
@@ -260,7 +273,9 @@ def train(history):
                     BASE_NUM + BASE_CAT + ["finish", "race_key"]
                 )
             )
-            real_history = pd.read_csv(hist_path, usecols=usecols)
+            real_history = _before_as_of(
+                pd.read_csv(hist_path, usecols=usecols), as_of
+            )
             if len(real_history) >= 100:
                 position_history = real_history
     except Exception:
@@ -409,9 +424,11 @@ def train(history):
         try:
             hist_path = data_path("history_full.csv")
             if hist_path.exists():
-                kh = pd.read_csv(
-                    hist_path,
-                    usecols=["racer_id", "lane", "finish", "kimarite"],
+                kh_cols = ["racer_id", "lane", "finish", "kimarite"]
+                if as_of is not None:
+                    kh_cols.append("race_key")
+                kh = _before_as_of(
+                    pd.read_csv(hist_path, usecols=kh_cols), as_of
                 )
                 kimarite_stats = _build_course_kimarite_stats(kh)
         except Exception:
