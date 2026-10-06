@@ -10,6 +10,9 @@ name: Hindcast
 # 対象は 2026-08-18〜昨日のうち、この版の予想がまだ保存されていない日なので、
 # 初回は過去分をまとめて作り、止まった日や競走成績（K）が未公開だった日も
 # 次回以降に自動で埋まる。
+#
+# 最後に「この買い目の的中確率」の表示補正（hit_calibration.py）を、
+# 今の版の補正が無いか、前回から7日たっていれば作り直す（週1回）。
 
 on:
   workflow_dispatch:
@@ -24,6 +27,10 @@ on:
         default: ""
       redo:
         description: "true なら保存済みの日も作り直す"
+        required: false
+        default: "false"
+      recalibrate:
+        description: "true なら的中確率の表示補正を前回から日が浅くても作り直す"
         required: false
         default: "false"
 
@@ -74,3 +81,14 @@ jobs:
           if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
           if [ "${{ inputs.redo }}" = "true" ]; then ARGS="$ARGS --redo"; fi
           python hindcast.py $ARGS
+
+      # 事後予想が途中で止まっても、保存済みの分で補正は作れるので続けて動かす。
+      - name: Rebuild hit probability calibration (weekly)
+        if: ${{ !cancelled() }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.recalibrate }}" = "true" ]; then ARGS="--force"; fi
+          python hit_calibration.py $ARGS

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
+from hit_calibration import snapshot_calibrated_fields
 from official_fetcher import VENUES, fetch_race_result
 from odds_rollup import rollup_and_prune, DEFAULT_RETENTION_DAYS
 # スレッズ投稿は任意機能。threads_poster.py を置いていない場合でも
@@ -400,6 +401,9 @@ def _build_result_record(
     # 全レース配分へ切り替える前の固定予想には無いので空のまま。
     hit_probability = _safe_float(payload.get("hit_probability"), None)
     stake_policy = str(payload.get("stake_policy") or "").strip() or None
+    # 画面に表示した補正後の的中確率と補正の id。値があるときだけ行に足す
+    # （補正前の固定予想には無く、マイグレーション前の DB には列も無いため）。
+    calibrated_fields = snapshot_calibrated_fields(payload)
 
     ticket_keep = (
         "combo",
@@ -475,6 +479,7 @@ def _build_result_record(
         "predicted_first_hit": bool(predicted_first_hit),
         "hit_probability": hit_probability,
         "stake_policy": stake_policy,
+        **calibrated_fields,
         "tickets_json": json.dumps(
             ticket_payload,
             ensure_ascii=False,

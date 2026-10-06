@@ -29,6 +29,7 @@ from prediction import (
     second_favorite_n_for,
     SECOND_FAVORITE_POLICY,
 )
+from hit_calibration import calibrated_hit_fields, latest_from_env
 from stake_allocator import (
     STAKE_POLICY_ALL_RACES,
     allocate_stakes_smart,
@@ -287,8 +288,10 @@ def _snapshot_payload(
         "tickets": ticket_rows,
         "research": research_payload,
         "race_features": [],
-        # 手動固定と同じく、買い目全体の的中確率と資金配分方針を残す。
+        # 手動固定と同じく、買い目全体の的中確率（補正前）と、表示する補正後の値・
+        # 使った補正の id、資金配分方針を残す。
         "hit_probability": ticket_hit_probability(tickets),
+        **calibrated_hit_fields(ticket_hit_probability(tickets), latest_from_env()),
         "stake_policy": STAKE_POLICY_ALL_RACES,
         # 2番手候補1着の買い目確保の方針と、このレースで使ったN。
         "second_favorite_policy": SECOND_FAVORITE_POLICY,

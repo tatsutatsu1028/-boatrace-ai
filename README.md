@@ -36,6 +36,20 @@
 
 対象は 2026-08-18（1着モデルの学習データ `sample_history.csv` の翌日）以降の未保存の日です。
 
+## 的中確率の表示補正
+予想画面の「この買い目の的中確率」は、各買い目の3連単確率の合計（補正前）をそのまま出すと
+実際の的中率より低く出ます（事後予想 7,701レースで表示の平均26%に対し実際45%）。順番は
+合っているので、事後予想の「補正前の値 → 候補内的中」から等張回帰（単調な変換）を作り、
+表示する数字だけを実際の的中率に合わせています（`hit_calibration.py`）。買い目の選び方・資金配分は変えません。
+
+- 作り直し: `hindcast.yml` の最後に動き、今の予想ロジックの版の補正が無いか、前回から7日たっていれば
+  作り直します（週1回）。手動で作り直すときは `recalibrate: true` で起動します
+- `hit_probability_calibrations` … 補正1回1行（変換表・帯ごとの当てはまり・時系列の検証・前回の補正の確認）
+- 補正前と補正後の両方を保存: 固定予想と `prediction_results` は `hit_probability`（補正前）と
+  `hit_probability_calibrated`（表示した補正後）・`hit_calibration_id`、事後予想は
+  `candidate_hit_probability` と `candidate_hit_probability_calibrated`（その日より前のデータで作った補正）
+- 検証画面の「表示した的中確率と実際の的中率」で、補正後・補正前それぞれを実際の的中率と比べられます
+
 ## PCで起動
 ```bash
 pip install -r requirements.txt

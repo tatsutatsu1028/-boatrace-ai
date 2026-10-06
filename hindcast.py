@@ -50,8 +50,6 @@ import history_store as store
 from data_paths import data_path
 from official_fetcher import VENUES
 from prediction import (
-    MODEL_VERSION,
-    SECOND_FAVORITE_POLICY,
     adaptive_ticket_plan,
     assess_favorite_risk,
     confidence,
@@ -61,13 +59,14 @@ from prediction import (
     train,
     trifecta,
 )
+from hit_calibration import apply_calibration, latest_from_env, prediction_version
 from stake_allocator import ticket_hit_probability
 
 JST = ZoneInfo("Asia/Tokyo")
 
 DEFAULT_START = "20260818"
 # 予想ロジックの版。1着〜3着モデル・買い目方針のどれかが変わればこの文字列も変わる。
-HINDCAST_MODEL_VERSION = f"{MODEL_VERSION}+{SECOND_FAVORITE_POLICY}"
+HINDCAST_MODEL_VERSION = prediction_version()
 INPUT_VERSION = "hindcast-inputs-v1"
 
 PREDICTION_TABLE = "hindcast_predictions"
@@ -374,8 +373,12 @@ def _as_int(v):
         return None
 
 
-def run_day(day, history_full, sample_history, k, runtime, code_sha):
-    """1日分の (予想行, 入力行) を返す。"""
+def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration=None):
+    """1日分の (予想行, 入力行) を返す。
+
+    calibration は的中確率の表示補正（hit_calibration）。その日より前のデータだけで
+    作った補正のときに限り、補正後の値を残す（後で補正後の値の当てはまりを確かめるため）。
+    """
     day = pd.Timestamp(day)
     d = _ymd(day)
     hf_day = history_full[history_full["race_date"] == d]
@@ -400,6 +403,12 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha):
         for jcd, g in k[(k["d"] <= day) & (k["d"] >= day - pd.Timedelta(days=14))].groupby("jcd")
     }
     baseline = course_baseline(hf_before)
+
+    # 補正の列はマイグレーション後にしか無いため、補正が読めたときだけ送る。
+    # その日を含むデータで作った補正なら使わず空にする（作り直しで古い値が残らないように）。
+    send_calibration = calibration is not None
+    if calibration and str(calibration.get("data_end") or "").replace("-", "") >= d:
+        calibration = None
 
     pred_rows, input_rows = [], []
     for race_key, rows in hf_day.groupby("race_key", sort=True):
@@ -427,6 +436,7 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha):
         hit_rank = combos.index(trifecta_actual) + 1 if settled and trifecta_actual in combos else None
         exhibition_count = int(_num(race["exhibition_time"]).between(6.0, 8.5).sum())
 
+        raw_hit_prob = _clean(ticket_hit_probability(tickets))
         pred_rows.append({
             "race_key": race_key,
             "model_version": HINDCAST_MODEL_VERSION,
@@ -443,7 +453,7 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha):
                 for t in tickets.itertuples()
             ],
             "candidate_count": len(combos),
-            "candidate_hit_probability": _clean(ticket_hit_probability(tickets)),
+            "candidate_hit_probability": raw_hit_prob,
             "favorite_risk_score": int(risk),
             "exhibition_count": exhibition_count,
             "trifecta_actual": trifecta_actual or None,
@@ -453,6 +463,10 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha):
             "candidate_hit": (hit_rank is not None) if settled else None,
             "candidate_hit_rank": hit_rank,
         })
+        if send_calibration:
+            calibrated = apply_calibration(raw_hit_prob, calibration)
+            pred_rows[-1]["candidate_hit_probability_calibrated"] = _clean(calibrated)
+            pred_rows[-1]["hit_calibration_id"] = calibration.get("id") if calibrated is not None else None
         for rec in race.to_dict("records"):
             input_rows.append({
                 "race_key": race_key,
@@ -568,6 +582,8 @@ def main():
     k, k_missing = load_k_results(days[0], days[-1], download_missing=not args.dry_run) if days else (None, set())
     runtime = _runtime() if not args.dry_run else _load_runtime_default()
     code_sha = _code_sha()
+    calibration = latest_from_env() if not args.dry_run else None
+    print(f"[HINDCAST] 補正 id={calibration['id'] if calibration else 'なし'}", flush=True)
     print(f"[HINDCAST] 版 {HINDCAST_MODEL_VERSION} / 対象 {len(days)}日 / code {code_sha}", flush=True)
 
     out_dir = Path(args.dry_run) if args.dry_run else None
@@ -585,7 +601,9 @@ def main():
             print(f"[HINDCAST] {d}: 競走成績（K）が未取得の日があるため次回に回す "
                   f"{sorted(window & k_missing)}", flush=True)
             continue
-        preds, inputs, run_row = run_day(d, history_full, sample_history, k, runtime, code_sha)
+        preds, inputs, run_row = run_day(
+            d, history_full, sample_history, k, runtime, code_sha, calibration,
+        )
         if not preds:
             continue
         if out_dir:
