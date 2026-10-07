@@ -1,0 +1,79 @@
+name: ML Model
+
+# 新しい予想モデル（ml_model.py）の定期処理（ml_nightly.py）。
+#   task=state: 前日までの集計表 models/ml_state.pkl.gz を作り直す（毎晩。数十秒）
+#   task=train: 2年分で学習し直し models/<版>.joblib と models/latest.json を書く（毎週。数分）
+# どちらも保存先は非公開のデータ用リポジトリ（models/）。成果物（artifact）には残さない。
+#
+# 本番の予想を新しいモデルに切り替えるまでは、手動（workflow_dispatch）でだけ動かす。
+# 切り替えると決めたら、pg_cron から state を毎晩（History Backfill の後、朝の開催前）、
+# train を週1回起動する（提案: state 毎日 08:05 JST、train 月曜 08:10 JST）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "state（集計表）/ train（学習し直し）"
+        required: true
+        default: "state"
+      as_of:
+        description: "基準日 (YYYYMMDD)。空なら今日（JST）"
+        required: false
+        default: ""
+
+concurrency:
+  group: ml-model
+  cancel-in-progress: false
+
+jobs:
+  ml:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # このリポジトリへは書き込まない（保存先は _data/ の非公開リポジトリ）
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas numpy scikit-learn scipy joblib lhafile lightgbm
+
+      # ログは誰でも見られるため、ml_nightly.py は日付・件数・所要時間・合否だけを出す。
+      - name: Run
+        env:
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+        run: |
+          ARGS="${{ inputs.task }}"
+          if [ -n "${{ inputs.as_of }}" ]; then ARGS="$ARGS --as-of ${{ inputs.as_of }}"; fi
+          python ml_nightly.py $ARGS
+
+      - name: Commit to data repository
+        working-directory: _data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add models
+          git diff --staged --quiet && { echo "変更なし"; exit 0; }
+          git commit -q -m "ml model: ${{ inputs.task }}"
+          for i in 1 2 3 4 5; do
+            if git pull -q --rebase && git push -q; then echo "push完了"; exit 0; fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((i * 10))
+          done
+          echo "pushに失敗"; exit 1

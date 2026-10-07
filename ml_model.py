@@ -60,6 +60,89 @@ def _hgb(seed=42):
     )
 
 
+# ---------------------------------------------------------------
+# レース単位の多項ロジット（LightGBM の自作の目的関数）
+# ---------------------------------------------------------------
+# 「6艇のうちどの艇が1着か」をレースの中の割合（softmax）として直接学習する。
+# 1艇ずつ「勝つ/勝たない」で学習してから後で割合にするより、確率の当てはまりが良い。
+LGB_PARAMS = {
+    "learning_rate": 0.04, "num_leaves": 63, "min_data_in_leaf": 200, "feature_fraction": 0.8,
+    "bagging_fraction": 0.8, "bagging_freq": 1, "lambda_l2": 2.0, "max_bin": 255,
+    "verbosity": -1, "seed": 42,
+}
+
+
+def _group_layout(groups):
+    """groups（並び替え済みで同じ値が連続）の各グループの先頭位置と大きさ。"""
+    g = np.asarray(groups)
+    change = np.r_[True, g[1:] != g[:-1]]
+    starts = np.flatnonzero(change)
+    sizes = np.diff(np.r_[starts, len(g)])
+    return starts, sizes
+
+
+def _softmax_layout(s, starts, sizes):
+    m = np.repeat(np.maximum.reduceat(s, starts), sizes)
+    e = np.exp(s - m)
+    return e / np.repeat(np.add.reduceat(e, starts), sizes)
+
+
+def _softmax_objective(starts, sizes):
+    def obj(preds, ds):
+        y = ds.get_label()
+        p = _softmax_layout(preds, starts, sizes)
+        return p - y, np.maximum(p * (1.0 - p), 1e-6)
+    return obj
+
+
+def _softmax_eval(starts, sizes):
+    def ev(preds, ds):
+        y = ds.get_label().astype(bool)
+        p = _softmax_layout(preds, starts, sizes)
+        return "group_logloss", float(-np.log(np.clip(p[y], 1e-12, None)).mean()), False
+    return ev
+
+
+class _LGBSoftmax:
+    """predict_raw でレース内の割合にする前の値（スコア）を返すだけの小さな包み。"""
+
+    def __init__(self, booster):
+        self.booster = booster
+        self.n_iter_ = booster.best_iteration or booster.current_iteration()
+
+    def predict_raw(self, x):
+        return self.booster.predict(x, num_iteration=self.n_iter_, raw_score=True)
+
+
+def _fit_lgb_softmax(x, y, groups, dates, threads=None, log=print):
+    """groups ごとに正解がちょうど1つの行だけで学習する。直近8%の日付で打ち切りを決める。"""
+    import lightgbm as lgb
+    import os
+
+    df = pd.DataFrame({"g": np.asarray(groups), "y": np.asarray(y), "d": np.asarray(dates)})
+    pos = df.groupby("g")["y"].transform("sum")
+    keep = (pos == 1).to_numpy()
+    x, df = x[keep], df[keep]
+    order = np.lexsort((df["g"].to_numpy(), df["d"].to_numpy()))
+    x, df = x.iloc[order], df.iloc[order]
+    cut = np.quantile(pd.to_numeric(df["d"]).to_numpy(), 0.92)
+    va = (pd.to_numeric(df["d"]).to_numpy() > cut)
+    tr = ~va
+    st_tr, sz_tr = _group_layout(df["g"].to_numpy()[tr])
+    st_va, sz_va = _group_layout(df["g"].to_numpy()[va])
+    params = dict(LGB_PARAMS, objective=_softmax_objective(st_tr, sz_tr),
+                  num_threads=int(threads or os.environ.get("OMP_NUM_THREADS") or 0))
+    dtr = lgb.Dataset(x[tr], df["y"].to_numpy()[tr], free_raw_data=False)
+    dva = lgb.Dataset(x[va], df["y"].to_numpy()[va], reference=dtr, free_raw_data=False)
+    ev_va = _softmax_eval(st_va, sz_va)
+    booster = lgb.train(
+        params, dtr, num_boost_round=3000, valid_sets=[dva], valid_names=["va"],
+        feval=lambda p, d: ev_va(p, d),
+        callbacks=[lgb.early_stopping(80, verbose=False)],
+    )
+    return _LGBSoftmax(booster)
+
+
 def _prep(x, cols):
     x = x[cols].copy()
     for c in cols:
@@ -146,10 +229,20 @@ def _fit_temperature(z, groups, y):
 # ---------------------------------------------------------------
 # 学習
 # ---------------------------------------------------------------
+def _stage_groups(x, stage):
+    g = x["race_key"].astype(str)
+    if stage >= 2:
+        g = g + "_" + x["w_lane"].astype(int).astype(str)
+    if stage >= 3:
+        g = g + "_" + x["s_lane"].astype(int).astype(str)
+    return g.to_numpy()
+
+
 class ChainModel:
-    def __init__(self, features, version):
+    def __init__(self, features, version, engine="lgb"):
         self.features = list(features)
         self.version = version
+        self.engine = engine
         self.models = {}
         self.temps = {1: 1.0, 2: 1.0, 3: 1.0}
         self.info = {}
@@ -164,8 +257,11 @@ class ChainModel:
             cols = stage_cols(self.features, stage)
             x = rows[stage]
             y = (x["finish"] == stage).astype(int)
-            m = _hgb(seed)
-            m.fit(_prep(x, cols), y)
+            if self.engine == "lgb":
+                m = _fit_lgb_softmax(_prep(x, cols), y, _stage_groups(x, stage), x["race_date"], log=log)
+            else:
+                m = _hgb(seed)
+                m.fit(_prep(x, cols), y)
             self.models[stage] = m
             self.info[f"stage{stage}_rows"] = int(len(x))
             self.info[f"stage{stage}_iter"] = int(m.n_iter_)
@@ -190,10 +286,22 @@ class ChainModel:
 
     def _z(self, x, stage):
         cols = stage_cols(self.features, stage)
-        return _logit(self.models[stage].predict_proba(_prep(x, cols))[:, 1])
+        m = self.models[stage]
+        if hasattr(m, "predict_raw"):
+            return m.predict_raw(_prep(x, cols))
+        return _logit(m.predict_proba(_prep(x, cols))[:, 1])
 
     # 予想 -------------------------------------------------------
-    def predict_tables(self, f):
+    def predict_tables(self, f, chunk_races=1500):
+        """小分けにして _predict_tables を呼ぶ（3着の行はレース数×約120行になるため）。"""
+        races = pd.unique(f["race_key"])
+        if len(races) <= chunk_races:
+            return self._predict_tables(f)
+        parts = [self._predict_tables(f[f["race_key"].isin(races[i:i + chunk_races])])
+                 for i in range(0, len(races), chunk_races)]
+        return tuple(pd.concat([p[j] for p in parts], ignore_index=True) for j in range(3))
+
+    def _predict_tables(self, f):
         """
         レースごとの確率表を返す。
           first:  race_key, lane, p_first
@@ -247,10 +355,9 @@ class ChainModel:
         rk = x["race_key"].to_numpy()
         y = (x["finish"] == stage).to_numpy()
         cols = stage_cols(self.features, stage)
-        m = self.models[stage]
 
         def score(xx):
-            p = _group_softmax(_logit(m.predict_proba(_prep(xx, cols))[:, 1]), rk, self.temps[stage])
+            p = _group_softmax(self._z(xx, stage), rk, self.temps[stage])
             return -np.log(np.clip(p[y], 1e-12, None)).mean()
 
         base = score(x)
@@ -271,7 +378,8 @@ class ChainModel:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"format": MODEL_FORMAT, "version": self.version, "features": self.features,
-                     "models": self.models, "temps": self.temps, "info": self.info}, path, compress=3)
+                     "models": self.models, "temps": self.temps, "info": self.info,
+                     "engine": self.engine}, path, compress=3)
         meta = {"version": self.version, "temps": self.temps, "info": self.info,
                 "features": self.features}
         path.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
@@ -282,7 +390,7 @@ class ChainModel:
         import joblib
 
         d = joblib.load(path)
-        m = cls(d["features"], d["version"])
+        m = cls(d["features"], d["version"], d.get("engine", "hgb"))
         m.models, m.temps, m.info = d["models"], d["temps"], d["info"]
         return m
 

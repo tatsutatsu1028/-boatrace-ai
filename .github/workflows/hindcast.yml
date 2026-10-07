@@ -33,6 +33,10 @@ on:
         description: "true なら的中確率の表示補正を前回から日が浅くても作り直す"
         required: false
         default: "false"
+      model:
+        description: "current（今のモデル）/ ml（新しい予想モデル。その日より前に学習した最新の版）/ 新モデルの版名"
+        required: false
+        default: "current"
 
 concurrency:
   group: hindcast
@@ -67,7 +71,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml pandas numpy scikit-learn joblib lhafile
+        run: pip install requests beautifulsoup4 lxml pandas numpy scikit-learn joblib lhafile lightgbm scipy
 
       # ログは誰でも見られるため、hindcast.py は日付・件数・所要時間だけを出す。
       - name: Run hindcast
@@ -80,11 +84,12 @@ jobs:
           if [ -n "${{ inputs.start }}" ]; then ARGS="$ARGS --start ${{ inputs.start }}"; fi
           if [ -n "${{ inputs.end }}" ]; then ARGS="$ARGS --end ${{ inputs.end }}"; fi
           if [ "${{ inputs.redo }}" = "true" ]; then ARGS="$ARGS --redo"; fi
+          if [ -n "${{ inputs.model }}" ]; then ARGS="$ARGS --model ${{ inputs.model }}"; fi
           python hindcast.py $ARGS
 
       # 事後予想が途中で止まっても、保存済みの分で補正は作れるので続けて動かす。
       - name: Rebuild hit probability calibration (weekly)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (inputs.model == '' || inputs.model == 'current') }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

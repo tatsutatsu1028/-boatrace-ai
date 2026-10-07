@@ -11,3 +11,5 @@ pypdf
 pytesseract
 Pillow
 extra-streamlit-components
+lightgbm>=4.0
+scipy

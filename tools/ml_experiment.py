@@ -212,6 +212,8 @@ def main():
     ap.add_argument("--old", default="", help="tools/ml_compare_old.py の出力フォルダ")
     ap.add_argument("--variants", default="1y,2y")
     ap.add_argument("--importance", action="store_true")
+    ap.add_argument("--engine", default="lgb", choices=["lgb", "hgb"])
+    ap.add_argument("--reuse", action="store_true", help="保存済みのモデルがあれば学習し直さない")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -236,10 +238,14 @@ def main():
 
     for variant in args.variants.split(","):
         train, calib, test = split(f, variant)
-        version = f"{mm.MODEL_FAMILY}-v1-{variant}"
-        model = mm.ChainModel(mf.FEATURES, version)
-        model.fit(train, calib, log=log)
-        model.save(out / "models" / f"{version}.joblib")
+        version = f"{mm.MODEL_FAMILY}-v1-{args.engine}-{variant}"
+        mpath = out / "models" / f"{version}.joblib"
+        if args.reuse and mpath.exists():
+            model = mm.ChainModel.load(mpath)
+        else:
+            model = mm.ChainModel(mf.FEATURES, version, engine=args.engine)
+            model.fit(train, calib, log=log)
+            model.save(mpath)
 
         fm, firsts = first_metrics(model.predict_tables(test)[0], test)
         info = dict(model.info, temps=model.temps, **fm)

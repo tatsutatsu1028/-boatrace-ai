@@ -176,25 +176,97 @@ def _rates(prefix, sums, cols, min_n=1):
     return out
 
 
-def history_features(base, e):
+def build_state(e, keep_days=None):
+    """
+    過去の結果の集計表（累積）。history_features はこれだけを見て計算する。
+    学習では全期間の e から作り、本番では毎晩「昨日まで」の e から作って保存しておけば、
+    アプリは過去データ全体を読まずに同じ値を出せる（keep_days で古い日付を落として小さくする）。
+    """
+    cols = ["one", "win", "top2", "top3", "fin6"]
+    e2 = e.assign(st_n=e["st_ok"].notna().astype(float), st_sum=e["st_ok"].fillna(0.0),
+                  st_sq=e["st_ok"].fillna(0.0) ** 2, late=e["st_late"].fillna(0.0),
+                  shift_n=e["course_shift"].notna().astype(float),
+                  shift_sum=e["course_shift"].fillna(0.0))
+    ec = e[e["course"].between(1, 6)].assign(ckey=lambda x: x["course"].astype(int).astype(str))
+    ec = ec.assign(st_n=ec["st_ok"].notna().astype(float), st_sum=ec["st_ok"].fillna(0.0))
+    em = e.assign(mkey=e["jcd"].astype(str) + "_" + _num(e["motor_no"]).astype("Int64").astype(str))
+    state = {
+        "racer": _cum_by_day(e, ["racer_id"], cols),
+        "start": _cum_by_day(e2, ["racer_id"], ["st_n", "st_sum", "st_sq", "late", "shift_n", "shift_sum"]),
+        "f": _cum_by_day(e, ["racer_id"], ["is_f"]),
+        "course": _cum_by_day(ec, ["racer_id", "ckey"], ["one", "win", "top2", "top3", "st_n", "st_sum"]),
+        "venue": _cum_by_day(e, ["racer_id", "jcd"], cols),
+        "motor": _cum_by_day(em, ["mkey"], cols),
+    }
+    seq = e.sort_values(["racer_id", "d", "race_no"])[["racer_id", "d", "fin6"]].copy()
+    g = seq.groupby("racer_id", sort=False)["fin6"]
+    seq["last5_fin"] = g.transform(lambda x: x.rolling(5, min_periods=3).mean())
+    seq["last10_fin"] = g.transform(lambda x: x.rolling(10, min_periods=5).mean())
+    state["last"] = seq.groupby(["racer_id", "d"], sort=False)[["last5_fin", "last10_fin"]].last().reset_index()
+    if keep_days:
+        state = trim_state(state, e["d"].max() + pd.Timedelta(days=1), keep_days)
+    return state
+
+
+def trim_state(state, as_of, keep_days):
+    """as_of の予想に要る分だけ残す（累積は「窓の始まりより前の最後の行」と「それ以降」）。"""
+    lo = pd.Timestamp(as_of) - pd.Timedelta(days=keep_days)
+    out = {}
+    for name, t in state.items():
+        if name == "last":
+            out[name] = t.sort_values("d").groupby("racer_id").tail(1)
+            continue
+        keys = [c for c in t.columns if c in ("racer_id", "ckey", "jcd", "mkey")]
+        before = t[t["d"] < lo].sort_values("d").groupby(keys).tail(1)
+        out[name] = pd.concat([before, t[t["d"] >= lo]]).sort_values(keys + ["d"])
+    return out
+
+
+_WINDOW_DAYS = (365, 180, 90)
+
+
+def _period_start(d):
+    d = pd.Timestamp(d)
+    if d.month >= 11:
+        return pd.Timestamp(d.year, 11, 1)
+    if d.month >= 5:
+        return pd.Timestamp(d.year, 5, 1)
+    return pd.Timestamp(d.year - 1, 11, 1)
+
+
+def compact_state(state, as_of):
+    """
+    as_of の日のレースの予想に要る行だけ残す（アプリに毎日渡す小さな集計表）。
+    history_features が引く日付（as_of と、その 365/180/90 日前・級別審査期間の初日）の
+    直前の累積だけあれば、merge_asof の結果は元の表と同じになる。
+    """
+    as_of = pd.Timestamp(as_of)
+    qs = [as_of] + [as_of - pd.Timedelta(days=w) for w in _WINDOW_DAYS] + [_period_start(as_of)]
+    out = {"as_of": as_of}
+    for name, t in state.items():
+        if not isinstance(t, pd.DataFrame):
+            continue
+        keys = [c for c in t.columns if c in ("racer_id", "ckey", "jcd", "mkey")]
+        parts = [t[t["d"] < q].sort_values("d").groupby(keys, sort=False).tail(1) for q in qs]
+        out[name] = pd.concat(parts).drop_duplicates(keys + ["d"]).sort_values(keys + ["d"]).reset_index(drop=True)
+    return out
+
+
+def history_features(base, state):
     """選手の調子・選手×コース・選手×場・スタート・モーター・F の集計（そのレースの前日まで）。"""
+    if isinstance(state, pd.DataFrame):  # 事象の表（_events）を直接渡したとき
+        state = build_state(state)
     base = base.copy()
     base["d"] = pd.to_datetime(base["race_date"].astype(str), format="%Y%m%d")
     cols = ["one", "win", "top2", "top3", "fin6"]
     out = {}
 
-    cum = _cum_by_day(e, ["racer_id"], cols)
     for days, pre in ((365, "r365"), (90, "r90")):
-        out.update(_rates(pre, _window(base, cum, ["racer_id"], cols, days), cols))
+        out.update(_rates(pre, _window(base, state["racer"], ["racer_id"], cols, days), cols))
 
     # スタート（STはフライング・出遅れを除いた正の値だけ）
-    e2 = e.assign(st_n=e["st_ok"].notna().astype(float), st_sum=e["st_ok"].fillna(0.0),
-                  st_sq=e["st_ok"].fillna(0.0) ** 2, late=e["st_late"].fillna(0.0),
-                  shift_n=e["course_shift"].notna().astype(float),
-                  shift_sum=e["course_shift"].fillna(0.0))
     scols = ["st_n", "st_sum", "st_sq", "late", "shift_n", "shift_sum"]
-    cum = _cum_by_day(e2, ["racer_id"], scols)
-    s = _window(base, cum, ["racer_id"], scols, 180)
+    s = _window(base, state["start"], ["racer_id"], scols, 180)
     n = np.where(s[:, 0] >= 3, s[:, 0], np.nan)
     out["r180_st"] = s[:, 1] / n
     out["r180_st_sd"] = np.sqrt(np.clip(s[:, 2] / n - (s[:, 1] / n) ** 2, 0, None))
@@ -203,8 +275,7 @@ def history_features(base, e):
     out["racer_avg_course_shift"] = s[:, 5] / sn
 
     # フライング: 今の級別審査期間（5/1〜・11/1〜）に入ってからの F 回数
-    cum = _cum_by_day(e, ["racer_id"], ["is_f"])
-    now = _asof(base, cum, ["racer_id"], ["is_f"], 0)[:, 0]
+    now = _asof(base, state["f"], ["racer_id"], ["is_f"], 0)[:, 0]
     d = base["d"]
     period_start = pd.to_datetime(np.where(
         d.dt.month >= 11, d.dt.year.astype(str) + "-11-01",
@@ -212,43 +283,32 @@ def history_features(base, e):
                  (d.dt.year - 1).astype(str) + "-11-01")))
     tmp = base[["racer_id"]].copy()
     tmp["d"] = period_start
-    old = _asof(tmp, cum, ["racer_id"], ["is_f"], 0)[:, 0]
+    old = _asof(tmp, state["f"], ["racer_id"], ["is_f"], 0)[:, 0]
     out["f_period"] = now - old
 
     # 選手×コース（予想時点の想定コース = 展示の進入コース、無ければ艇番）
-    ec = e[e["course"].between(1, 6)].assign(ckey=lambda x: x["course"].astype(int).astype(str))
     ecols = ["one", "win", "top2", "top3", "st_n", "st_sum"]
-    ec = ec.assign(st_n=ec["st_ok"].notna().astype(float), st_sum=ec["st_ok"].fillna(0.0))
-    cum = _cum_by_day(ec, ["racer_id", "ckey"], ecols)
     t = base.assign(ckey=base["exp_course"].astype(int).astype(str))
-    s = _window(t, cum, ["racer_id", "ckey"], ecols, 365)
+    s = _window(t, state["course"], ["racer_id", "ckey"], ecols, 365)
     out.update(_rates("rc", s, ecols, min_n=1))
     stn = np.where(s[:, ecols.index("st_n")] >= 2, s[:, ecols.index("st_n")], np.nan)
     out["rc_st"] = s[:, ecols.index("st_sum")] / stn
 
     # 選手×場
-    cum = _cum_by_day(e, ["racer_id", "jcd"], cols)
-    out.update({k: v for k, v in _rates("rv", _window(base, cum, ["racer_id", "jcd"], cols, 365), cols).items()
-                if k in ("rv_n", "rv_win", "rv_top3")})
+    r = _rates("rv", _window(base, state["venue"], ["racer_id", "jcd"], cols, 365), cols)
+    out.update({k: v for k, v in r.items() if k in ("rv_n", "rv_win", "rv_top3")})
 
     # モーター（同じ場・同じ番号の直近90日。モーターの入れ替えは年1回なのでほぼ同じ機体）
-    em = e.assign(mkey=e["jcd"].astype(str) + "_" + _num(e["motor_no"]).astype("Int64").astype(str))
-    cum = _cum_by_day(em, ["mkey"], cols)
     t = base.assign(mkey=base["jcd"].astype(str) + "_" + _num(base["motor_no"]).astype("Int64").astype(str))
-    r = _rates("mot", _window(t, cum, ["mkey"], cols, 90), cols)
+    r = _rates("mot", _window(t, state["motor"], ["mkey"], cols, 90), cols)
     out.update({"mot_n": r["mot_n"], "mot_top2": r["mot_top2"], "mot_fin": r["mot_fin"]})
 
     res = pd.DataFrame(out, index=base.index)
 
     # 直近5走・10走の平均着順（前日まで）
-    seq = e.sort_values(["racer_id", "d", "race_no"])[["racer_id", "d", "fin6"]].copy()
-    g = seq.groupby("racer_id", sort=False)["fin6"]
-    seq["last5_fin"] = g.transform(lambda x: x.rolling(5, min_periods=3).mean())
-    seq["last10_fin"] = g.transform(lambda x: x.rolling(10, min_periods=5).mean())
-    last = seq.groupby(["racer_id", "d"], sort=False)[["last5_fin", "last10_fin"]].last().reset_index()
     t = base[["racer_id", "d"]].copy()
     t["_row"] = np.arange(len(t))
-    m = pd.merge_asof(t.sort_values("d"), last.sort_values("d"), on="d", by="racer_id",
+    m = pd.merge_asof(t.sort_values("d"), state["last"].sort_values("d"), on="d", by="racer_id",
                       allow_exact_matches=False).sort_values("_row")
     res["last5_fin"] = m["last5_fin"].to_numpy()
     res["last10_fin"] = m["last10_fin"].to_numpy()
@@ -262,21 +322,29 @@ def meet_features(e):
     x["meet_start"] = x["d"] - pd.to_timedelta(day_no - 1, unit="D")
     x["meet_id"] = x["jcd"].astype(str) + "_" + x["meet_start"].dt.strftime("%Y%m%d")
     x = x.sort_values(["meet_id", "racer_id", "d", "race_no"])
-    x["adj"] = x["fin6"] - x["course"].map(_COURSE_BASELINE)
-    x["st_n"] = x["st_ok"].notna().astype(float)
-    x["st_sum"] = x["st_ok"].fillna(0.0)
-    x["adj_n"] = x["adj"].notna().astype(float)
-    x["adj_sum"] = x["adj"].fillna(0.0)
-    cols = ["one", "fin6", "top2", "st_n", "st_sum", "adj_n", "adj_sum"]
+    # 本番の今節成績（current_meet_fetcher）と同じ定義:
+    #   走数 = 進入コースとSTが出ている走、着順・2連対率(%)は1〜6着の走だけ、STはその平均
+    fin = _num(x["finish"])
+    valid = x["course"].between(1, 6) & x["st"].notna()
+    placed = valid & fin.between(1, 6)
+    adj = (fin - x["course"].map(_COURSE_BASELINE)).where(placed)
+    x["n_run"] = valid.astype(float)
+    x["st_sum"] = x["st"].where(valid).fillna(0.0)
+    x["fin_n"] = placed.astype(float)
+    x["fin_sum"] = fin.where(placed).fillna(0.0)
+    x["top2_sum"] = (fin <= 2).where(placed).fillna(0.0).astype(float)
+    x["adj_n"] = adj.notna().astype(float)
+    x["adj_sum"] = adj.fillna(0.0)
+    cols = ["n_run", "st_sum", "fin_n", "fin_sum", "top2_sum", "adj_n", "adj_sum"]
     g = x.groupby(["meet_id", "racer_id"], sort=False)[cols]
     prev = g.cumsum() - x[cols]
-    n = prev["one"].where(prev["one"] > 0)
+    fn = prev["fin_n"].where(prev["fin_n"] > 0)
     out = pd.DataFrame({
         "race_key": x["race_key"], "lane": x["lane"],
-        "meet_n": prev["one"],
-        "meet_fin": prev["fin6"] / n,
-        "meet_top2": prev["top2"] / n,
-        "meet_st": prev["st_sum"] / prev["st_n"].where(prev["st_n"] > 0),
+        "meet_n": prev["n_run"],
+        "meet_fin": prev["fin_sum"] / fn,
+        "meet_top2": prev["top2_sum"] / fn * 100.0,
+        "meet_st": prev["st_sum"] / prev["n_run"].where(prev["n_run"] > 0),
         "meet_fin_adj": prev["adj_sum"] / prev["adj_n"].where(prev["adj_n"] > 0),
     })
     return out
@@ -305,7 +373,6 @@ def build_table(k, b, p, start=None, end=None):
     1レース1艇1行の表（特徴量＋着順）。対象は競走成績のあるレース（start〜end）。
     k は start より前の集計にも使うので、なるべく長い期間を渡す。
     """
-    e = _events(k)
     base = k[["race_key", "race_date", "jcd", "race_no", "lane", "racer_id", "finish",
               "finish_raw", "exhibition_time", "motor_no", "distance_m", "fixed_entry",
               "race_type", "day_no"]].copy()
@@ -317,30 +384,42 @@ def build_table(k, b, p, start=None, end=None):
     base["finish"] = _num(base["finish"])
     base["exhibition_time"] = _num(base["exhibition_time"]).where(lambda s: s.between(6.0, 8.0))
 
-    bcols = ["race_key", "lane", "age", "weight", "racer_class", "national_win_rate", "national_2ren",
-             "local_win_rate", "local_2ren", "motor_2ren", "boat_2ren"]
-    base = base.merge(b[bcols].drop_duplicates(["race_key", "lane"]), on=["race_key", "lane"], how="left")
+    base = base.merge(b[["race_key", "lane"] + _B_COLS].drop_duplicates(["race_key", "lane"]), on=["race_key", "lane"], how="left")
 
-    pcols = ["race_key", "lane", "grade", "is_final_day", "stabilizer", "temperature",
-             "water_temperature", "wind_speed", "wave_cm", "weather_code", "wind_direction_code",
-             "stadium_direction_code", "avg_st", "f_count", "l_count", "national_3ren", "local_3ren",
-             "motor_3ren", "boat_3ren", "weight", "tilt", "propeller_new", "parts_exchanged",
-             "adjust_weight", "exhibition_course", "exhibition_st", "exhibition_time"]
-    pp = p[pcols].drop_duplicates(["race_key", "lane"]).rename(columns={
-        "weight": "p_weight", "wind_speed": "p_wind_speed", "wave_cm": "p_wave_cm",
-        "exhibition_time": "p_exhibition_time"})
+    pp = p[_PAGES_COLS].drop_duplicates(["race_key", "lane"]).rename(columns=_PAGES_RENAME)
     base = base.merge(pp, on=["race_key", "lane"], how="left")
-    base["has_pages"] = base["grade"].notna() | base["avg_st"].notna()
-
     base = base.merge(prev_race_weather(k), on="race_key", how="left")
+    e = _events(k)
+    return assemble(base, build_state(e), meet_features(e))
 
-    num = lambda c: _num(base[c])  # noqa: E731
+
+_PAGES_COLS = ["race_key", "lane", "grade", "is_final_day", "stabilizer", "temperature",
+               "water_temperature", "wind_speed", "wave_cm", "weather_code", "wind_direction_code",
+               "stadium_direction_code", "avg_st", "f_count", "l_count", "national_3ren", "local_3ren",
+               "motor_3ren", "boat_3ren", "weight", "tilt", "propeller_new", "parts_exchanged",
+               "adjust_weight", "exhibition_course", "exhibition_st", "exhibition_time"]
+_PAGES_RENAME = {"weight": "p_weight", "wind_speed": "p_wind_speed", "wave_cm": "p_wave_cm",
+                 "exhibition_time": "p_exhibition_time"}
+
+
+def assemble(base, state, meet):
+    """
+    base（1レース1艇1行。番組表・出走表/直前情報・競走成績の展示タイム・1つ前のレースの気象を
+    並べたもの）に、過去の集計（state）と今節成績（meet）を足して特徴量の表にする。
+    学習（build_table）と本番（live_table）で同じ処理を通す。
+    """
+    base = base.reset_index(drop=True)
+    for c in ("pw_wind_speed", "pw_wave_cm", "pw_weather", "grade", "avg_st"):
+        if c not in base.columns:
+            base[c] = np.nan
+    base["has_pages"] = base["grade"].notna() | base["avg_st"].notna()
+    num = lambda c: _num(base[c]) if c in base.columns else pd.Series(np.nan, index=base.index)  # noqa: E731
     f = pd.DataFrame(index=base.index)
     f["race_key"] = base["race_key"]
     f["race_date"] = base["race_date"].astype(str)
     f["racer_id"] = base["racer_id"]
     f["lane"] = num("lane").astype(float)
-    f["finish"] = base["finish"]
+    f["finish"] = num("finish")
     f["jcd"] = base["jcd"].astype(str).str.zfill(2)
     f["race_no"] = num("race_no")
     f["distance_m"] = num("distance_m")
@@ -359,14 +438,14 @@ def build_table(k, b, p, start=None, end=None):
         f[c] = num(c)
     f["weight"] = num("p_weight").fillna(num("weight"))
     f["exhibition_time"] = num("p_exhibition_time").where(lambda s: s.between(6.0, 8.0)).fillna(
-        base["exhibition_time"])
+        num("exhibition_time").where(lambda s: s.between(6.0, 8.0)))
     f["avg_st"] = f["avg_st"].where(f["avg_st"] > 0)
     f["exhibition_st"] = f["exhibition_st"].where(f["exhibition_st"].abs() < 1.0)
 
     # 気象: 直前情報（前のレース時点）を優先、無ければ1つ前のレースの競走成績
-    f["wind_speed"] = num("p_wind_speed").fillna(base["pw_wind_speed"])
-    f["wave_cm"] = num("p_wave_cm").fillna(base["pw_wave_cm"])
-    f["weather_code"] = f["weather_code"].fillna(base["pw_weather"])
+    f["wind_speed"] = num("p_wind_speed").fillna(num("pw_wind_speed"))
+    f["wave_cm"] = num("p_wave_cm").fillna(num("pw_wave_cm"))
+    f["weather_code"] = f["weather_code"].fillna(num("pw_weather"))
     wc, sc = num("wind_direction_code"), num("stadium_direction_code")
     rel = ((wc - sc) % 16).where(wc.between(1, 16) & sc.between(1, 16))
     f["wind_rel"] = rel.where(f["wind_speed"] > 0, -1).where(wc.notna() | (f["wind_speed"] == 0))
@@ -379,10 +458,8 @@ def build_table(k, b, p, start=None, end=None):
     f["front_entry"] = (f["lane"] - f["exp_course"]).where(ex_course.notna())
     f["motor_no"] = num("motor_no")
 
-    hist = history_features(f.assign(motor_no=base["motor_no"]), e)
+    hist = history_features(f, state)
     f = pd.concat([f, hist], axis=1)
-
-    meet = meet_features(e)
     f = _merge_meet(f, meet)
 
     f["f_flag"] = (f["f_count"].fillna(f["f_period"]) > 0).astype(float)
@@ -439,6 +516,64 @@ def add_relations(f):
     f["n_front_entry"] = (f["front_entry"] > 0).groupby(f["race_key"]).transform("sum").where(
         f["front_entry"].notna())
     return f
+
+
+_LIVE_MEET = {
+    "current_meet_races": "meet_n", "current_meet_avg_finish": "meet_fin",
+    "current_meet_top2_rate": "meet_top2", "current_meet_avg_st": "meet_st",
+    "current_meet_avg_finish_adjusted": "meet_fin_adj",
+}
+
+
+_B_COLS = ["age", "weight", "racer_class", "national_win_rate", "national_2ren", "local_win_rate",
+           "local_2ren", "motor_2ren", "boat_2ren"]
+
+
+def live_table(pages, programs, state, current_meet=None):
+    """
+    本番の予想用: 1レース分の出走表・直前情報（history_pages.collect_race と同じ形）、
+    その日の番組表（official_download.parse_b と同じ形）、前日までの集計（build_state を
+    毎晩保存したもの）から、学習と同じ特徴量を作る。
+
+    勝率・2連率などは学習と同じく番組表（Bファイル）の値を使う（出走表ページの当地勝率は
+    番組表と食い違うことがあるため）。今節成績は本番の current_meet_fetcher の値
+    （同じ定義で学習している）をそのまま使う。
+    """
+    p = pages.copy()
+    p["race_key"] = p["race_key"].astype(str)
+    p["lane"] = _num(p["lane"])
+    p["racer_id"] = p["racer_id"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
+    for c in _PAGES_COLS + ["race_name", "motor_no", "distance_m", "fixed_entry", "day_no"]:
+        if c not in p.columns:
+            p[c] = np.nan
+    base = p[["race_key", "race_date", "jcd", "race_no", "lane", "racer_id", "motor_no", "distance_m",
+              "fixed_entry", "day_no"]].copy()
+    base["race_type"] = p["race_name"]
+    base["finish"] = np.nan
+    b = programs.copy() if programs is not None else pd.DataFrame(columns=["race_key", "lane"])
+    b["race_key"] = b["race_key"].astype(str)
+    b["lane"] = _num(b["lane"])
+    for c in _B_COLS:
+        if c not in b.columns:
+            b[c] = np.nan
+    if "race_type" not in b.columns:
+        b["race_type"] = np.nan
+    base = base.merge(b[["race_key", "lane"] + _B_COLS + ["race_type"]].drop_duplicates(["race_key", "lane"])
+                      .rename(columns={"race_type": "b_race_type"}), on=["race_key", "lane"], how="left")
+    # レース名は学習と同じく番組表の表記を使う（無ければ出走表ページの表記）
+    base["race_type"] = base["b_race_type"].fillna(base["race_type"])
+    base = base.merge(p[_PAGES_COLS].rename(columns=_PAGES_RENAME), on=["race_key", "lane"], how="left")
+    meet = pd.DataFrame({"race_key": base["race_key"], "lane": base["lane"]})
+    if current_meet is not None and len(current_meet):
+        cm = current_meet.rename(columns=_LIVE_MEET)
+        cm["lane"] = _num(cm["lane"])
+        meet = meet.merge(cm[["lane"] + [c for c in _LIVE_MEET.values() if c in cm.columns]],
+                          on="lane", how="left")
+    for c in _LIVE_MEET.values():
+        if c not in meet.columns:
+            meet[c] = np.nan
+    meet["meet_n"] = meet["meet_n"].fillna(0)
+    return assemble(base, state, meet)
 
 
 def build_dataset(start, end, history_start=None):

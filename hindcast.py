@@ -311,16 +311,20 @@ def build_race(rows, day, cstats, vprof, k_meet, baseline):
     return race
 
 
-def predict_race(model, race, runtime):
-    """auto_random_fix._process_candidate と同じ手順で予想と買い目候補を作る。"""
-    final = predict(
-        model,
-        race,
-        display_weight=runtime["display_weight"],
-        weather_weight=runtime["weather_weight"],
-        venue_course_weight=runtime["venue_course_weight"],
-        original_display_scale=0.0,
-    )
+def predict_race(model, race, runtime, final=None):
+    """auto_random_fix._process_candidate と同じ手順で予想と買い目候補を作る。
+
+    final を渡したとき（新しい予想モデル）は、予想だけそれを使い、買い目の作り方は同じ。
+    """
+    if final is None:
+        final = predict(
+            model,
+            race,
+            display_weight=runtime["display_weight"],
+            weather_weight=runtime["weather_weight"],
+            venue_course_weight=runtime["venue_course_weight"],
+            original_display_scale=0.0,
+        )
     tri = trifecta(final)
     plan = adaptive_ticket_plan(final)
     target_points = int(plan["point_count"])
@@ -373,8 +377,11 @@ def _as_int(v):
         return None
 
 
-def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration=None):
+def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration=None, ml=None):
     """1日分の (予想行, 入力行) を返す。
+
+    ml を渡したとき（新しい予想モデル。ml_day() の結果）は、1着〜3着をそのモデルで予想し、
+    買い目の作り方・保存の形は今のモデルと同じにする（model_version で区別して並べて保存）。
 
     calibration は的中確率の表示補正（hit_calibration）。その日より前のデータだけで
     作った補正のときに限り、補正後の値を残す（後で補正後の値の当てはまりを確かめるため）。
@@ -386,15 +393,22 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
         return [], [], None
 
     t0 = time.time()
-    first_history = sample_history[sample_history["_d"] < day].drop(columns="_d")
-    model = train(first_history, as_of=d)
     hf_before = history_full[history_full["race_date"] < d]
-    train_info = {
-        "first_rows": int(len(first_history)),
-        "first_last_date": str(first_history["race_date"].max()) if len(first_history) else None,
-        "position_rows": int(getattr(model, "_position_model_rows", 0)),
-        "position_last_date": str(hf_before["race_date"].max()) if len(hf_before) else None,
-    }
+    if ml is None:
+        first_history = sample_history[sample_history["_d"] < day].drop(columns="_d")
+        model = train(first_history, as_of=d)
+        train_info = {
+            "first_rows": int(len(first_history)),
+            "first_last_date": str(first_history["race_date"].max()) if len(first_history) else None,
+            "position_rows": int(getattr(model, "_position_model_rows", 0)),
+            "position_last_date": str(hf_before["race_date"].max()) if len(hf_before) else None,
+        }
+        model_version = HINDCAST_MODEL_VERSION
+    else:
+        model = ml["model"]
+        train_info = {k_: model.info.get(k_) for k_ in
+                      ("train_races", "train_from", "train_to", "calib_races", "calib_from", "calib_to")}
+        model_version = ml["version"]
 
     cstats = course_stats(k, day)
     vprof = venue_profile(k, day)
@@ -419,8 +433,16 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
         mdays = meet_days(k_days, jcd, day)
         k_meet = k[(k["jcd"] == jcd) & k["d"].isin(mdays)]
         race = build_race(rows, day, cstats, vprof, k_meet, baseline)
+        ml_final = None
+        if ml is not None:
+            feats = ml["features"].get(race_key)
+            if feats is None:
+                continue
+            from ml_model import to_final
+
+            ml_final = to_final(model, feats, race=race)
         try:
-            final, tickets, conf, plan, risk = predict_race(model, race, runtime)
+            final, tickets, conf, plan, risk = predict_race(model, race, runtime, final=ml_final)
         except Exception as e:  # noqa: BLE001
             print(f"[HINDCAST] predict error {race_key}: {type(e).__name__}: {e}", flush=True)
             continue
@@ -439,7 +461,7 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
         raw_hit_prob = _clean(ticket_hit_probability(tickets))
         pred_rows.append({
             "race_key": race_key,
-            "model_version": HINDCAST_MODEL_VERSION,
+            "model_version": model_version,
             "race_date": day.strftime("%Y-%m-%d"),
             "jcd": jcd,
             "venue": race["venue"].iloc[0],
@@ -478,7 +500,7 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
             })
     run_row = {
         "race_date": day.strftime("%Y-%m-%d"),
-        "model_version": HINDCAST_MODEL_VERSION,
+        "model_version": model_version,
         "input_version": INPUT_VERSION,
         "race_count": len(pred_rows),
         "settings": {k_: _clean(v) for k_, v in runtime.items()},
@@ -495,7 +517,7 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
 # ---------------------------------------------------------------
 # Supabase
 # ---------------------------------------------------------------
-def _saved_dates(start, end):
+def _saved_dates(start, end, version_filter=None):
     from auto_random_fix import _cfg, _headers, _request
 
     url, _ = _cfg()
@@ -504,7 +526,7 @@ def _saved_dates(start, end):
         f"{url}/rest/v1/{RUN_TABLE}",
         params=[
             ("select", "race_date"),
-            ("model_version", f"eq.{HINDCAST_MODEL_VERSION}"),
+            ("model_version", version_filter or f"eq.{HINDCAST_MODEL_VERSION}"),
             ("race_date", f"gte.{pd.Timestamp(start):%Y-%m-%d}"),
             ("race_date", f"lte.{pd.Timestamp(end):%Y-%m-%d}"),
         ],
@@ -550,6 +572,53 @@ def _code_sha():
     return sha[:12]
 
 
+# ---------------------------------------------------------------
+# 新しい予想モデル（ml_model.py）での事後予想
+# ---------------------------------------------------------------
+ML_VERSION_FILTER = "like.ml-chain*"
+
+
+def ml_versions():
+    """データ用リポジトリ models/ にある学習済みの版（版名 → 確率の調整に使った最後の日）。"""
+    import json as _json
+
+    out = {}
+    for p in sorted(data_path("models").glob("ml-chain-*.json")):
+        try:
+            info = _json.loads(p.read_text(encoding="utf-8"))
+            out[info["version"]] = str(info["info"].get("calib_to") or info["info"].get("train_to"))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def ml_version_for(day, versions, pinned=None):
+    """その日より前のデータだけで学習・調整した版のうち、いちばん新しいもの（無ければ None）。"""
+    if pinned:
+        return pinned if versions.get(pinned, "99999999") < day else None
+    ok = [(last, v) for v, last in versions.items() if last < day]
+    return max(ok)[1] if ok else None
+
+
+def ml_day(day, version, sources):
+    """その日の全レースの特徴量（その日の時点で分かっていた情報だけ）と、使う版のモデル。"""
+    import ml_features as mf
+    from ml_live import load_model
+    from prediction import SECOND_FAVORITE_POLICY
+
+    k, b, p = sources
+    f = mf.build_table(k, b, p, day, day)
+    full = f.groupby("race_key")["has_pages"].transform("all")
+    if not full.any():
+        return None
+    f = f[full]
+    return {
+        "model": load_model(version),
+        "version": f"{version}+{SECOND_FAVORITE_POLICY}",
+        "features": dict(tuple(f.groupby("race_key"))),
+    }
+
+
 def main():
     yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d")
     ap = argparse.ArgumentParser()
@@ -558,14 +627,17 @@ def main():
     ap.add_argument("--dry-run", default="", help="Supabaseへ保存せず、このフォルダへJSONで書く")
     ap.add_argument("--redo", action="store_true", help="保存済みの日も作り直す")
     ap.add_argument("--max-minutes", type=float, default=300)
+    ap.add_argument("--model", default="current",
+                    help="current（今のモデル）/ ml（その日より前に学習した最新の新モデル）/ 新モデルの版名")
     args = ap.parse_args()
+    use_ml = args.model != "current"
     deadline = time.time() + args.max_minutes * 60
 
     start, end = str(args.start), min(str(args.end), yesterday)
     days = [_ymd(d) for d in pd.date_range(pd.Timestamp(start), pd.Timestamp(end))]
 
     if not args.dry_run and not args.redo:
-        saved = _saved_dates(start, end)
+        saved = _saved_dates(start, end, ML_VERSION_FILTER if use_ml else None)
         days = [d for d in days if d not in saved]
     if not days:
         print("[HINDCAST] 対象日なし（すべて保存済み）", flush=True)
@@ -582,9 +654,16 @@ def main():
     k, k_missing = load_k_results(days[0], days[-1], download_missing=not args.dry_run) if days else (None, set())
     runtime = _runtime() if not args.dry_run else _load_runtime_default()
     code_sha = _code_sha()
-    calibration = latest_from_env() if not args.dry_run else None
+    calibration = latest_from_env() if not args.dry_run and not use_ml else None
+    ml_sources, versions = None, {}
+    if use_ml and days:
+        import ml_features as mf
+
+        versions = ml_versions()
+        ml_sources = mf.load_sources(_ymd(pd.Timestamp(days[0]) - pd.Timedelta(days=400)), days[-1])
     print(f"[HINDCAST] 補正 id={calibration['id'] if calibration else 'なし'}", flush=True)
-    print(f"[HINDCAST] 版 {HINDCAST_MODEL_VERSION} / 対象 {len(days)}日 / code {code_sha}", flush=True)
+    print(f"[HINDCAST] 版 {'新モデル ' + args.model if use_ml else HINDCAST_MODEL_VERSION}"
+          f" / 対象 {len(days)}日 / code {code_sha}", flush=True)
 
     out_dir = Path(args.dry_run) if args.dry_run else None
     if out_dir:
@@ -601,8 +680,18 @@ def main():
             print(f"[HINDCAST] {d}: 競走成績（K）が未取得の日があるため次回に回す "
                   f"{sorted(window & k_missing)}", flush=True)
             continue
+        ml = None
+        if use_ml:
+            version = ml_version_for(d, versions, None if args.model == "ml" else args.model)
+            if version is None:
+                print(f"[HINDCAST] {d}: その日より前に学習した新モデルの版が無いため飛ばす", flush=True)
+                continue
+            ml = ml_day(d, version, ml_sources)
+            if ml is None:
+                print(f"[HINDCAST] {d}: 出走表・直前情報が未取得のため次回に回す", flush=True)
+                continue
         preds, inputs, run_row = run_day(
-            d, history_full, sample_history, k, runtime, code_sha, calibration,
+            d, history_full, sample_history, k, runtime, code_sha, calibration, ml=ml,
         )
         if not preds:
             continue
@@ -613,7 +702,9 @@ def main():
         else:
             # hindcast_runs を最後に書き、その日の保存が終わった印にする
             # （途中で止まった日は次回やり直す。upsertなので重複しない）。
-            _upsert(INPUT_TABLE, inputs, "race_key,lane")
+            # 入力（hindcast_inputs）は艇ごとに1行で版を持たないため、今のモデルの分だけ保存する
+            if not use_ml:
+                _upsert(INPUT_TABLE, inputs, "race_key,lane")
             _upsert(PREDICTION_TABLE, preds, "race_key,model_version")
             _upsert(RUN_TABLE, [run_row], "race_date,model_version")
         done += 1
