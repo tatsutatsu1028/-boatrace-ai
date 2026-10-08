@@ -12,6 +12,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
+import claude_reader
 import hit_calibration
 from prediction import SECOND_FAVORITE_POLICY, second_favorite_n_for
 from stake_allocator import STAKE_POLICY_ALL_RACES, ticket_hit_probability
@@ -395,6 +396,10 @@ def _upsert_supabase(record):
     for k in hit_calibration.CALIBRATED_RESULT_COLUMNS:
         if _json_safe(record.get(k)) is not None:
             payload[k] = _json_safe(record.get(k))
+    # Claude の読みがある予想だけ: モデル＋Claude の買い目の当たり外れ
+    for k in claude_reader.RESULT_COLUMNS:
+        if _json_safe(record.get(k)) is not None:
+            payload[k] = _json_safe(record.get(k))
 
     r = requests.post(
         endpoint,
@@ -635,8 +640,9 @@ def build_snapshot_payload_json(
     research_variants=None,
     race_features=None,
     pre_exhibition=False,
+    extra=None,
 ):
-    """保存する payload_json の文字列と、その SHA-256 を返す。"""
+    """保存する payload_json の文字列と、その SHA-256 を返す。extra は payload に足す項目（Claude の読みなど）。"""
     payload = _snapshot_payload(
         final.copy(),
         tickets.copy(),
@@ -645,6 +651,8 @@ def build_snapshot_payload_json(
     )
     # 展示データが揃う前の予想かどうか。列（pre_exhibition）と同じ値を中にも残す。
     payload["pre_exhibition"] = bool(pre_exhibition)
+    if extra:
+        payload.update(extra)
     text = json.dumps(payload, ensure_ascii=False)
     return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1268,6 +1276,16 @@ def save_race_result(
             ensure_ascii=False,
         ),
     }
+
+    # 手入力の払戻は「100円あたり」ではないので、モデル＋Claude の払戻（mix_payout）は空にする
+    try:
+        record.update({
+            k: v for k, v in claude_reader.result_fields(
+                json.loads((snapshot_used or {}).get("payload_json") or "{}"), actual_combo, None
+            ).items() if k != "mix_payout"
+        })
+    except Exception:
+        pass
 
     if _use_supabase():
         try:
