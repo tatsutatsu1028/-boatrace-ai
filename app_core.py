@@ -1127,22 +1127,24 @@ def _auto_save_prediction(ctx, d, jcd, venue, rno, deadlines, odds, result):
     return out
 
 
-def _claude_reading(ctx, d, jcd, rno, work, final, tickets, odds, params):
-    """Claude の読み（管理者だけ呼ぶ）。保存済みの予想に同じ入力の読みがあれば API は呼ばない。"""
+def _claude_reading(ctx, d, jcd, rno, work, final, tickets, odds, params, call_api=True):
+    """
+    3つの予想（管理者だけ）。call_api=True（Claudeのみ・両方の平均）なら Claude を呼ぶ。
+    同じ入力の予想がこのアプリの中か保存済みの予想にあれば API は呼ばない。
+    """
     saved_section = None
     try:
         snap = load_prediction_snapshot(ctx)
         saved_section = (json.loads((snap or {}).get("payload_json") or "{}") or {}).get("claude")
     except Exception:
         saved_section = None
-    section = claude_tab.run_at_predict(
-        ctx, f"{d} {VENUES[jcd]} {rno}R", work, final, odds, params, _complete_adaptive_tickets,
+    return claude_tab.run_at_predict(
+        ctx, f"{d} {VENUES[jcd]} {rno}R", work, final, tickets, odds, params, _complete_adaptive_tickets,
         api_key=_secret_text("ANTHROPIC_API_KEY"),
         model=_secret_text("CLAUDE_READ_MODEL") or None,
         saved_section=saved_section,
+        call_api=call_api,
     )
-    claude_tab.attach_model_tickets(ctx, tickets, ticket_hit_probability(tickets))
-    return section
 
 
 def _saved_prediction_frames(ctx, result):
@@ -3095,7 +3097,17 @@ with tab1:
                         st.info("まだ追跡記録がありません。「追跡を開始」を押してから数分待ってください。")
 
             st.divider()
-            if st.button("🤖 AI最終予想", type="primary"):
+            # 管理者は3つのボタン（モデルのみ／Claudeのみ／両方の平均）。スタッフはモデルのみ。
+            if IS_ADMIN:
+                _pb = st.columns(3)
+                _press_model = _pb[0].button("🤖 モデルのみ予想", type="primary", use_container_width=True)
+                _press_claude = _pb[1].button("🧠 Claudeのみ予想", use_container_width=True)
+                _press_avg = _pb[2].button("⚖️ 両方の予想平均", use_container_width=True)
+            else:
+                _press_model = st.button("🤖 モデルのみ予想", type="primary")
+                _press_claude = _press_avg = False
+            _press_mode = "claude" if _press_claude else ("avg" if _press_avg else "model")
+            if _press_model or _press_claude or _press_avg:
                 try:
                     with st.spinner("AI解析中…"):
                         model = train(history)
@@ -3190,10 +3202,12 @@ with tab1:
                             # 展示データが揃う前の予想かどうか（保存する予想にも印を付ける）。
                             "pre_exhibition": not _exhibition_ready(work),
                         }
-                    # 管理者だけ: Claude の読みとモデル＋Claude の買い目（＋Claude予想タブに表示し、
-                    # 保存する予想にも入れる）。失敗してもモデルの予想と買い目はそのまま出す。
+                    # 管理者だけ: 3つの予想（Claudeのみ・両方の平均を押したときだけ Claude を1回呼ぶ。
+                    # モデルのみのときは呼ばず、前に取った予想があれば一緒に保存する）。
+                    # 失敗してもモデルの予想と買い目はそのまま出す。
                     if IS_ADMIN:
-                        with st.spinner("Claudeの読みを取得しています…"):
+                        st.session_state["result"]["mode"] = _press_mode
+                        with st.spinner("Claudeの予想を取得しています…" if _press_mode != "model" else "予想を整えています…"):
                             st.session_state["result"]["claude"] = _claude_reading(
                                 ctx, d, jcd, rno, work, final, tickets, odds,
                                 {
@@ -3203,7 +3217,9 @@ with tab1:
                                     "min_bet": min_bet,
                                     "value_bias": value_bias,
                                 },
+                                call_api=_press_mode != "model",
                             )
+                        claude_tab.set_mode(ctx, _press_mode)
                     # 予想を出した時点で自動保存する。締切前の再押下は最新予想で上書きし、
                     # 締切後は上書きしない（スタッフが押した場合も同じ）。
                     with st.spinner("予想を保存しています…"):
@@ -3234,9 +3250,15 @@ with tab1:
 
                 tickets = tickets.copy()
                 tickets["stake"] = pd.to_numeric(tickets["stake"], errors="coerce").fillna(0).astype(int)
+                # 管理者: 押したボタンの予想の買い目を出す（Claude が取れなかったときはモデル）
+                _model_tickets, _view_mode = tickets, "model"
+                if IS_ADMIN:
+                    tickets, _view_mode = claude_tab.display_tickets(ctx, result.get("mode", "model"), tickets)
 
                 st.divider()
                 st.subheader(f"{VENUES[jcd]} {rno}R AI最終予想")
+                if IS_ADMIN:
+                    st.caption(f"表示中：{claude_tab.MODE_LABELS[_view_mode]}")
 
                 if result.get("pre_exhibition"):
                     st.warning("⏳ 展示前の予想です。展示後にもう一度押してください")
@@ -3283,7 +3305,7 @@ with tab1:
                     st.caption("📌 このレースは予想を保存済みです。" + _saved_label)
                 elif _save_status == "error":
                     st.error(
-                        "予想の保存に失敗しました。もう一度「AI最終予想」を押してください。"
+                        "予想の保存に失敗しました。もう一度予想ボタンを押してください。"
                     )
                     st.code(str(_save.get("message", "")))
                 if _save.get("odds_message"):
@@ -3302,7 +3324,7 @@ with tab1:
                 try:
                     if IS_ADMIN:
                         _saved_final, _saved_tickets = _saved_prediction_frames(ctx, result)
-                        # ＋Claude予想タブで「モデル＋Claudeの買い目」を選んだレースは記事の買い目を差し替える
+                        # 記事の買い目: ＋Claude予想タブで選んだ予想（選んでいなければ押したボタンの予想）
                         _saved_tickets = claude_tab.article_tickets(ctx, _saved_tickets)
                 except Exception as e:
                     print("[SNAPSHOT] saved prediction load error:", type(e).__name__, str(e), flush=True)
@@ -3312,6 +3334,8 @@ with tab1:
                 ticket_plan = result.get("ticket_plan") or {}
                 point_count = len(tickets)
                 plan_reason = ticket_plan.get("reason", "固定済みの買い目構成")
+                if _view_mode != "model":
+                    plan_reason = claude_tab.MODE_LABELS[_view_mode] + "の買い目"
 
                 # 買い目全体の的中確率を一番目立つ位置に出す。各買い目の3連単確率の合計
                 # （補正前）は実際より低く出るため、全レースの事後予想の実績で作った補正
@@ -3319,7 +3343,8 @@ with tab1:
                 # 補正前・補正後の両方を固定予想（prediction_snapshots）にも保存し、
                 # 後で実際の的中率と比べる。買い目の選び方・資金配分には使わない。
                 hit_prob = ticket_hit_probability(tickets)
-                _hit_cal = load_hit_calibration()
+                # 補正はモデルの予想の実績で作ったものなので、モデルのみ予想のときだけ使う
+                _hit_cal = load_hit_calibration() if _view_mode == "model" else None
                 hit_prob_shown = apply_hit_calibration(hit_prob, _hit_cal)
                 if hit_prob_shown is not None:
                     _hit_note = (
@@ -3350,9 +3375,9 @@ with tab1:
                     )
 
                 st.info(f"🎯 買い目 {point_count}点：{plan_reason}")
-                # 管理者だけ: モデル＋Claude の買い目を並べて表示（Claude が取れたときだけ）
+                # 管理者だけ: 3つの予想の買い目を並べて表示（Claude が取れたときだけ）
                 if IS_ADMIN:
-                    claude_tab.render_inline(ctx, tickets)
+                    claude_tab.render_inline(ctx, _model_tickets)
 
                 # -------------------------------------------------
                 # note投稿管理（オーナー専用）

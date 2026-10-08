@@ -30,8 +30,16 @@ def _today_jst():
 SNAPSHOT_COLS = "race_key,venue,race_no,collector_name,snapshot_kind,saved_at"
 RESULT_COLS = (
     "race_key,trifecta_actual,hit_any_ticket,payout,total_stake,"
+    "claude_hit_any_ticket,claude_payout,claude_total_stake,"
     "mix_hit_any_ticket,mix_payout,mix_total_stake"
 )
+# 照合する3つの予想（表示名, 的中の列, 払戻の列, 購入額の列）。モデルのみは既存の列
+PREDICTIONS = [
+    ("モデル", "hit_any_ticket", "payout", "total_stake"),
+    ("Claude", "claude_hit_any_ticket", "claude_payout", "claude_total_stake"),
+    ("平均", "mix_hit_any_ticket", "mix_payout", "mix_total_stake"),
+]
+PREDICTION_TITLES = {"モデル": "モデルのみ予想", "Claude": "Claudeのみ予想", "平均": "両方の予想平均"}
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -69,43 +77,45 @@ def _mark(v):
     return "○" if bool(v) else "×"
 
 
+def _has(v):
+    return v is not None and not (isinstance(v, float) and pd.isna(v))
+
+
 def build_table(snaps, results, venue_names=None):
-    """照合一覧の表と、その日の合計（モデル／モデル＋Claude）。"""
+    """照合一覧の表と、その日の合計（3つの予想ごと）。"""
     if snaps is None or snaps.empty:
         return pd.DataFrame(), {}
     res = results.set_index("race_key") if results is not None and len(results) else pd.DataFrame()
     rows = []
-    tot = {"model_hits": 0, "model_payout": 0, "model_stake": 0, "model_races": 0,
-           "mix_hits": 0, "mix_payout": 0, "mix_stake": 0, "mix_races": 0, "pending": 0}
+    tot = {name: {"races": 0, "hits": 0, "payout": 0, "stake": 0} for name, *_ in PREDICTIONS}
+    tot["pending"] = 0
     for s in snaps.itertuples():
         jcd = str(s.race_key).split("_")[1] if "_" in str(s.race_key) else ""
         venue = (venue_names or {}).get(jcd) or s.venue
         kind = "自動" if str(s.collector_name or "") == "auto_random" else "手動"
+        row = {"レース": f"{venue} {int(s.race_no)}R", "予想": kind}
         r = res.loc[s.race_key] if len(res) and s.race_key in res.index else None
         if r is None:
             tot["pending"] += 1
-            rows.append({"レース": f"{venue} {int(s.race_no)}R", "予想": kind, "実際の3連単": "結果待ち",
-                         "モデル": "結果待ち", "モデル払戻": "", "モデル＋Claude": "結果待ち", "＋Claude払戻": ""})
+            row["実際の3連単"] = "結果待ち"
+            for name, *_ in PREDICTIONS:
+                row[name] = "結果待ち"
+                row[f"{name}払戻"] = ""
+            rows.append(row)
             continue
-        mix_has = pd.notna(r.get("mix_hit_any_ticket"))
-        tot["model_races"] += 1
-        tot["model_hits"] += int(bool(r.get("hit_any_ticket")))
-        tot["model_payout"] += int(r.get("payout") or 0)
-        tot["model_stake"] += int(r.get("total_stake") or 0)
-        if mix_has:
-            tot["mix_races"] += 1
-            tot["mix_hits"] += int(bool(r.get("mix_hit_any_ticket")))
-            tot["mix_payout"] += int(r.get("mix_payout") or 0)
-            tot["mix_stake"] += int(r.get("mix_total_stake") or 0)
-        rows.append({
-            "レース": f"{venue} {int(s.race_no)}R",
-            "予想": kind,
-            "実際の3連単": str(r.get("trifecta_actual") or "－"),
-            "モデル": _mark(r.get("hit_any_ticket")),
-            "モデル払戻": _yen(r.get("payout")),
-            "モデル＋Claude": _mark(r.get("mix_hit_any_ticket")) if mix_has else "－",
-            "＋Claude払戻": _yen(r.get("mix_payout")) if mix_has else "－",
-        })
+        row["実際の3連単"] = str(r.get("trifecta_actual") or "－")
+        for name, hit_col, pay_col, stake_col in PREDICTIONS:
+            if not _has(r.get(hit_col)):  # Claude の予想が無いレース（モデルのみ・自動固定など）
+                row[name], row[f"{name}払戻"] = "－", "－"
+                continue
+            t = tot[name]
+            t["races"] += 1
+            t["hits"] += int(bool(r.get(hit_col)))
+            t["payout"] += int(r.get(pay_col) or 0)
+            t["stake"] += int(r.get(stake_col) or 0)
+            row[name] = _mark(r.get(hit_col))
+            row[f"{name}払戻"] = _yen(r.get(pay_col))
+        rows.append(row)
     return pd.DataFrame(rows), tot
 
 
@@ -126,20 +136,17 @@ def render_daily(venue_names=None):
     def roi(p, s):
         return f"{p / s * 100:.0f}%" if s else "－"
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric(f"モデル（{tot['model_races']}R）", f"{tot['model_hits']}本 的中",
-                  f"払戻 {tot['model_payout']:,}円 ／ 回収率 {roi(tot['model_payout'], tot['model_stake'])}",
-                  delta_color="off")
-    with c2:
-        st.metric(f"モデル＋Claude（{tot['mix_races']}R）", f"{tot['mix_hits']}本 的中",
-                  f"払戻 {tot['mix_payout']:,}円 ／ 回収率 {roi(tot['mix_payout'], tot['mix_stake'])}",
-                  delta_color="off")
+    cols = st.columns(3)
+    for col, (name, *_) in zip(cols, PREDICTIONS):
+        t = tot[name]
+        with col:
+            st.metric(f"{PREDICTION_TITLES[name]}（{t['races']}R）", f"{t['hits']}本 的中",
+                      f"払戻 {t['payout']:,}円 ／ 回収率 {roi(t['payout'], t['stake'])}", delta_color="off")
     st.caption(
         "的中は金額を付けた買い目に実際の3連単が入っていたか。払戻は1レースの予算どおりに買った場合。"
         + (f" 結果待ち {tot['pending']}R。" if tot["pending"] else "")
-        + " モデル＋Claude は、管理者が「AI最終予想」でClaudeの読みを取ったレースだけ（それ以外は「－」）。"
-        " 1分ごとに読み直します。"
+        + " Claude・平均は、管理者が「Claudeのみ予想」か「両方の予想平均」でClaudeの予想を取ったレースだけ"
+        "（それ以外は「－」）。1分ごとに読み直します。"
     )
     if st.button("🔄 照合一覧を読み直す", key="daily_review_reload"):
         load_day.clear()

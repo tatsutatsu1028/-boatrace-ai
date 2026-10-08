@@ -1,13 +1,16 @@
 """
-Claude による「読み」（各艇の1着確率と短い理由）と、モデル＋Claude の買い目。
+Claude による予想（各艇の1着確率・3連単の買い目と確率・理由・展開のまとめ）と、3つの予想。
 
-  - 「AI最終予想」を押したとき（管理者だけ）に、レースの入力データとモデルの確率を Claude に渡し、
-    各艇の1着確率と理由を受け取る（read_race）
-  - 1着確率をモデルと Claude の平均に置き換え、2着・3着はモデルの条件付き確率のまま
-    3連単を組み立てた「モデル＋Claude」の final を作る（mix_final）。買い目の作り方と資金配分は
-    モデルの買い目と同じ関数を通す（claude_tab.py）
-  - 結果確定後に、モデルの買い目とモデル＋Claude の買い目のどちらが当たったかの列を作る
-    （result_fields。結果の保存処理3か所から呼ぶ）
+  - 管理者が「Claudeのみ予想」か「両方の予想平均」を押したとき、レースの入力データとモデルの確率を
+    Claude に渡し、1〜3着の展開を読んだ3連単の買い目（本線・抑え、10点前後）とその確率・理由を受け取る（read_race）
+  - 3つの予想（claude_tab.py が買い目と資金配分まで作る）:
+      モデルのみ   … 今までどおり
+      Claudeのみ   … Claude が選んだ買い目そのまま（資金配分はアプリの仕組み）
+      両方の予想平均 … モデルと Claude の3連単の確率を組み合わせごとに平均し、そこから買い目を選び直す
+        Claude が挙げなかった組み合わせには、Claude の確率の残り（1 − 挙げた分の合計）を
+        モデルの確率の比率で配る（claude_full_tri）。Claude の分も120通りで合計1になり、
+        モデルが強く推す組み合わせが平均で消えすぎない
+  - 結果確定後に、3つの予想それぞれの当たり外れと払戻の列を作る（result_fields。結果の保存処理3か所から呼ぶ）
 
 今のモデル（prediction.predict）でも新しいモデル（ml_model）でも、final の形
 （p_first・p_second_given_<a>・p_third_given_<a>_<b>）は同じなので、そのまま使える。
@@ -30,8 +33,8 @@ import pandas as pd
 DEFAULT_READ_MODEL = "claude-opus-5-5"
 READ_EFFORT = "medium"
 READ_TIMEOUT_SEC = 60.0
-READ_MAX_TOKENS = 8000
-PROMPT_VERSION = "claude-read-v1"
+READ_MAX_TOKENS = 12000
+PROMPT_VERSION = "claude-read-v2"
 
 # 1回あたりの費用の目安（米ドル / 100万トークン）。2026-10 時点の公開価格。
 PRICES_PER_MTOK = {
@@ -79,17 +82,24 @@ RACE_FIELDS = [
 ]
 
 SYSTEM_PROMPT = """あなたはボートレースの予想を検討するアナリストです。
-1レース分の入力データと、統計モデルが出した各艇の1着確率が渡されます。
-入力データを読み、各艇の1着確率（6艇の合計が1）と、その艇の短い理由を返してください。
+1レース分の入力データと、統計モデルが出した各艇の1着・2着・3着の確率が渡されます。
+入力データを読んでスタートから1マークまでの展開を考え、1着〜3着を予想してください。
+
+返すもの:
+- boats: 各艇の1着確率（6艇の合計が1）と、その艇の短い理由（40字程度）
+- tickets: 3連単の買い目を10点前後。group は本線（最も自信のある4〜5点）か抑え。
+  prob はその組み合わせ（1着-2着-3着の順）になる確率。挙げた買い目の prob の合計は1より小さくてよい
+  （挙げなかった組み合わせにも確率は残る）。reason は30字程度
+- summary: 1〜3着の展開のまとめ（80〜120字）
 
 守ること:
-- 理由には、渡されたデータに書かれていることだけを使う。データに無いこと（選手の評判・過去の対戦・
+- 理由とまとめには、渡されたデータに書かれていることだけを使う。データに無いこと（選手の評判・過去の対戦・
   記者コメント・ピットの様子・オッズ・モーターの整備内容など）は書かない。値が空欄の項目には触れない。
-- 理由は1艇につき40字程度の日本語。数値を挙げるときは入力の値をそのまま使う。
+- 数値を挙げるときは入力の値をそのまま使う。
 - ボートレースは1号艇（1コース）の1着が全体の約半分を占める。展示や今節の数字が少し悪いだけで
   1号艇を低く見すぎる傾向があるので注意し、1号艇を下げるのは、はっきりした根拠がデータにあるときだけにする。
 - モデルの確率は参考にしてよいが、そのまま写さず、データから見て妥当かどうかを自分で判断する。
-- summary には、レース全体の見立てを80字程度で書く（同じくデータに無いことは書かない）。"""
+- 買い目は 1-2-3 の形で、出走している艇番だけを使い、同じ艇を2回使わない。同じ買い目を重ねない。"""
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -107,9 +117,23 @@ OUTPUT_SCHEMA = {
                 "additionalProperties": False,
             },
         },
+        "tickets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "combo": {"type": "string"},
+                    "group": {"type": "string", "enum": ["本線", "抑え"]},
+                    "prob": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["combo", "group", "prob", "reason"],
+                "additionalProperties": False,
+            },
+        },
         "summary": {"type": "string"},
     },
-    "required": ["boats", "summary"],
+    "required": ["boats", "tickets", "summary"],
     "additionalProperties": False,
 }
 
@@ -202,6 +226,29 @@ def _normalize(boats, lanes):
     return {ln: v / total for ln, v in p.items()}, reasons
 
 
+def _clean_tickets(rows, lanes):
+    """Claude の買い目を確かめる（形・艇番・重なり）。確率の合計が1を超えたら1に縮める。"""
+    out, seen = [], set()
+    for r in rows:
+        parts = str(r.get("combo") or "").replace("－", "-").replace("ー", "-").strip().split("-")
+        try:
+            a, b, c = (int(x) for x in parts)
+            prob = float(r.get("prob"))
+        except (TypeError, ValueError):
+            continue
+        combo = f"{a}-{b}-{c}"
+        if len({a, b, c}) < 3 or not {a, b, c} <= set(lanes) or combo in seen or not math.isfinite(prob):
+            continue
+        seen.add(combo)
+        out.append({"combo": combo, "group": "本線" if r.get("group") == "本線" else "抑え",
+                    "prob": max(prob, 0.0), "reason": str(r.get("reason") or "").strip()})
+    total = sum(t["prob"] for t in out)
+    if total > 1.0:
+        for t in out:
+            t["prob"] /= total
+    return out
+
+
 def read_race(api_key, race_key, race, final, model=None, race_label="", reuse=None):
     """
     Claude の読みを返す（例外は出さない）。
@@ -261,7 +308,11 @@ def read_race(api_key, race_key, race, final, model=None, race_label="", reuse=N
         if p is None:
             out["error"] = "6艇分の確率がそろっていませんでした"
             return out
-        out.update({"status": "ok", "p_first": p, "reasons": reasons,
+        tickets = _clean_tickets(data.get("tickets") or [], lanes)
+        if not tickets:
+            out["error"] = "買い目を読み取れませんでした"
+            return out
+        out.update({"status": "ok", "p_first": p, "reasons": reasons, "tickets": tickets,
                     "summary": str(data.get("summary") or "").strip()})
         _CACHE[key] = out
         return out
@@ -271,42 +322,69 @@ def read_race(api_key, race_key, race, final, model=None, race_label="", reuse=N
         return out
 
 
-def mix_final(final, claude_p):
-    """1着確率をモデルと Claude の平均にした final。2着・3着の条件付き確率はモデルのまま。"""
-    mix = final.copy()
-    lanes = pd.to_numeric(mix["lane"], errors="coerce").astype(int)
-    model_p = pd.to_numeric(mix["p_first"], errors="coerce").fillna(0.0)
-    claude = lanes.map({int(k): float(v) for k, v in claude_p.items()}).fillna(0.0)
-    avg = (model_p + claude) / 2.0
-    avg = avg / avg.sum() if avg.sum() > 0 else model_p
-    mix["p_first"] = avg.to_numpy()
-    mix["p_first_model"] = model_p.to_numpy()
-    mix["p_first_claude"] = claude.to_numpy()
-    # 2着・3着の周辺確率（表示用）も新しい1着確率で組み直す
-    lane_list = lanes.tolist()
-    p1 = dict(zip(lane_list, mix["p_first"]))
-    p2 = dict.fromkeys(lane_list, 0.0)
-    p3 = dict.fromkeys(lane_list, 0.0)
-    for a in lane_list:
-        col2 = f"p_second_given_{a}"
-        if col2 not in mix.columns:
-            continue
-        cond2 = dict(zip(lane_list, pd.to_numeric(mix[col2], errors="coerce").fillna(0.0)))
-        for b in lane_list:
+def _tri_dict(tri):
+    t = tri[["combo", "prob"]].copy()
+    t["prob"] = pd.to_numeric(t["prob"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    total = t["prob"].sum()
+    return {str(c): (p / total if total > 0 else 0.0) for c, p in zip(t["combo"], t["prob"])}
+
+
+def claude_full_tri(claude_tickets, model_tri):
+    """
+    Claude の買い目（10点前後）を120通りに広げる。挙げた組み合わせはその確率、
+    挙げなかった組み合わせには残り（1 − 挙げた分の合計）をモデルの確率の比率で配る。
+    """
+    m = _tri_dict(model_tri)
+    listed = {t["combo"]: float(t["prob"]) for t in claude_tickets if t["combo"] in m}
+    rest = max(1.0 - sum(listed.values()), 0.0)
+    others = {c: p for c, p in m.items() if c not in listed}
+    z = sum(others.values())
+    full = dict(listed)
+    for c, p in others.items():
+        full[c] = rest * (p / z if z > 0 else 1.0 / max(len(others), 1))
+    total = sum(full.values())
+    return {c: v / total for c, v in full.items()} if total > 0 else m
+
+
+def average_tri(model_tri, claude_tickets):
+    """モデルと Claude の3連単の確率を組み合わせごとに平均した表（combo, prob。合計1）。"""
+    m = _tri_dict(model_tri)
+    c = claude_full_tri(claude_tickets, model_tri)
+    rows = [(k, (m.get(k, 0.0) + c.get(k, 0.0)) / 2.0) for k in m]
+    out = pd.DataFrame(rows, columns=["combo", "prob"])
+    out["prob"] = out["prob"] / out["prob"].sum()
+    return out
+
+
+def final_from_tri(final, tri):
+    """3連単の表から、それと矛盾しない final（1着・条件付き2着・条件付き3着）を作る。買い目の点数決めに使う。"""
+    t = tri.copy()
+    parts = t["combo"].str.split("-", expand=True).astype(int)
+    t["a"], t["b"], t["c"] = parts[0], parts[1], parts[2]
+    out = final.copy()
+    lanes = pd.to_numeric(out["lane"], errors="coerce").astype(int).tolist()
+    p1 = t.groupby("a")["prob"].sum()
+    p_ab = t.groupby(["a", "b"])["prob"].sum()
+    out["p_first"] = [float(p1.get(ln, 0.0)) for ln in lanes]
+    p2m = dict.fromkeys(lanes, 0.0)
+    p3m = dict.fromkeys(lanes, 0.0)
+    for a in lanes:
+        pa = float(p1.get(a, 0.0))
+        out[f"p_second_given_{a}"] = [
+            0.0 if b == a or pa <= 0 else float(p_ab.get((a, b), 0.0)) / pa for b in lanes]
+        for b in lanes:
             if b == a:
                 continue
-            p2[b] += p1[a] * cond2[b]
-            col3 = f"p_third_given_{a}_{b}"
-            if col3 in mix.columns:
-                cond3 = dict(zip(lane_list, pd.to_numeric(mix[col3], errors="coerce").fillna(0.0)))
-                for c in lane_list:
-                    if c not in (a, b):
-                        p3[c] += p1[a] * cond2[b] * cond3[c]
-    if sum(p2.values()) > 0:
-        mix["p_second"] = [p2[ln] for ln in lane_list]
-    if sum(p3.values()) > 0:
-        mix["p_third"] = [p3[ln] for ln in lane_list]
-    return mix
+            pab = float(p_ab.get((a, b), 0.0))
+            p2m[b] += pab
+            sub = t[(t["a"] == a) & (t["b"] == b)].set_index("c")["prob"]
+            out[f"p_third_given_{a}_{b}"] = [
+                0.0 if c in (a, b) or pab <= 0 else float(sub.get(c, 0.0)) / pab for c in lanes]
+            for c in lanes:
+                p3m[c] += float(sub.get(c, 0.0))
+    out["p_second"] = [p2m[ln] for ln in lanes]
+    out["p_third"] = [p3m[ln] for ln in lanes]
+    return out
 
 
 def tickets_payload(tickets):
@@ -317,19 +395,26 @@ def tickets_payload(tickets):
     return rows
 
 
-def snapshot_section(reading, model_final=None, mix_tickets=None, mix_hit_probability=None):
-    """prediction_snapshots.payload_json の "claude" に入れる中身。"""
+def snapshot_section(reading, model_final=None, predictions=None):
+    """
+    prediction_snapshots.payload_json の "claude" に入れる中身。
+    predictions: {"claude": (tickets, hit_probability), "avg": (tickets, hit_probability)}
+    （モデルの買い目は今までどおり payload の "tickets"）。
+    """
     sec = {k: reading.get(k) for k in ("status", "model", "served_model", "input_hash", "prompt_version",
                                         "summary", "usage", "cost", "seconds", "error")}
     if reading.get("status") == "ok":
         sec["p_first"] = {str(k): round(float(v), 6) for k, v in reading["p_first"].items()}
         sec["reasons"] = {str(k): v for k, v in reading["reasons"].items()}
+        sec["claude_raw_tickets"] = reading.get("tickets") or []
         if model_final is not None:
             sec["model_p_first"] = {
                 str(int(r.lane)): round(float(r.p_first), 6) for r in model_final.itertuples()}
-        if mix_tickets is not None:
-            sec["mix_tickets"] = tickets_payload(mix_tickets)
-            sec["mix_hit_probability"] = mix_hit_probability
+        for name, key in (("claude", "claude_tickets"), ("avg", "avg_tickets")):
+            if predictions and predictions.get(name) is not None:
+                tickets, hit_prob = predictions[name]
+                sec[key] = tickets_payload(tickets)
+                sec[f"{name}_hit_probability"] = hit_prob
     return sec
 
 
@@ -340,6 +425,9 @@ def reading_from_section(sec):
     out = dict(sec)
     out["p_first"] = {int(k): float(v) for k, v in (sec.get("p_first") or {}).items()}
     out["reasons"] = {int(k): v for k, v in (sec.get("reasons") or {}).items()}
+    out["tickets"] = sec.get("claude_raw_tickets") or []
+    if not out["tickets"]:  # 1着確率だけの古い読み（v1）は使い回さない
+        return None
     return out
 
 
@@ -347,15 +435,36 @@ def reading_from_section(sec):
 # 結果確定後: どちらの買い目が当たったか（prediction_results の列）
 # ---------------------------------------------------------------
 RESULT_COLUMNS = [
-    "claude_model", "claude_p1_lane", "claude_first_hit", "mix_p1_lane", "mix_first_hit",
+    "claude_model", "claude_p1_lane", "claude_first_hit",
+    "claude_candidate_count", "claude_candidate_hit", "claude_hit_any_ticket", "claude_total_stake",
+    "claude_payout",
+    "mix_p1_lane", "mix_first_hit",
     "mix_candidate_count", "mix_candidate_hit", "mix_hit_any_ticket", "mix_total_stake", "mix_payout",
 ]
 
 
+def _ticket_hits(tickets, actual, payout_per_100, prefix):
+    combos = [str(t.get("combo")) for t in tickets]
+    stakes = [float(t.get("stake") or 0) for t in tickets]
+    hit_stake = sum(s for c, s in zip(combos, stakes) if c == actual and s > 0)
+    out = {
+        f"{prefix}_candidate_count": len(combos),
+        f"{prefix}_candidate_hit": actual in combos,
+        f"{prefix}_hit_any_ticket": hit_stake > 0,
+        f"{prefix}_total_stake": int(sum(stakes)),
+    }
+    try:
+        out[f"{prefix}_payout"] = int(round(hit_stake * float(payout_per_100) / 100))
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
 def result_fields(payload, actual_combo, payout_per_100):
     """
-    保存済み予想に Claude の読みがあれば、prediction_results に足す列を返す（無ければ空の dict）。
-    モデルの買い目の当たり外れは既存の列（candidate_hit・hit_any_ticket・payout）にある。
+    保存済み予想に Claude の予想があれば、prediction_results に足す列を返す（無ければ空の dict）。
+      claude_* … Claudeのみ予想 / mix_* … 両方の予想平均
+    モデルのみ予想の当たり外れは既存の列（candidate_hit・hit_any_ticket・payout）にある。
     """
     sec = payload.get("claude") if isinstance(payload, dict) else None
     if not isinstance(sec, dict) or sec.get("status") != "ok":
@@ -375,17 +484,9 @@ def result_fields(payload, actual_combo, payout_per_100):
         avg = {ln: (cp.get(ln, 0.0) + mp.get(ln, 0.0)) / 2 for ln in set(cp) | set(mp)}
         out["mix_p1_lane"] = max(avg, key=avg.get)
         out["mix_first_hit"] = (first == out["mix_p1_lane"]) if first else None
-    tickets = sec.get("mix_tickets") or []
-    if tickets:
-        combos = [str(t.get("combo")) for t in tickets]
-        stakes = [float(t.get("stake") or 0) for t in tickets]
-        hit_stake = sum(s for c, s in zip(combos, stakes) if c == actual and s > 0)
-        out["mix_candidate_count"] = len(combos)
-        out["mix_candidate_hit"] = actual in combos
-        out["mix_hit_any_ticket"] = hit_stake > 0
-        out["mix_total_stake"] = int(sum(stakes))
-        try:
-            out["mix_payout"] = int(round(hit_stake * float(payout_per_100) / 100))
-        except (TypeError, ValueError):
-            out["mix_payout"] = None
+    if sec.get("claude_tickets"):
+        out.update(_ticket_hits(sec["claude_tickets"], actual, payout_per_100, "claude"))
+    avg_tickets = sec.get("avg_tickets") or sec.get("mix_tickets")  # mix_tickets は v1 の保存形
+    if avg_tickets:
+        out.update(_ticket_hits(avg_tickets, actual, payout_per_100, "mix"))
     return {k: v for k, v in out.items() if v is not None}
