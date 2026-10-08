@@ -190,3 +190,47 @@ def render_tab(current_ctx):
             + (f" ／ 費用の目安 約{cost['jpy']:.1f}円（${cost['usd']:.4f}）" if cost else "")
             + "（同じレース・同じ入力なら再実行しても呼び直しません）"
         )
+
+
+# ---------------------------------------------------------------
+# 予想タブに小さく添える比較（管理者だけ。Claude が取れたときだけ）
+# ---------------------------------------------------------------
+def _side_table(tickets, other_combos):
+    t = tickets.copy()
+    t["違い"] = ["★" if str(c) not in other_combos else "" for c in t["combo"]]
+    t = t[["違い", "combo", "group", "stake"]] if "stake" in t.columns else t[["違い", "combo", "group"]]
+    if "stake" in t.columns:
+        t["stake"] = pd.to_numeric(t["stake"], errors="coerce").fillna(0).astype(int).map(
+            lambda v: f"{v:,}円" if v else "0円")
+    return t.rename(columns={"combo": "3連単", "group": "区分", "stake": "金額"})
+
+
+def render_inline(ctx, model_tickets):
+    """モデルの買い目とモデル＋Claudeの買い目を左右に並べ、片方にしか無い買い目に★を付ける。"""
+    b = _store().get(ctx)
+    if not b or b["reading"].get("status") != "ok" or b.get("mix_tickets") is None:
+        return
+    reading, final, mix = b["reading"], b["model_final"], b["mix_tickets"]
+    model_combos = set(map(str, model_tickets["combo"]))
+    mix_combos = set(map(str, mix["combo"]))
+    st.markdown("#### 🤖 モデル と 🤖＋🧠 モデル＋Claude の買い目")
+    lanes = pd.to_numeric(final["lane"], errors="coerce").astype(int).tolist()
+    mp = dict(zip(lanes, pd.to_numeric(final["p_first"], errors="coerce")))
+    cp = reading["p_first"]
+    prob = pd.DataFrame(
+        [[_pct(mp.get(ln)) for ln in lanes], [_pct(cp.get(ln)) for ln in lanes],
+         [_pct((mp.get(ln, 0) + cp.get(ln, 0)) / 2) for ln in lanes]],
+        index=["モデル", "Claude", "平均"], columns=[f"{ln}号艇" for ln in lanes])
+    st.dataframe(prob, use_container_width=True)
+    if reading.get("summary"):
+        st.caption(f"🧠 {reading['summary']}")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**{CHOICE_MODEL}**")
+        st.dataframe(_side_table(model_tickets, mix_combos), use_container_width=True, hide_index=True)
+    with c2:
+        st.markdown(f"**{CHOICE_MIX}**")
+        st.dataframe(_side_table(mix, model_combos), use_container_width=True, hide_index=True)
+    diff = len(model_combos ^ mix_combos)
+    st.caption("★ = もう一方には無い買い目" + (f"（違いは{diff}点）" if diff else "（買い目は同じ）")
+               + "。詳しい理由は「🤖＋Claude予想」タブ。")
