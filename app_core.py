@@ -3100,10 +3100,20 @@ with tab1:
             st.divider()
             # 管理者は3つのボタン（モデルのみ／Claudeのみ／両方の平均）。スタッフはモデルのみ。
             if IS_ADMIN:
+                # 押したボタンをレースごとに覚えて色付きにする（on_click は再描画の前に動くので、押した回から反映される）
+                _sel = st.session_state.setdefault("pred_btn_mode", {})
+
+                def _pick(m, _ctx=ctx):
+                    st.session_state["pred_btn_mode"][_ctx] = m
+
+                _cur = _sel.get(ctx, "model")
                 _pb = st.columns(3)
-                _press_model = _pb[0].button("🤖 モデルのみ予想", type="primary", use_container_width=True)
-                _press_claude = _pb[1].button("🧠 Claudeのみ予想", use_container_width=True)
-                _press_avg = _pb[2].button("⚖️ 両方の予想平均", use_container_width=True)
+                _press_model = _pb[0].button("🤖 モデルのみ予想", type="primary" if _cur == "model" else "secondary",
+                                             use_container_width=True, on_click=_pick, args=("model",))
+                _press_claude = _pb[1].button("🧠 Claudeのみ予想", type="primary" if _cur == "claude" else "secondary",
+                                              use_container_width=True, on_click=_pick, args=("claude",))
+                _press_avg = _pb[2].button("⚖️ 両方の予想平均", type="primary" if _cur == "avg" else "secondary",
+                                           use_container_width=True, on_click=_pick, args=("avg",))
             else:
                 _press_model = st.button("🤖 モデルのみ予想", type="primary")
                 _press_claude = _press_avg = False
