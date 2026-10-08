@@ -87,39 +87,72 @@ def calib_table(p, y, bins=BINS):
 # 買い目（本番と同じ手順）
 # ---------------------------------------------------------------
 def finals_by_race(model, test):
-    """テスト期間の全レースの final（prediction.predict と同じ形）を作る。"""
+    """テスト期間の全レースの final（prediction.predict と同じ形）を作る（まとめて横持ちにしてから切り出す）。"""
     first, second, third = model.predict_tables(test)
+    w2 = second.pivot_table(index=["race_key", "w_lane"], columns="lane", values="p")
+    w3 = third.pivot_table(index=["race_key", "w_lane", "s_lane"], columns="lane", values="p")
+    p1_all = first.pivot_table(index="race_key", columns="lane", values="p_first")
+    w2_g = {rk: g.droplevel(0) for rk, g in w2.groupby(level=0)}
+    w3_g = {rk: g.droplevel(0) for rk, g in w3.groupby(level=0)}
     out = {}
-    s_g = dict(tuple(second.groupby("race_key")))
-    t_g = dict(tuple(third.groupby("race_key")))
-    for rk, fr in first.groupby("race_key"):
-        lanes = sorted(int(v) for v in fr["lane"])
-        fin = pd.DataFrame({"lane": lanes})
-        p1 = dict(zip(fr["lane"].astype(int), fr["p_first"]))
-        fin["p_first"] = fin["lane"].map(p1)
-        s = s_g.get(rk)
-        t = t_g.get(rk)
+    for rk, row in p1_all.iterrows():
+        lanes = [int(c) for c in row.index if np.isfinite(row[c])]
+        p1 = {ln: float(row[ln]) for ln in lanes}
+        cols = {"lane": lanes, "p_first": [p1[ln] for ln in lanes]}
         p2m = dict.fromkeys(lanes, 0.0)
         p3m = dict.fromkeys(lanes, 0.0)
-        p2 = {}
-        for a, sa in s.groupby("w_lane"):
-            cond = dict(zip(sa["lane"].astype(int), sa["p"]))
-            p2[int(a)] = cond
-            fin[f"p_second_given_{int(a)}"] = fin["lane"].map(cond).fillna(0.0)
-            for b_, v in cond.items():
-                p2m[b_] += p1[int(a)] * v
-        for (a, b_), tab in t.groupby(["w_lane", "s_lane"]):
-            cond = dict(zip(tab["lane"].astype(int), tab["p"]))
-            fin[f"p_third_given_{int(a)}_{int(b_)}"] = fin["lane"].map(cond).fillna(0.0)
-            pab = p1[int(a)] * p2[int(a)].get(int(b_), 0.0)
-            for c, v in cond.items():
-                p3m[c] += pab * v
-        fin["p_second"] = fin["lane"].map(p2m)
-        fin["p_third"] = fin["lane"].map(p3m)
+        s2 = w2_g[rk]
+        for a in lanes:
+            cond = s2.loc[a]
+            cols[f"p_second_given_{a}"] = [0.0 if ln == a else float(np.nan_to_num(cond.get(ln, 0.0))) for ln in lanes]
+            for ln in lanes:
+                if ln != a:
+                    p2m[ln] += p1[a] * float(np.nan_to_num(cond.get(ln, 0.0)))
+        s3 = w3_g[rk]
+        for (a, b_), cond in s3.iterrows():
+            a, b_ = int(a), int(b_)
+            cols[f"p_third_given_{a}_{b_}"] = [0.0 if ln in (a, b_) else float(np.nan_to_num(cond.get(ln, 0.0)))
+                                              for ln in lanes]
+            pab = p1[a] * float(np.nan_to_num(s2.loc[a].get(b_, 0.0)))
+            for ln in lanes:
+                if ln not in (a, b_):
+                    p3m[ln] += pab * float(np.nan_to_num(cond.get(ln, 0.0)))
+        cols["p_second"] = [p2m[ln] for ln in lanes]
+        cols["p_third"] = [p3m[ln] for ln in lanes]
+        fin = pd.DataFrame(cols)
         fin["model_version"] = model.version
         fin["adjustment"] = 0.0
         out[rk] = fin
     return out, first
+
+
+_BET_RACES = {}
+
+
+def _bet_one(item):
+    from ml_compare_old import bet
+
+    rk, fin = item
+    try:
+        r = bet(fin, _BET_RACES[rk])
+    except Exception as e:  # noqa: BLE001
+        return rk, f"{type(e).__name__}: {e}"
+    r["p_first"] = dict(zip(fin["lane"].astype(int), fin["p_first"].astype(float)))
+    return rk, r
+
+
+def bet_all(finals, races, workers=4):
+    """本番と同じ買い目・資金配分を、レースごとに並列で作る。"""
+    import multiprocessing as mp
+
+    _BET_RACES.clear()
+    _BET_RACES.update(races)
+    with mp.get_context("fork").Pool(workers) as pool:
+        res = pool.map(_bet_one, list(finals.items()), chunksize=50)
+    errors = [v for _, v in res if isinstance(v, str)]
+    if errors:
+        log(f"[EXP] bet error {len(errors)}件 例: {errors[0]}")
+    return {rk: v for rk, v in res if not isinstance(v, str)}
 
 
 def load_old(old_dir):
@@ -260,15 +293,8 @@ def main():
             tsub = test[test["race_key"].isin(keys)]
             t1 = time.time()
             finals, _ = finals_by_race(model, tsub)
-            preds = {}
-            for rk, fin in finals.items():
-                try:
-                    r = bet(fin, old_race[rk])
-                except Exception as e:  # noqa: BLE001
-                    log(f"[EXP] bet error {type(e).__name__}: {e}")
-                    continue
-                r["p_first"] = dict(zip(fin["lane"].astype(int), fin["p_first"].astype(float)))
-                preds[rk] = r
+            log(f"[EXP] {version} final {len(finals)}レース {time.time() - t1:.0f}秒")
+            preds = bet_all(finals, old_race)
             log(f"[EXP] {version} 買い目 {len(preds)}レース {time.time() - t1:.0f}秒")
             tickets_all.append(ticket_rows(version, preds, actual, pay))
         summary["variants"][variant] = info
