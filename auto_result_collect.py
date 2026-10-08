@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
+import claude_reader
 from hit_calibration import CALIBRATED_RESULT_COLUMNS, snapshot_calibrated_fields
 from official_fetcher import fetch_race_result
 from today_schedule_fetcher import fetch_venue_deadlines
@@ -322,6 +323,8 @@ def _build_record(snapshot, official):
         "hit_probability": hit_probability,
         "stake_policy": stake_policy,
         **calibrated_fields,
+        # Claude の読みがある予想だけ: モデル＋Claude の買い目の当たり外れ
+        **claude_reader.result_fields(payload, actual_combo, official["trifecta_payout_per_100"]),
         "tickets_json": json.dumps(ticket_payload, ensure_ascii=False),
         "lane_probs_json": json.dumps({
             "final": lane_payload,
@@ -339,6 +342,7 @@ def _upsert_result(record):
     body = {k: record.get(k) for k in RESULT_COLUMNS}
     # 補正の列は値があるときだけ送る（マイグレーション前の DB でも保存できるように）。
     body.update({k: record[k] for k in CALIBRATED_RESULT_COLUMNS if record.get(k) is not None})
+    body.update({k: record[k] for k in claude_reader.RESULT_COLUMNS if record.get(k) is not None})
     _request(
         "POST",
         f"{url}/rest/v1/prediction_results?on_conflict=race_key",

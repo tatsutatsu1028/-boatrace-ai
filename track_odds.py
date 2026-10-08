@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
+import claude_reader
 from hit_calibration import snapshot_calibrated_fields
 from official_fetcher import VENUES, fetch_race_result
 from odds_rollup import rollup_and_prune, DEFAULT_RETENTION_DAYS
@@ -480,6 +481,10 @@ def _build_result_record(
         "hit_probability": hit_probability,
         "stake_policy": stake_policy,
         **calibrated_fields,
+        # Claude の読みがある予想だけ: モデル＋Claude の買い目の当たり外れ
+        **claude_reader.result_fields(
+            payload, actual_combo, official_result["trifecta_payout_per_100"]
+        ),
         "tickets_json": json.dumps(
             ticket_payload,
             ensure_ascii=False,

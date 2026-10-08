@@ -28,6 +28,7 @@ from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants, second_favorite_n_for
 from hit_calibration import apply_calibration as apply_hit_calibration
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
+import claude_tab
 from race_visuals import (
     ANIMATION_HEIGHT,
     build_visual_rows,
@@ -1070,6 +1071,7 @@ def _auto_save_prediction(ctx, d, jcd, venue, rno, deadlines, odds, result):
         research_variants=result.get("research_variants") or {},
         race_features=result.get("work"),
         pre_exhibition=result.get("pre_exhibition", False),
+        extra={"claude": result["claude"]} if result.get("claude") else None,
     )
     result["payload_hash"] = payload_hash
 
@@ -1122,6 +1124,24 @@ def _auto_save_prediction(ctx, d, jcd, venue, rno, deadlines, odds, result):
         else:
             out["odds_warning"] = f"オッズ追跡の開始に失敗しました。 {msg}"
     return out
+
+
+def _claude_reading(ctx, d, jcd, rno, work, final, tickets, odds, params):
+    """Claude の読み（管理者だけ呼ぶ）。保存済みの予想に同じ入力の読みがあれば API は呼ばない。"""
+    saved_section = None
+    try:
+        snap = load_prediction_snapshot(ctx)
+        saved_section = (json.loads((snap or {}).get("payload_json") or "{}") or {}).get("claude")
+    except Exception:
+        saved_section = None
+    section = claude_tab.run_at_predict(
+        ctx, f"{d} {VENUES[jcd]} {rno}R", work, final, odds, params, _complete_adaptive_tickets,
+        api_key=_secret_text("ANTHROPIC_API_KEY"),
+        model=_secret_text("CLAUDE_READ_MODEL") or None,
+        saved_section=saved_section,
+    )
+    claude_tab.attach_model_tickets(ctx, tickets, ticket_hit_probability(tickets))
+    return section
 
 
 def _saved_prediction_frames(ctx, result):
@@ -1192,9 +1212,12 @@ st.session_state.setdefault("race", None)
 st.session_state.setdefault("odds", None)
 st.session_state.setdefault("race_context", None)
 
-tab1, payout_tab, tab2, tab3, tab4 = st.tabs(
-    ["🎯 予想", "💴 本日の払戻", "🧠 学習データ", "⚙️ 設定", "📊 検証"]
-)
+# 「＋Claude予想」タブは管理者だけに出す（スタッフの操作では Claude の API を一切呼ばない）。
+_tab_labels = ["🎯 予想", "💴 本日の払戻", "🧠 学習データ", "⚙️ 設定", "📊 検証"]
+if IS_ADMIN:
+    _tab_labels.append("🤖＋Claude予想")
+_tabs = st.tabs(_tab_labels)
+tab1, payout_tab, tab2, tab3, tab4 = _tabs[:5]
 
 with payout_tab:
     st.subheader("💴 払戻")
@@ -3160,6 +3183,20 @@ with tab1:
                             # 展示データが揃う前の予想かどうか（保存する予想にも印を付ける）。
                             "pre_exhibition": not _exhibition_ready(work),
                         }
+                    # 管理者だけ: Claude の読みとモデル＋Claude の買い目（＋Claude予想タブに表示し、
+                    # 保存する予想にも入れる）。失敗してもモデルの予想と買い目はそのまま出す。
+                    if IS_ADMIN:
+                        with st.spinner("Claudeの読みを取得しています…"):
+                            st.session_state["result"]["claude"] = _claude_reading(
+                                ctx, d, jcd, rno, work, final, tickets, odds,
+                                {
+                                    "hedge_enabled": hedge_enabled,
+                                    "longshot_min_prob_pct": longshot_min_prob_pct,
+                                    "total_budget": total_budget,
+                                    "min_bet": min_bet,
+                                    "value_bias": value_bias,
+                                },
+                            )
                     # 予想を出した時点で自動保存する。締切前の再押下は最新予想で上書きし、
                     # 締切後は上書きしない（スタッフが押した場合も同じ）。
                     with st.spinner("予想を保存しています…"):
@@ -3258,6 +3295,8 @@ with tab1:
                 try:
                     if IS_ADMIN:
                         _saved_final, _saved_tickets = _saved_prediction_frames(ctx, result)
+                        # ＋Claude予想タブで「モデル＋Claudeの買い目」を選んだレースは記事の買い目を差し替える
+                        _saved_tickets = claude_tab.article_tickets(ctx, _saved_tickets)
                 except Exception as e:
                     print("[SNAPSHOT] saved prediction load error:", type(e).__name__, str(e), flush=True)
                     _saved_final, _saved_tickets = None, None
@@ -4102,3 +4141,8 @@ with tab1:
         """,
         height=1,
     )
+
+
+if IS_ADMIN:
+    with _tabs[5]:
+        claude_tab.render_tab((st.session_state.get("result") or {}).get("context"))
