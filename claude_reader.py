@@ -480,8 +480,11 @@ def result_fields(payload, actual_combo, payout_per_100):
     if cp:
         out["claude_p1_lane"] = max(cp, key=cp.get)
         out["claude_first_hit"] = (first == out["claude_p1_lane"]) if first else None
-    if cp and mp:
-        avg = {ln: (cp.get(ln, 0.0) + mp.get(ln, 0.0)) / 2 for ln in set(cp) | set(mp)}
+    ap = {int(k): float(v) for k, v in (sec.get("avg_p_first") or {}).items()}
+    if not ap and cp and mp:  # 1着確率の平均だけを持つ古い保存形
+        ap = {ln: (cp.get(ln, 0.0) + mp.get(ln, 0.0)) / 2 for ln in set(cp) | set(mp)}
+    if ap:
+        avg = ap
         out["mix_p1_lane"] = max(avg, key=avg.get)
         out["mix_first_hit"] = (first == out["mix_p1_lane"]) if first else None
     if sec.get("claude_tickets"):
