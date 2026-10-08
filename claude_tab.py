@@ -83,6 +83,11 @@ def run_at_predict(ctx, label, work, final, model_tickets, odds, params, complet
 
     reading = cr.read_race(api_key if call_api else "", ctx, work, final, model=model, race_label=label,
                            reuse=cr.reading_from_section(saved_section))
+    # 実際に API を呼んだ回だけ使用額を記録する（キャッシュや保存済みの読みを使った回は記録しない）
+    if reading.get("called_api") and not reading.get("usage_logged"):
+        import claude_usage
+
+        reading["usage_logged"] = claude_usage.log_call(reading, ctx)
     bundle = {"label": label, "reading": reading, "model_final": final,
               "tickets": {"model": model_tickets}, "hit": {"model": ticket_hit_probability(model_tickets)}}
     if reading.get("status") != "ok":

@@ -290,6 +290,7 @@ def read_race(api_key, race_key, race, final, model=None, race_label="", reuse=N
         else:
             resp = client.messages.create(**params)
         out["seconds"] = round(time.time() - t0, 1)
+        out["called_api"] = True  # 実際に API を呼んだ（費用がかかった）印。使用額の記録に使う
         out["served_model"] = getattr(resp, "model", model)
         usage = getattr(resp, "usage", None)
         out["usage"] = {k: getattr(usage, k, None) or 0 for k in
