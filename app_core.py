@@ -28,6 +28,7 @@ from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_p
 from hit_calibration import apply_calibration as apply_hit_calibration
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 import claude_tab
+import claude_usage
 import daily_review
 from race_visuals import (
     ANIMATION_HEIGHT,
@@ -1438,6 +1439,11 @@ with tab3:
             st.success("設定を保存しました。アプリを再起動しても復元されます。")
         else:
             st.error("設定の保存に失敗しました。")
+
+    # 管理者だけ: Claude API のチャージ額と日（残高の目安に使う）
+    if IS_ADMIN:
+        st.divider()
+        claude_usage.render_settings()
 
     # -------------------------------------------------
     # Threads（スレッズ）連携
@@ -3991,6 +3997,8 @@ with tab1:
 
 if IS_ADMIN:
     with _tabs[5]:
+        claude_usage.render_header()
+        st.divider()
         daily_review.render_daily(VENUES)
         st.divider()
         claude_tab.render_tab((st.session_state.get("result") or {}).get("context"))
