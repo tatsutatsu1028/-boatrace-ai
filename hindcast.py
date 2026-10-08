@@ -608,6 +608,8 @@ def ml_day(day, version, sources):
 
     k, b, p = sources
     f = mf.build_table(k, b, p, day, day)
+    if f.empty:
+        return None
     full = f.groupby("race_key")["has_pages"].transform("all")
     if not full.any():
         return None

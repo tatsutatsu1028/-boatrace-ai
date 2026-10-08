@@ -463,6 +463,8 @@ def build_table(k, b, p, start=None, end=None):
     if end:
         base = base[base["race_date"].astype(str) <= str(end)]
     base = base[~base["finish_raw"].astype(str).str.strip().str.startswith("K")].copy()
+    if base.empty:  # 対象の日の競走成績がまだ無い（呼び出し側で「次回に回す」）
+        return pd.DataFrame(columns=["race_key", "has_pages"])
     base["finish"] = _num(base["finish"])
     base["exhibition_time"] = _num(base["exhibition_time"]).where(lambda s: s.between(6.0, 8.0))
 
