@@ -8,6 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from course_baseline import get_course_baseline_finish
+from ml_features import _COURSE_BASELINE as _FLOW_BASELINE, meet_flow_values
 
 BASE = "https://www.boatrace.jp/owpc/pc/race"
 UA = {
@@ -208,6 +209,8 @@ def _parse_lane_meet(rows, lane, course_baseline=None):
         "current_meet_top2_rate": np.nan,
         "current_meet_avg_st": np.nan,
         "current_meet_races": 0,
+        "current_meet_last_adj": np.nan,
+        "current_meet_trend": np.nan,
     }
 
     if len(rows) < 4:
@@ -242,6 +245,8 @@ def _parse_lane_meet(rows, lane, course_baseline=None):
     sts = []
     finishes = []
     finish_diffs = []
+    # 新しい予想モデル（ml_features）の「今節の流れ」用。学習と同じ固定のコース基準で計算する
+    flow_diffs = []
 
     if course_baseline is None:
         course_baseline = get_course_baseline_finish()
@@ -262,6 +267,9 @@ def _parse_lane_meet(rows, lane, course_baseline=None):
             baseline = course_baseline.get(course)
             if baseline is not None:
                 finish_diffs.append(float(finish) - float(baseline))
+            flow_base = _FLOW_BASELINE.get(course)
+            if flow_base is not None:
+                flow_diffs.append(float(finish) - float(flow_base))
 
     rec["current_meet_races"] = len(sts)
 
@@ -276,6 +284,8 @@ def _parse_lane_meet(rows, lane, course_baseline=None):
 
     if finish_diffs:
         rec["current_meet_avg_finish_adjusted"] = float(np.mean(finish_diffs))
+
+    rec["current_meet_last_adj"], rec["current_meet_trend"] = meet_flow_values(flow_diffs)
 
     return rec
 
@@ -299,6 +309,8 @@ def fetch_current_meet(date_yyyymmdd, jcd, rno):
       current_meet_top2_rate            今節2連対率(%)
       current_meet_avg_st               今節平均ST
       current_meet_races                今節出走数
+      current_meet_last_adj             前走のコースを考えた着順（新しい予想モデル用）
+      current_meet_trend                今節の流れ（直近2走−それ以前。負なら尻上がり。新しい予想モデル用）
 
     初日は過去走が無いため races=0、他4項目は NaN になる。
     """
@@ -317,6 +329,8 @@ def fetch_current_meet(date_yyyymmdd, jcd, rno):
                 "current_meet_top2_rate": [np.nan] * 6,
                 "current_meet_avg_st": [np.nan] * 6,
                 "current_meet_races": [0] * 6,
+                "current_meet_last_adj": [np.nan] * 6,
+                "current_meet_trend": [np.nan] * 6,
             }
         )
         out.attrs["source"] = url

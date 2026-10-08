@@ -85,8 +85,8 @@ def race_features(date_yyyymmdd, jcd, rno, state, current_meet=None, pages=None,
         pages = collect_race(str(date_yyyymmdd), jcd, int(rno), with_racelist=True)
     if programs is None:
         programs = _programs(str(date_yyyymmdd))
-    key = f"{date_yyyymmdd}_{jcd}_{int(rno)}"
-    programs = programs[programs["race_key"].astype(str) == key]
+    # ナイターの判定にその場のその日の全レースの締切が要るので、場で絞るだけにする
+    programs = programs[programs["jcd"].astype(str).str.zfill(2) == jcd]
     pages = pages[pages["racer_id"].notna()]
     if as_of := state.get("as_of"):
         if pd.Timestamp(as_of) != pd.Timestamp(str(date_yyyymmdd)):

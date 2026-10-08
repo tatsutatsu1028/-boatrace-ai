@@ -165,10 +165,12 @@ def _placed_frame(f, lanes_by_race, tag):
 
 
 def _rel_cols(x, tag):
-    x[f"{tag}_lane_gap"] = x["lane"] - x[f"{tag}_lane"]
-    x[f"{tag}_course_gap"] = x["exp_course"] - x[f"{tag}_exp_course"]
-    x[f"{tag}_inside"] = (x[f"{tag}_lane_gap"] < 0).astype(float)
-    return x
+    gap = x["lane"] - x[f"{tag}_lane"]
+    return pd.concat([x, pd.DataFrame({
+        f"{tag}_lane_gap": gap,
+        f"{tag}_course_gap": x["exp_course"] - x[f"{tag}_exp_course"],
+        f"{tag}_inside": (gap < 0).astype(float),
+    }, index=x.index)], axis=1)
 
 
 def stage_cols(features, stage):
@@ -238,11 +240,33 @@ def _stage_groups(x, stage):
     return g.to_numpy()
 
 
+# 艇番を除いた実力での強さ（「艇番なし」モデルの1着確率から作る列）
+LANE_FREE_DERIVED = ["la_p", "la_rank", "la_gap", "la_top_lane", "la_top_is_lane1", "la_top_is_self"]
+
+
+def _lane_free_cols(scores, f):
+    """艇番なしモデルのスコアから、レース内の割合・順位・最強艇との差・最強艇の艇番を作る。"""
+    rk = f["race_key"].to_numpy()
+    out = pd.DataFrame(index=f.index)
+    out["la_p"] = _group_softmax(scores, rk, 1.0)
+    g = out["la_p"].groupby(f["race_key"])
+    out["la_rank"] = g.rank(ascending=False, method="min")
+    out["la_gap"] = out["la_p"] - g.transform("max")
+    top = f.loc[out["la_rank"] == 1].drop_duplicates("race_key").set_index("race_key")["lane"]
+    out["la_top_lane"] = f["race_key"].map(top).astype(float)
+    out["la_top_is_lane1"] = (out["la_top_lane"] == 1).astype(float)
+    out["la_top_is_self"] = (out["la_rank"] == 1).astype(float)
+    return out
+
+
 class ChainModel:
-    def __init__(self, features, version, engine="lgb"):
+    def __init__(self, features, version, engine="lgb", lane_free=None):
         self.features = list(features)
         self.version = version
         self.engine = engine
+        # lane_free: 艇番を除いた実力のモデルに使う列（None なら使わない）
+        self.lane_free = list(lane_free) if lane_free else None
+        self.lane_free_model = None
         self.models = {}
         self.temps = {1: 1.0, 2: 1.0, 3: 1.0}
         self.info = {}
@@ -252,6 +276,9 @@ class ChainModel:
         """f で3段を学習し、calib（学習に使っていない直近の期間）で温度を決める。"""
         t0 = time.time()
         f = f[f["finish"].notna() | f["lane"].notna()]
+        if self.lane_free:
+            f = self._fit_lane_free(f, log=log)
+            log(f"[ML] 艇番なしモデル {time.time() - t0:.0f}秒")
         rows = {1: f, 2: second_rows(f), 3: third_rows(f)}
         for stage in (1, 2, 3):
             cols = stage_cols(self.features, stage)
@@ -273,7 +300,37 @@ class ChainModel:
         self.info["train_to"] = str(f["race_date"].max())
         return self
 
+    def _fit_lane_free(self, f, folds=3, log=print):
+        """
+        艇番を除いた実力のモデル（1着を、艇番・コース・隣の艇の列を使わずに学習）。
+        学習データの行には、その行を含まない期間で学習した値（日付で3分割）を付け、
+        自分の結果を見た値が特徴量に混ざらないようにする。予想時は全期間で学習したものを使う。
+        """
+        f = f.reset_index(drop=True)
+        cols = self.lane_free
+        y = (f["finish"] == 1).astype(int)
+        d = pd.to_numeric(f["race_date"]).to_numpy()
+        edges = np.quantile(d, np.linspace(0, 1, folds + 1))
+        fold = np.clip(np.searchsorted(edges, d, side="right") - 1, 0, folds - 1)
+        scores = np.zeros(len(f))
+        for k in range(folds):
+            tr = fold != k
+            m = _fit_lgb_softmax(_prep(f[tr], cols), y[tr], f.loc[tr, "race_key"].to_numpy(),
+                                 f.loc[tr, "race_date"], log=log)
+            scores[~tr] = m.predict_raw(_prep(f[~tr], cols))
+        self.lane_free_model = _fit_lgb_softmax(_prep(f, cols), y, f["race_key"].to_numpy(), f["race_date"], log=log)
+        return pd.concat([f, _lane_free_cols(scores, f)], axis=1)
+
+    def with_lane_free(self, f):
+        """予想・調整・重要度の前に、艇番なしモデルの列を足す（使わないモデルならそのまま）。"""
+        if not self.lane_free or self.lane_free_model is None or "la_p" in f.columns:
+            return f
+        f = f.reset_index(drop=True)
+        scores = self.lane_free_model.predict_raw(_prep(f, self.lane_free))
+        return pd.concat([f, _lane_free_cols(scores, f)], axis=1)
+
     def calibrate(self, c, log=print):
+        c = self.with_lane_free(c)
         rows = {1: c, 2: second_rows(c), 3: third_rows(c)}
         for stage in (1, 2, 3):
             x = rows[stage]
@@ -302,6 +359,10 @@ class ChainModel:
         return tuple(pd.concat([p[j] for p in parts], ignore_index=True) for j in range(3))
 
     def _predict_tables(self, f):
+        f = self.with_lane_free(f)
+        return self._predict_tables_core(f)
+
+    def _predict_tables_core(self, f):
         """
         レースごとの確率表を返す。
           first:  race_key, lane, p_first
@@ -322,7 +383,7 @@ class ChainModel:
         x2 = x2.merge(src, on=["race_key", "w_lane"], how="left")
         x2 = _rel_cols(x2[x2["lane"] != x2["w_lane"]].reset_index(drop=True), "w")
         g2 = x2["race_key"] + "_" + x2["w_lane"].astype(int).astype(str)
-        x2["p"] = _group_softmax(self._z(x2, 2), g2.to_numpy(), self.temps[2])
+        x2 = x2.assign(p=_group_softmax(self._z(x2, 2), g2.to_numpy(), self.temps[2]))
         second = x2[["race_key", "w_lane", "lane", "p"]]
 
         # 3着: 全ての「1着a・2着b」の仮定
@@ -336,7 +397,7 @@ class ChainModel:
         x3 = _rel_cols(_rel_cols(x3, "w"), "s")
         g3 = (x3["race_key"] + "_" + x3["w_lane"].astype(int).astype(str) + "_"
               + x3["s_lane"].astype(int).astype(str))
-        x3["p"] = _group_softmax(self._z(x3, 3), g3.to_numpy(), self.temps[3])
+        x3 = x3.assign(p=_group_softmax(self._z(x3, 3), g3.to_numpy(), self.temps[3]))
         third = x3[["race_key", "w_lane", "s_lane", "lane", "p"]]
         return first, second, third
 
@@ -347,7 +408,7 @@ class ChainModel:
         races = f["race_key"].unique()
         if len(races) > max_races:
             races = rng.choice(races, max_races, replace=False)
-        x = f[f["race_key"].isin(races)].reset_index(drop=True)
+        x = self.with_lane_free(f[f["race_key"].isin(races)].reset_index(drop=True))
         if stage == 2:
             x = second_rows(x).reset_index(drop=True)
         elif stage == 3:
@@ -379,7 +440,8 @@ class ChainModel:
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"format": MODEL_FORMAT, "version": self.version, "features": self.features,
                      "models": self.models, "temps": self.temps, "info": self.info,
-                     "engine": self.engine}, path, compress=3)
+                     "engine": self.engine, "lane_free": self.lane_free,
+                     "lane_free_model": self.lane_free_model}, path, compress=3)
         meta = {"version": self.version, "temps": self.temps, "info": self.info,
                 "features": self.features}
         path.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
@@ -392,6 +454,7 @@ class ChainModel:
         d = joblib.load(path)
         m = cls(d["features"], d["version"], d.get("engine", "hgb"))
         m.models, m.temps, m.info = d["models"], d["temps"], d["info"]
+        m.lane_free, m.lane_free_model = d.get("lane_free"), d.get("lane_free_model")
         return m
 
 

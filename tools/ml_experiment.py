@@ -246,6 +246,8 @@ def main():
     ap.add_argument("--variants", default="1y,2y")
     ap.add_argument("--importance", action="store_true")
     ap.add_argument("--engine", default="lgb", choices=["lgb", "hgb"])
+    ap.add_argument("--feature-set", default="v2", choices=["v1", "v2"],
+                    help="v1: 最初の特徴量 / v2: 特徴量の表と照合して足した列と艇番なしモデルの列を含む")
     ap.add_argument("--reuse", action="store_true", help="保存済みのモデルがあれば学習し直さない")
     args = ap.parse_args()
     out = Path(args.out)
@@ -271,12 +273,16 @@ def main():
 
     for variant in args.variants.split(","):
         train, calib, test = split(f, variant)
-        version = f"{mm.MODEL_FAMILY}-v1-{args.engine}-{variant}"
+        version = f"{mm.MODEL_FAMILY}-{args.feature_set}-{args.engine}-{variant}"
         mpath = out / "models" / f"{version}.joblib"
         if args.reuse and mpath.exists():
             model = mm.ChainModel.load(mpath)
         else:
-            model = mm.ChainModel(mf.FEATURES, version, engine=args.engine)
+            if args.feature_set == "v1":
+                model = mm.ChainModel(mf.FEATURES_V1, version, engine=args.engine)
+            else:
+                model = mm.ChainModel(mf.FEATURES + mm.LANE_FREE_DERIVED, version, engine=args.engine,
+                                      lane_free=mf.LANE_FREE_FEATURES)
             model.fit(train, calib, log=log)
             model.save(mpath)
 
@@ -303,7 +309,9 @@ def main():
         if args.importance:
             imp = pd.concat([model.importance(test, stage=s).rename(f"stage{s}") for s in (1, 2, 3)], axis=1)
             group_of = {c: g for g, cols in mf.FEATURE_GROUPS.items() for c in cols}
-            imp["group"] = [group_of.get(c, "上位艇との関係" if c[:2] in ("w_", "s_") else "") for c in imp.index]
+            imp["group"] = [group_of.get(c, "艇同士の関係" if c.startswith("la_") else
+                                         "上位艇との関係" if c[:2] in ("w_", "s_") else "") for c in imp.index]
+            imp["added_v2"] = [c in mf.V2_ADDED or c.startswith("la_") for c in imp.index]
             imp.to_csv(out / f"importance_{variant}.csv", encoding="utf-8")
             log(f"[EXP] {version} 重要度 {time.time() - t0:.0f}秒")
 

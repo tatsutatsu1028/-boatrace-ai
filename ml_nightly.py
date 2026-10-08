@@ -33,6 +33,8 @@ from ml_live import LATEST_FILE, STATE_FILE, model_file
 
 JST = ZoneInfo("Asia/Tokyo")
 CALIB_DAYS = 28
+# 特徴量の版（v2: 特徴量の表と照合して足した列と、艇番を除いた実力のモデルの列を含む）
+MODEL_SET = "v2"
 HISTORY_START = "20240927"
 # 新しい版の LogLoss が前の版よりこれ以上悪ければ入れ替えない
 MAX_LOGLOSS_WORSE = 0.01
@@ -104,8 +106,9 @@ def train(as_of=None):
     f = f[f["race_date"] < str(as_of)]
     calib_start = _ymd(pd.Timestamp(as_of) - pd.Timedelta(days=CALIB_DAYS))
     train_f, calib_f = f[f["race_date"] < calib_start], f[f["race_date"] >= calib_start]
-    version = f"{mm.MODEL_FAMILY}-v1-lgb-2y-{as_of}"
-    model = mm.ChainModel(mf.FEATURES, version, engine="lgb").fit(train_f, calib_f, log=lambda *a: None)
+    version = f"{mm.MODEL_FAMILY}-{MODEL_SET}-lgb-2y-{as_of}"
+    model = mm.ChainModel(mf.FEATURES + mm.LANE_FREE_DERIVED, version, engine="lgb",
+                          lane_free=mf.LANE_FREE_FEATURES).fit(train_f, calib_f, log=lambda *a: None)
     print(f"[ML] 学習 {model.info['train_races']}レース（{model.info['train_from']}〜{model.info['train_to']}）"
           f" 調整 {model.info.get('calib_races')}レース {time.time() - t0:.0f}秒", flush=True)
 
