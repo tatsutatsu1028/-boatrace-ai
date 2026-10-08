@@ -610,6 +610,19 @@ _login_gate()
 def load_demo_history():
     return pd.read_csv(_data_paths.data_path("sample_history.csv"))
 
+
+def _default_history_caption(history):
+    """既定の学習データ（sample_history.csv: 公式の過去成績）の説明。"""
+    text = f"既定の学習データ（BOAT RACE公式の過去成績）{len(history):,}行を使用中"
+    try:
+        dates = pd.to_datetime(history["race_date"], errors="coerce").dropna()
+        races = history.drop_duplicates(["race_date", "jcd", "race_no"]).shape[0]
+        if len(dates):
+            text += f"：{dates.min():%Y-%m-%d}〜{dates.max():%Y-%m-%d}・{races:,}レース"
+    except Exception:
+        pass
+    return text + "。1着モデルはこのデータで学習しています。"
+
 def safe_name(v):
     if v is None:
         return ""
@@ -1271,7 +1284,7 @@ with tab2:
         if hist_up:
             st.success(f"アップロードした学習データ：{len(history):,}行")
         else:
-            st.warning(f"動作確認用の合成データ {len(history):,}行を使用中。実運用前に公式過去データへ置き換えてください。")
+            st.info(_default_history_caption(history))
         with st.expander("学習データ先頭を見る"):
             st.dataframe(history.head(12), use_container_width=True, hide_index=True)
     else:

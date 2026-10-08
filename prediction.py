@@ -1647,7 +1647,15 @@ def trifecta(
     P(3着艇 | 1着艇, 2着艇, レース特徴) を直接使う。条件付き列がない
     旧モデル・旧スナップショットではp_thirdへ安全にフォールバックする。
     COURSE_3RD_RANK_PROBは弱い事前分布として引き続きブレンドする。
+
+    新しい学習モデル（ml_model.py）の final が来たときは、上の補正を使わず
+    1着 × 2着(1着が決まった条件) × 3着(1・2着が決まった条件) の掛け算だけで計算する。
     """
+    from ml_model import is_ml_final, trifecta_exact
+
+    if is_ml_final(first):
+        return trifecta_exact(first)
+
     s = dict(
         zip(
             first["lane"].astype(int),
