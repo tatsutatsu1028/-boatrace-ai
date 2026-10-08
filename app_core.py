@@ -21,7 +21,6 @@ from official_fetcher import (
     VENUES,
     fetch_official_race,
     fetch_odds3t,
-    fetch_race_result,
     fetch_venue_result_list,
 )
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
@@ -48,9 +47,7 @@ from result_tracker import (
     load_result_detail,
     ResultsLoadError,
     load_analysis_view,
-    save_race_result,
     delete_result,
-    result_exists,
     metrics as validation_metrics,
     calibration_table,
     hit_probability_calibration_table,
@@ -65,8 +62,6 @@ from result_tracker import (
     add_to_odds_watchlist,
     save_odds_snapshot_now,
     load_odds_history,
-    snapshot_payout_from_official,
-    deactivate_odds_watchlist,
     load_prediction_snapshot,
     load_prediction_snapshot_meta,
     build_snapshot_payload_json,
@@ -3862,195 +3857,8 @@ with tab1:
                     mime="text/csv"
                 )
 
-                # 結果は自動で保存される。管理者は検証タブの「結果の手動保存（予備）」を使い、
-                # 予想タブの手動保存はスタッフの画面だけに残す（スタッフの画面は変えない）。
-                if not IS_ADMIN:
-                    st.divider()
-                    st.markdown("### ✅ レース結果を検証保存")
-
-                    if result_exists(ctx):
-                        st.success("このレースは検証履歴に保存済みです。再保存すると上書きします。")
-
-                    # 半自動検証 Phase 2：
-                    # 公式結果取得 → 固定予想で払戻計算 → 検証履歴保存 → オッズ追跡停止
-                    # を1クリックで実行する。固定予想がないレースは保存しない。
-                    if st.button(
-                        "🏁 結果取得＋検証保存",
-                        key=f"fetch_and_save_result_{ctx}",
-                        type="primary",
-                    ):
-                        snapshot_for_auto = load_prediction_snapshot(ctx)
-
-                        if snapshot_for_auto is None:
-                            st.error(
-                                "⚠️ このレースは予想が保存されていません。"
-                                "レース終了後の再予想が混ざるのを防ぐため、自動保存は行いません。"
-                            )
-                        else:
-                            try:
-                                official_result = fetch_race_result(
-                                    d.strftime("%Y%m%d"),
-                                    jcd,
-                                    rno,
-                                )
-
-                                combo = official_result["trifecta"]
-                                # 固定予想は1回だけ読み込み、払戻計算と結果保存で
-                                # 同じものを使う。別々に読み込むと、片方だけ通信に
-                                # 失敗したときに「払戻0円なのに的中扱い」のような
-                                # 食い違った行が保存されてしまう。
-                                received, hit_stake = snapshot_payout_from_official(
-                                    ctx,
-                                    combo,
-                                    official_result["trifecta_payout_per_100"],
-                                    snapshot=snapshot_for_auto,
-                                )
-
-                                # 画面の手動確認欄にも取得値を反映しておく。
-                                st.session_state[f"actual1_{ctx}"] = int(official_result["first"])
-                                st.session_state[f"actual2_{ctx}"] = int(official_result["second"])
-                                st.session_state[f"actual3_{ctx}"] = int(official_result["third"])
-                                st.session_state[f"payout_{ctx}"] = int(received)
-                                st.session_state[f"official_result_{ctx}"] = {
-                                    **official_result,
-                                    "received": int(received),
-                                    "hit_stake": int(hit_stake),
-                                }
-
-                                rec = save_race_result(
-                                    race_key=ctx,
-                                    race_date=d.isoformat(),
-                                    venue=VENUES[jcd],
-                                    race_no=rno,
-                                    final=final,
-                                    tickets=tickets,
-                                    first_actual=int(official_result["first"]),
-                                    second_actual=int(official_result["second"]),
-                                    third_actual=int(official_result["third"]),
-                                    payout=int(received),
-                                    research_variants=st.session_state["result"].get("research_variants", {}),
-                                    prefer_snapshot=True,
-                                    snapshot=snapshot_for_auto,
-                                    require_snapshot=True,
-                                    collector_name=COLLECTOR_NAME,
-                                )
-
-                                # 保存まで成功した後だけ追跡を停止する。
-                                deactivate_odds_watchlist(
-                                    d.strftime("%Y%m%d"),
-                                    jcd,
-                                    rno,
-                                )
-
-                                hit_text = "的中" if rec["hit_any_ticket"] else "不的中"
-                                source_text = (
-                                    "固定予想で判定"
-                                    if rec.get("_used_snapshot")
-                                    else "現在予想で判定"
-                                )
-                                st.success(
-                                    f"自動保存しました：実結果 {rec['trifecta_actual']} / "
-                                    f"購入買い目 {hit_text} / 収支 {rec['profit']:+,}円 / "
-                                    f"{source_text}"
-                                )
-
-                            except Exception as e:
-                                st.warning(
-                                    "公式結果の取得または検証保存を完了できませんでした。"
-                                    "結果確定後にもう一度押してください。"
-                                )
-                                st.caption(str(e))
-
-                    st.caption(
-                        "Phase 2：結果確定後は上のボタン1回で、公式結果取得・固定予想での判定・"
-                        "検証保存・オッズ追跡停止まで実行します。下の欄は確認／手動フォールバック用です。"
-                    )
-
-                    official_result_state = st.session_state.get(
-                        f"official_result_{ctx}"
-                    )
-                    if official_result_state:
-                        hit_text = (
-                            f"的中購入額 {official_result_state['hit_stake']:,}円"
-                            if official_result_state["hit_stake"] > 0
-                            else "固定買い目は不的中"
-                        )
-                        st.success(
-                            "🏁 公式結果取得済み："
-                            f"{official_result_state['trifecta']} / "
-                            f"3連単 {official_result_state['trifecta_payout_per_100']:,}円（100円あたり） / "
-                            f"{hit_text} / "
-                            f"実受取 {official_result_state['received']:,}円"
-                        )
-                        st.caption(
-                            "着順と払戻受取額を下に自動入力しました。"
-                            "内容を確認してから検証履歴へ保存してください。"
-                        )
-
-                    rc1, rc2, rc3 = st.columns(3)
-                    with rc1:
-                        actual_1 = st.selectbox("実1着", range(1,7), key=f"actual1_{ctx}")
-                    with rc2:
-                        actual_2 = st.selectbox("実2着", range(1,7), index=1, key=f"actual2_{ctx}")
-                    with rc3:
-                        actual_3 = st.selectbox("実3着", range(1,7), index=2, key=f"actual3_{ctx}")
-
-                    payout_input = st.number_input(
-                        "このレースの実払戻受取額（円）",
-                        min_value=0,
-                        max_value=10000000,
-                        value=0,
-                        step=100,
-                        key=f"payout_{ctx}",
-                        help="購入した買い目が外れなら0円。当たった場合は実際に受け取った合計払戻額を入力。",
-                    )
-
-                    if len({actual_1, actual_2, actual_3}) < 3:
-                        st.warning("1着・2着・3着は別々の艇を選んでください。")
-                    else:
-                        # 保存の有無は軽い状態確認だけで判定し、予想本体（約22KB）は
-                        # 保存ボタンを押した時だけ読み込む。
-                        _result_meta = _cached_snapshot_meta(ctx) or {}
-
-                        if not _result_meta.get("exists"):
-                            st.error(
-                                "⚠️ このレースは予想が保存されていません。"
-                                "レース終了後の再予想が混ざるのを防ぐため、結果保存は行いません。"
-                            )
-                        elif st.button("💾 実結果を検証履歴へ保存", key=f"save_result_{ctx}"):
-                            snapshot_for_result = load_prediction_snapshot(ctx)
-                            if snapshot_for_result is None:
-                                st.error("保存済みの予想を読み込めませんでした。もう一度お試しください。")
-                            else:
-                                rec = save_race_result(
-                                    race_key=ctx,
-                                    race_date=d.isoformat(),
-                                    venue=VENUES[jcd],
-                                    race_no=rno,
-                                    final=final,
-                                    tickets=tickets,
-                                    first_actual=actual_1,
-                                    second_actual=actual_2,
-                                    third_actual=actual_3,
-                                    payout=int(payout_input),
-                                    research_variants=st.session_state["result"].get("research_variants", {}),
-                                    prefer_snapshot=True,
-                                    snapshot=snapshot_for_result,
-                                    require_snapshot=True,
-                                    collector_name=COLLECTOR_NAME,
-                                )
-                                hit_text = "的中" if rec["hit_any_ticket"] else "不的中"
-                                source_text = (
-                                    "固定予想で判定"
-                                    if rec.get("_used_snapshot")
-                                    else "現在予想で判定"
-                                )
-                                st.success(
-                                    f"保存しました：実結果 {rec['trifecta_actual']} / "
-                                    f"購入買い目 {hit_text} / 収支 {rec['profit']:+,}円 / "
-                                    f"{source_text}"
-                                )
-
+                # 結果は自動で保存されるので、予想タブに手動の結果保存は置かない。
+                # 自動で入らなかったときの予備は、検証タブの「結果の手動保存」（管理者だけ）。
                 st.warning("AI予想は確率推定であり、的中・利益を保証しません。オッズ変動、欠場・返還、展示と本番の進入差にも注意してください。")
 
 
