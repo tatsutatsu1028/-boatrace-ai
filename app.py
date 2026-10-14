@@ -6,6 +6,7 @@ import pandas as pd
 import requests
 import streamlit as st
 import data_paths as _data_paths
+import ml_live as _ml_live
 import prediction as _prediction
 import result_tracker as _result_tracker
 import stake_allocator as _stake_allocator
@@ -114,6 +115,28 @@ def _boat_ai_sync_data():
         "errors=", result["errors"],
         flush=True,
     )
+    # 新しい予想モデルの学習済みモデル・集計表（毎朝作り直す）。取れなくても今のモデルの予想は動く
+    # （ml_live.production_final が今のモデルに戻す）。
+    try:
+        ml = _data_paths.sync_from_github(
+            token, repo=repo, files=_ml_live.APP_FILES, dest=result["dir"]
+        )
+        model_files = _ml_live.app_model_files(
+            _result_tracker.load_prediction_model_setting().get("prediction_model")
+        )
+        if model_files:
+            more = _data_paths.sync_from_github(
+                token, repo=repo, files=model_files, dest=result["dir"]
+            )
+            for k in ("updated", "kept"):
+                ml[k] += more[k]
+            ml["errors"].update(more["errors"])
+        print(
+            "[DATA] ml synced", "updated=", ml["updated"], "kept=", ml["kept"],
+            "errors=", ml["errors"], flush=True,
+        )
+    except Exception as e:
+        print("[DATA] ml sync error", type(e).__name__, flush=True)
     return result
 
 
@@ -226,6 +249,34 @@ def _boat_ai_predict(model, race, *args, **kwargs):
 
 
 _prediction.predict = _boat_ai_predict
+
+if not hasattr(_ml_live, "_boat_ai_original_production_final"):
+    _ml_live._boat_ai_original_production_final = _ml_live.production_final
+
+
+def _boat_ai_production_final(settings, race, *args, **kwargs):
+    """新しい予想モデルで予想したときも、保険（hedge）の判定と艇番なしモデルの記録を
+    今のモデルの本番予想と同じように、本番に使う final に合わせる。"""
+    global _LAST_PRODUCTION_RACE, _LAST_PRODUCTION_FINAL
+
+    out, info = _ml_live._boat_ai_original_production_final(settings, race, *args, **kwargs)
+    if out is not None:
+        lane_agnostic = _boat_ai_lane_agnostic(race)
+        if lane_agnostic:
+            try:
+                out.attrs["_boat_ai_lane_agnostic"] = lane_agnostic
+            except Exception:
+                pass
+        try:
+            _LAST_PRODUCTION_RACE = race.copy()
+            _LAST_PRODUCTION_FINAL = out.copy()
+        except Exception:
+            _LAST_PRODUCTION_RACE = race
+            _LAST_PRODUCTION_FINAL = out
+    return out, info
+
+
+_ml_live.production_final = _boat_ai_production_final
 
 
 def _boat_ai_research_prediction_variants(model, race, *args, **kwargs):

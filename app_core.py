@@ -26,6 +26,8 @@ from official_fetcher import (
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
 from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants, second_favorite_n_for
 from hit_calibration import apply_calibration as apply_hit_calibration
+import ml_live
+from ml_model import is_ml_final
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 import claude_tab
 import claude_usage
@@ -55,7 +57,12 @@ from result_tracker import (
     load_hit_calibration,
     STAKE_PERIODS,
     filter_by_stake_period,
+    MODEL_PERIODS,
+    filter_by_model,
+    load_prediction_model_switches,
+    model_period_comparison,
     load_stake_policy_switched_at,
+    load_prediction_model_setting,
     stake_period_comparison,
     load_settings,
     save_settings,
@@ -1068,7 +1075,11 @@ def _auto_save_prediction(ctx, d, jcd, venue, rno, deadlines, odds, result):
         research_variants=result.get("research_variants") or {},
         race_features=result.get("work"),
         pre_exhibition=result.get("pre_exhibition", False),
-        extra={"claude": result["claude"]} if result.get("claude") else None,
+        extra={
+            **({"claude": result["claude"]} if result.get("claude") else {}),
+            # どちらの予想モデルで出したか（設定値・使った版・新しいモデルを使えなかった理由）
+            **({"prediction_model": result["model_info"]} if result.get("model_info") else {}),
+        } or None,
     )
     result["payload_hash"] = payload_hash
 
@@ -1170,6 +1181,16 @@ def _saved_prediction_frames(ctx, result):
         tickets_df["stake"] = pd.to_numeric(tickets_df["stake"], errors="coerce").fillna(0).astype(int)
     cache[ctx] = (cache_key, final_df, tickets_df)
     return final_df, tickets_df
+
+
+def _before_text(row, label=None):
+    """1着確率の横の比較（今のモデルは展示反映前、新しいモデルは今までのモデルの予想）。"""
+    before, change = row.get("p_first_before"), row.get("変化")
+    if before is None or pd.isna(before):
+        return ""
+    if label:
+        return f"{label} {before*100:.1f}% / 差 {change*100:+.1f}pt"
+    return f"展示反映前 {before*100:.1f}% / 展示効果 {change*100:+.1f}pt"
 
 
 def _deadline_html(rno, hhmm, d):
@@ -1868,6 +1889,46 @@ with tab4:
             key="stake_period",
         )
         results_df = filter_by_stake_period(results_df, stake_period)
+
+        # 2026-10 に本番の予想を新しいモデル（ml-chain）に切り替えた。成績は予想に使った
+        # モデル（固定時に保存した版）で分けて見る。app_settings.prediction_model を
+        # current に戻したときも、その記録が下の表に残る。
+        st.markdown("### 🔀 予想モデルの切り替え前後")
+        _switches = load_prediction_model_switches()
+        if len(_switches):
+            st.caption("切り替えの記録（JST・新しい順）")
+            st.dataframe(_switches, use_container_width=True, hide_index=True)
+        else:
+            st.caption("予想モデルの切り替えの記録はまだありません。")
+        model_compare = model_period_comparison(results_df)
+        for _c in ("1着的中率", "買い目的中率", "表示した的中確率(平均)", "表示と実際の差", "回収率"):
+            model_compare[_c] = pd.to_numeric(model_compare[_c], errors="coerce") * 100
+        st.dataframe(
+            model_compare,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "1着的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                "買い目的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                "表示した的中確率(平均)": st.column_config.NumberColumn(format="%.1f%%"),
+                "表示と実際の差": st.column_config.NumberColumn(format="%+.1fpt"),
+                "投資": st.column_config.NumberColumn(format="%d円"),
+                "払戻": st.column_config.NumberColumn(format="%d円"),
+                "収支": st.column_config.NumberColumn(format="%+d円"),
+                "回収率": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+        st.caption(
+            "前後の判定は固定時に保存したモデルの版で行うため、切り替え当日のレースや、"
+            "新しいモデルで予想できず今までのモデルで予想したレースも正しく分かれます。"
+        )
+        model_period = st.radio(
+            "以下の集計の予想モデル",
+            MODEL_PERIODS,
+            horizontal=True,
+            key="model_period",
+        )
+        results_df = filter_by_model(results_df, model_period)
     else:
         stake_period = STAKE_PERIODS[0]
 
@@ -3147,6 +3208,19 @@ with tab1:
                             venue_course_weight=venue_course_weight,
                             original_display_scale=0.0,
                         )
+                        # app_settings.prediction_model が新しいモデルなら、そのモデルの予想を
+                        # 本番に使う（自動固定と同じ ml_live.production_final）。使えなかった
+                        # レース（過去のレース・集計表が古い など）は今のモデルの予想のまま。
+                        current_final = final
+                        ml_final, model_info = ml_live.production_final(
+                            load_prediction_model_setting(), work, d.strftime("%Y%m%d"), jcd, rno,
+                        )
+                        before_label = None
+                        if ml_final is not None:
+                            final = ml_final
+                            # 新しいモデルは展示前だけの予想を出せないので、今までのモデルと並べる
+                            before = current_final
+                            before_label = "今までのモデル"
 
                         # 研究用の比較は別計算。final（本番予想）は一切変更しない。
                         research_variants = research_prediction_variants(
@@ -3156,6 +3230,8 @@ with tab1:
                             weather_weight=weather_weight,
                             venue_course_weight=venue_course_weight,
                         )
+                        if ml_final is not None:
+                            research_variants = {"今までのモデル": current_final, **(research_variants or {})}
                         tri = trifecta(final)
                         ticket_plan = adaptive_ticket_plan(final)
                         target_points = int(ticket_plan["point_count"])
@@ -3203,6 +3279,8 @@ with tab1:
                         st.session_state["result"] = {
                             "context": ctx,
                             "before": before,
+                            "before_label": before_label,
+                            "model_info": model_info,
                             "final": final,
                             "tickets": tickets,
                             "work": work,
@@ -3270,6 +3348,14 @@ with tab1:
                 st.subheader(f"{VENUES[jcd]} {rno}R AI最終予想")
                 if IS_ADMIN:
                     st.caption(f"表示中：{claude_tab.MODE_LABELS[_view_mode]}")
+                _model_info = result.get("model_info") or {}
+                if is_ml_final(final):
+                    st.caption(f"予想モデル：新しいモデル（{final['model_version'].iloc[0]}）")
+                elif _model_info.get("fallback_reason"):
+                    st.warning(
+                        "新しいモデルで予想できなかったため、今までのモデルで予想しました"
+                        f"（{_model_info['fallback_reason']}）"
+                    )
 
                 if result.get("pre_exhibition"):
                     st.warning("⏳ 展示前の予想です。展示後にもう一度押してください")
@@ -3354,8 +3440,13 @@ with tab1:
                 # 補正前・補正後の両方を固定予想（prediction_snapshots）にも保存し、
                 # 後で実際の的中率と比べる。買い目の選び方・資金配分には使わない。
                 hit_prob = ticket_hit_probability(tickets)
-                # 補正はモデルの予想の実績で作ったものなので、モデルのみ予想のときだけ使う
-                _hit_cal = load_hit_calibration() if _view_mode == "model" else None
+                # 補正は今のモデルの予想の実績で作ったものなので、今のモデルの「モデルのみ予想」の
+                # ときだけ使う。新しいモデルは補正なしで実際の的中率に合っている
+                # （1週間の事後予想で表示48.7%・実際48.0%）ので補正しない。
+                _hit_cal = (
+                    load_hit_calibration()
+                    if _view_mode == "model" and not is_ml_final(final) else None
+                )
                 hit_prob_shown = apply_hit_calibration(hit_prob, _hit_cal)
                 if hit_prob_shown is not None:
                     _hit_note = (
@@ -3671,7 +3762,8 @@ with tab1:
                                     "設定タブから再登録してください。"
                                 )
 
-                merged = final.merge(before[["lane","p_first"]], on="lane", suffixes=("_after","_before"))
+                _before_label = result.get("before_label")
+                merged = final.merge(before[["lane","p_first"]], on="lane", how="left", suffixes=("_after","_before"))
                 merged["変化"] = merged["p_first_after"] - merged["p_first_before"]
                 merged = merged.sort_values("p_first_after", ascending=False)
 
@@ -3679,6 +3771,11 @@ with tab1:
                 if research_variants:
                     with st.expander("🧪 研究用：補正を1段ずつ比較", expanded=False):
                         st.caption(
+                            (
+                                "本番表示・買い目は新しいモデルの予想です。この表は今までのモデルの"
+                                "補正の段階別で、予想結果には影響しません。"
+                            )
+                            if is_ml_final(final) else
                             "本番表示・買い目は『現行全部入り』の結果をそのまま使用しています。"
                             "この表は研究用で、予想結果には影響しません。"
                         )
@@ -3768,7 +3865,10 @@ with tab1:
                     ).iloc[0]
                     km_dom = safe_name(row.get("kimarite_dominant", ""))
 
-                    if km_available and pd.notna(km_effect):
+                    if is_ml_final(final):
+                        # 新しいモデルは決まり手などを特徴量として学習しているので、後から足す補正は無い
+                        km_html = "学習モデル（後から足す補正なし）"
+                    elif km_available and pd.notna(km_effect):
                         km_parts = [f"決まり手補正 {float(km_effect):+.1f}%"]
                         if km_dom:
                             km_parts.append(f"得意 {km_dom}")
@@ -3799,7 +3899,7 @@ with tab1:
                     st.markdown(
                         f"""<div class="ticket"><b>{lane}号艇 {nm}</b><br>
     1着 <b>{row['p_first_after']*100:.1f}%</b>
-    <span class="small">展示反映前 {row['p_first_before']*100:.1f}% / 展示効果 {row['変化']*100:+.1f}pt</span><br>
+    <span class="small">{_before_text(row, _before_label)}</span><br>
     {place_html}<span class="small">🎯 {km_html}</span><br>
     <span class="small">{row['reason']}</span></div>""",
                         unsafe_allow_html=True

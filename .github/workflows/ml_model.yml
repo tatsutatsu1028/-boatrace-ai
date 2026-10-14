@@ -5,9 +5,9 @@ name: ML Model
 #   task=train: 2年分で学習し直し models/<版>.joblib と models/latest.json を書く（毎週。数分）
 # どちらも保存先は非公開のデータ用リポジトリ（models/）。成果物（artifact）には残さない。
 #
-# 本番の予想を新しいモデルに切り替えるまでは、手動（workflow_dispatch）でだけ動かす。
-# 切り替えると決めたら、pg_cron から state を毎晩（History Backfill の後、朝の開催前）、
-# train を週1回起動する（提案: state 毎日 08:05 JST、train 月曜 08:10 JST）。
+# 本番の予想を新しいモデルに切り替えたので、Supabase の pg_cron から起動する
+# （supabase/migrations/20261015000100_trigger_ml_model_via_pg_cron.sql）:
+#   state 毎日 05:05 JST（自動固定の前）、train 毎週月曜 06:10 JST。手動でも動かせる。
 
 on:
   workflow_dispatch:

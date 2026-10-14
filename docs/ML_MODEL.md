@@ -7,7 +7,9 @@
 検証の結果（成績の数字）は公式データから計算したものなので、非公開のデータ用リポジトリの
 `reports/ml_v1/REPORT.md` にだけ置いている。
 
-**本番の予想はまだ今のモデルのまま。** 切り替えるまで新しいモデルはどこからも呼ばれない。
+**2026-10-15 に本番の予想を新しいモデルに切り替えた**（1週間の並走検証 10/7〜10/13・1,043レースで合格基準を満たしたため）。
+アプリの「モデルのみ予想」・3つの予想（Claudeのみ・両方の平均）・自動固定は、app_settings の
+`prediction_model` が `ml` の間、新しいモデルの final を使う。
 
 ## 仕組み
 
@@ -59,7 +61,36 @@
   `current` に戻せばいつでも今のモデルに戻る。今のモデルのコードは消していない。
 - 事後予想（hindcast）では `model_version` に版の名前が入るので、新旧を同じ表で並べて比べられる。
 
-## 本番への入れ方（確認後）
+## 本番での使い方（2026-10-15 から）
+
+- 入口は `ml_live.production_final(settings, race, 日付, 場, R)`。アプリ（`app_core`）と自動固定（`auto_random_fix`）の
+  両方がこれを呼ぶ。新しいモデルの final を返し、使えないときは None（今のモデルで予想）を返す
+- 新しいモデルを使わず今のモデルで予想するレース（理由は保存する予想の `prediction_model.fallback_reason` と画面に出る）:
+  - 過去のレース（集計表にそのレース自身の結果が混ざるため）
+  - 集計表が3日より古い・読めない、学習済みモデルが読めない、番組表（Bファイル）にそのレースが無い
+- 保存する予想（`prediction_snapshots.payload_json`）に `model_version`（使った版）と
+  `prediction_model`（設定値・使ったモデル・理由）を残す。結果（`prediction_results.model_version`）にも版が入り、
+  検証画面の「予想モデルの切り替え前後」で今までのモデルと新しいモデルの成績を分けて見られる
+- 新しいモデルで予想したときは、今までのモデルの予想を研究用の比較（`research` の「今までのモデル」）に残し、
+  画面の1着確率の横にも並べる（新しいモデルは展示前だけの予想を出せないため「展示反映前」の代わり）
+- 「この買い目の的中確率」の補正（`hit_calibration`）は今のモデルの事後予想の実績で作ったもの。新しいモデルは
+  補正なしで実際の的中率に合っている（事後予想で表示48.7%・実際48.0%）ので、補正せずにそのまま出す。
+  補正の作り直し（週1回）は今のモデルの分だけ続ける（`current` に戻したときに使う）
+- 切り替えの記録: `app_settings.prediction_model` を変えるとトリガーが `prediction_model_switched_at` と
+  `prediction_model_switches`（いつ・何から・何へ）に記録する
+- 定期処理（pg_cron。`20261015000100_trigger_ml_model_via_pg_cron.sql`）: 集計表を毎日 05:05 JST、学習し直しを毎週月曜 06:10 JST
+- アプリはデータ用リポジトリから `models/latest.json`・`models/ml_state.pkl.gz`・使う版の `.joblib` を1時間ごとに確かめて取る
+
+### 元に戻すとき
+
+```sql
+update public.app_settings set prediction_model = 'current' where id = 1;
+```
+
+アプリは1分以内、自動固定は次の起動から今のモデルに戻る（今のモデルのコードと補正はそのまま残している）。
+版を固定するときは `prediction_model = 'ml-chain-v2-lgb-2y-20261008'` のように版の名前を書く。
+
+## 本番への入れ方（実施済み）
 
 1. `ML Model` ワークフローを `task=train` で動かし、最初の版を `models/` に作る
 2. `ML Model` を `task=state` で毎晩、`Hindcast` を `model=ml` で毎晩動かす（pg_cron に2つ足す）。

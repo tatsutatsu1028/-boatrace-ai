@@ -30,6 +30,8 @@ from prediction import (
     SECOND_FAVORITE_POLICY,
 )
 from hit_calibration import calibrated_hit_fields, latest_from_env
+from ml_live import production_final
+from ml_model import is_ml_final
 from stake_allocator import (
     STAKE_POLICY_ALL_RACES,
     allocate_stakes_smart,
@@ -240,6 +242,7 @@ def _snapshot_payload(
     ticket_plan=None,
     race_features=None,
     lane_agnostic=None,
+    model_info=None,
 ):
     final_cols = [
         "lane", "racer_name", "p_first", "p_second", "p_third",
@@ -291,7 +294,12 @@ def _snapshot_payload(
         # 手動固定と同じく、買い目全体の的中確率（補正前）と、表示する補正後の値・
         # 使った補正の id、資金配分方針を残す。
         "hit_probability": ticket_hit_probability(tickets),
-        **calibrated_hit_fields(ticket_hit_probability(tickets), latest_from_env()),
+        # 補正は今のモデルの事後予想の実績で作ったもの。新しいモデルは補正なしで実際の的中率に
+        # 合っている（1週間の事後予想で表示48.7%・実際48.0%）ので、補正後の値は残さない。
+        **calibrated_hit_fields(
+            ticket_hit_probability(tickets),
+            None if is_ml_final(final) else latest_from_env(),
+        ),
         "stake_policy": STAKE_POLICY_ALL_RACES,
         # 2番手候補1着の買い目確保の方針と、このレースで使ったN。
         "second_favorite_policy": SECOND_FAVORITE_POLICY,
@@ -315,6 +323,11 @@ def _snapshot_payload(
         }
     if lane_agnostic:
         payload["lane_agnostic"] = lane_agnostic
+    # どちらの予想モデルで出したか（設定値・使った版・新しいモデルを使えなかった理由）
+    if model_info:
+        payload["prediction_model"] = model_info
+    if "model_version" in final.columns and len(final):
+        payload["model_version"] = _json_safe(final["model_version"].iloc[0])
     return payload
 
 
@@ -330,6 +343,7 @@ def _save_snapshot(
     ticket_plan=None,
     race_features=None,
     lane_agnostic=None,
+    model_info=None,
 ):
     if _snapshot_exists(race_key):
         print("[AUTO_RANDOM] already fixed:", race_key)
@@ -353,6 +367,7 @@ def _save_snapshot(
                 ticket_plan=ticket_plan,
                 race_features=race_features,
                 lane_agnostic=lane_agnostic,
+                model_info=model_info,
             ),
             ensure_ascii=False,
         ),
@@ -532,7 +547,7 @@ def _pick_ready_candidates(today, candidates, max_needed):
 
 
 def _process_candidate(
-    model, runtime, today, jcd, rno, race_key, race, lane_agnostic_model=None
+    model, runtime, today, jcd, rno, race_key, race, lane_agnostic_model=None, settings=None
 ):
     """
     展示情報つきで確認済みの1レースを予想・買い目生成し、スナップショットとして
@@ -549,7 +564,7 @@ def _process_candidate(
         print(f"[AUTO_RANDOM] insufficient odds data: {race_key}; skip")
         return False
 
-    final = predict(
+    current_final = predict(
         model,
         race,
         display_weight=runtime["display_weight"],
@@ -557,6 +572,10 @@ def _process_candidate(
         venue_course_weight=runtime["venue_course_weight"],
         original_display_scale=0.0,
     )
+    # app_settings.prediction_model が新しいモデルなら、そのモデルの予想を本番に使う。
+    # 使えなかったレースは今のモデルの予想のまま（理由は保存する予想に残す）。
+    ml_final, model_info = production_final(settings, race, date_key, jcd, rno)
+    final = ml_final if ml_final is not None else current_final
     confidence_label = confidence(final, race)
 
     research_variants = research_prediction_variants(
@@ -566,6 +585,9 @@ def _process_candidate(
         weather_weight=runtime["weather_weight"],
         venue_course_weight=runtime["venue_course_weight"],
     )
+    if ml_final is not None:
+        # 新しいモデルで予想したときは、今までのモデルの予想も比較用に残す
+        research_variants = {"今までのモデル": current_final, **(research_variants or {})}
 
     tri = trifecta(final)
     ticket_plan = adaptive_ticket_plan(final)
@@ -633,6 +655,7 @@ def _process_candidate(
         ticket_plan=ticket_plan,
         race_features=race,
         lane_agnostic=lane_agnostic,
+        model_info=model_info,
     ):
         return False
 
@@ -650,7 +673,10 @@ def _process_candidate(
             str(e),
         )
 
-    print(f"[AUTO_RANDOM] saved {race_key}; confidence={confidence_label}")
+    print(
+        f"[AUTO_RANDOM] saved {race_key}; confidence={confidence_label}; "
+        f"model={model_info.get('model_used')}"
+    )
     return True
 
 
@@ -703,6 +729,7 @@ def main():
             if _process_candidate(
                 model, runtime, today, jcd, rno, race_key, race,
                 lane_agnostic_model=lane_agnostic_model,
+                settings=settings,
             ):
                 saved += 1
         except Exception as e:

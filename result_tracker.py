@@ -14,6 +14,7 @@ import streamlit as st
 
 import claude_reader
 import hit_calibration
+from ml_model import is_ml_final as _is_ml_final
 from prediction import SECOND_FAVORITE_POLICY, second_favorite_n_for
 from stake_allocator import STAKE_POLICY_ALL_RACES, ticket_hit_probability
 
@@ -104,6 +105,9 @@ RESULT_COLUMNS = [
     # hit_probability は補正前のまま残し、後で両方を実際の的中率と比べる。
     "hit_probability_calibrated",
     "hit_calibration_id",
+    # 予想に使ったモデルの版（今のモデル position-... / 新しいモデル ml-chain-...）。
+    # 検証画面で予想モデルの切り替え前後を分ける。
+    "model_version",
     "tickets_json",
     "lane_probs_json",
 ]
@@ -513,10 +517,18 @@ def _snapshot_payload(final, tickets, research_variants=None, race_features=None
         # 補正後の値・使った補正の id。結果確定後に両方を実際の的中率と比べるため、
         # 固定時点の値をそのまま残す。
         "hit_probability": ticket_hit_probability(tickets),
+        # 補正は今のモデルの事後予想の実績で作ったもの。新しいモデル（ml-chain）は補正なしで
+        # 実際の的中率に合っているので、補正後の値は残さない。
         **hit_calibration.calibrated_hit_fields(
-            ticket_hit_probability(tickets), load_hit_calibration()
+            ticket_hit_probability(tickets),
+            None if _is_ml_final(final) else load_hit_calibration(),
         ),
         "stake_policy": STAKE_POLICY_ALL_RACES,
+        # 予想に使ったモデルの版（最初の艇の model_version と同じ）
+        "model_version": (
+            str(final["model_version"].iloc[0])
+            if "model_version" in final.columns and len(final) else None
+        ),
         # 2番手候補1着の買い目確保の方針と、このレースで使ったN。
         "second_favorite_policy": SECOND_FAVORITE_POLICY,
         "second_favorite_n": second_favorite_n_for(final),
@@ -1258,6 +1270,11 @@ def save_race_result(
         "stake_policy": stake_policy,
         "hit_probability_calibrated": calibrated_fields.get("hit_probability_calibrated"),
         "hit_calibration_id": calibrated_fields.get("hit_calibration_id"),
+        "model_version": next(
+            (str(r.get("model_version")) for r in lane_payload
+             if isinstance(r, dict) and r.get("model_version")),
+            None,
+        ),
         "tickets_json": json.dumps(
             ticket_payload,
             ensure_ascii=False,
@@ -1952,6 +1969,32 @@ def _load_stake_switch_setting():
         return None
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_prediction_model_setting():
+    """app_settings の予想モデルの設定（prediction_model）。読めなければ空の dict（今のモデル）。
+
+    load_settings() / save_settings() は DEFAULT_SETTINGS の列だけを読み書きするので、
+    画面の設定保存で prediction_model が上書きされないよう、ここで別に読む。
+    current に戻したときも1分以内に反映される。
+    """
+    if not _use_supabase():
+        return {}
+    try:
+        url, _ = _supabase_config()
+        r = requests.get(
+            f"{url}/rest/v1/{SUPABASE_SETTINGS_TABLE}",
+            params={"select": "prediction_model,prediction_model_switched_at", "id": "eq.1"},
+            headers=_headers(),
+            timeout=10,
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+        return dict(rows[0]) if rows else {}
+    except Exception as e:
+        print("[RESULT_TRACKER] prediction model setting load error:", type(e).__name__, str(e), flush=True)
+        return {}
+
+
 def load_stake_policy_switched_at(df=None):
     """全レース配分へ切り替えた日時（JSTの文字列）を返す。
 
@@ -1967,6 +2010,95 @@ def load_stake_policy_switched_at(df=None):
         if len(after):
             return str(after["saved_at"].astype(str).min())[:16].replace("T", " ")
     return None
+
+
+MODEL_PERIOD_ALL = "全部"
+MODEL_PERIOD_CURRENT = "今までのモデル"
+MODEL_PERIOD_ML = "新しいモデル"
+MODEL_PERIODS = [MODEL_PERIOD_ALL, MODEL_PERIOD_CURRENT, MODEL_PERIOD_ML]
+
+
+def _is_ml_row(df):
+    """各行が新しい予想モデル（ml-chain）で出した予想か。
+
+    日時ではなく、固定時に保存した model_version で判定する。切り替えた後も、新しいモデルを
+    使えなかったレース（今のモデルで予想）は「今までのモデル」に入る。
+    """
+    if df is None or "model_version" not in df.columns:
+        return pd.Series(False, index=getattr(df, "index", None), dtype=bool)
+    return df["model_version"].astype(str).str.startswith("ml-chain")
+
+
+def filter_by_model(df, period):
+    """検証データを予想モデルで絞り込む。全部ならそのまま返す。"""
+    if df is None or period == MODEL_PERIOD_ALL:
+        return df
+    ml = _is_ml_row(df)
+    return df[ml].copy() if period == MODEL_PERIOD_ML else df[~ml].copy()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_prediction_model_switches():
+    """予想モデルを切り替えた記録（新しい順。日時はJST）。読めなければ空の表。"""
+    empty = pd.DataFrame(columns=["切り替え日時", "前", "後"])
+    if not _use_supabase():
+        return empty
+    try:
+        url, _ = _supabase_config()
+        r = requests.get(
+            f"{url}/rest/v1/prediction_model_switches",
+            params={"select": "switched_at,from_model,to_model", "order": "switched_at.desc"},
+            headers=_headers(),
+            timeout=10,
+        )
+        r.raise_for_status()
+        rows = r.json() or []
+    except Exception as e:
+        print("[RESULT_TRACKER] model switches load error:", type(e).__name__, str(e), flush=True)
+        return empty
+    if not rows:
+        return empty
+    out = pd.DataFrame(rows)
+    out["switched_at"] = (
+        pd.to_datetime(out["switched_at"], utc=True).dt.tz_convert("Asia/Tokyo").dt.strftime("%Y-%m-%d %H:%M")
+    )
+    return out.rename(columns={"switched_at": "切り替え日時", "from_model": "前", "to_model": "後"})
+
+
+def model_period_comparison(df):
+    """今までのモデルと新しいモデルの成績を1表にまとめる。率は0〜1、金額は円。"""
+    rows = []
+    if df is None:
+        df = pd.DataFrame(columns=RESULT_COLUMNS)
+    for period in (MODEL_PERIOD_CURRENT, MODEL_PERIOD_ML):
+        part = filter_by_model(df, period)
+        m = metrics(part)
+        raw = pd.to_numeric(part.get("hit_probability", pd.Series(dtype=float)), errors="coerce")
+        cal = pd.to_numeric(
+            part.get("hit_probability_calibrated", pd.Series(np.nan, index=part.index)), errors="coerce"
+        )
+        # 画面に表示した値（補正後があれば補正後、新しいモデルは補正前のまま）と、候補内の的中
+        shown = cal.fillna(raw)
+        hit = part.get("candidate_hit", pd.Series(np.nan, index=part.index))
+        ok = shown.notna() & hit.notna()
+        hit = hit.astype(str).str.lower().isin(["true", "1"])
+        shown_mean = float(shown[ok].mean()) if ok.any() else np.nan
+        actual = float(hit[ok].mean()) if ok.any() else np.nan
+        rows.append(
+            {
+                "予想モデル": period,
+                "レース数": m["races"],
+                "1着的中率": m["first_hit_rate"],
+                "買い目的中率": m["candidate_hit_rate"],
+                "表示した的中確率(平均)": shown_mean,
+                "表示と実際の差": shown_mean - actual if ok.any() else np.nan,
+                "投資": m["total_stake"],
+                "払戻": m["total_payout"],
+                "収支": m["profit"],
+                "回収率": m["roi"],
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def stake_period_comparison(df):
