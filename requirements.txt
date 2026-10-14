@@ -14,3 +14,4 @@ extra-streamlit-components
 lightgbm>=4.0
 scipy
 anthropic>=1.0
+lhafile

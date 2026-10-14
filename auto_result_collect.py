@@ -44,7 +44,7 @@ RESULT_COLUMNS = [
     "hit_top_ticket", "hit_any_ticket", "predicted_first_hit",
     "candidate_count", "candidate_hit", "candidate_hit_rank",
     "hit_within_8", "hit_within_9", "hit_within_10",
-    "hit_probability", "stake_policy",
+    "hit_probability", "stake_policy", "model_version",
     "tickets_json", "lane_probs_json",
 ]
 
@@ -322,6 +322,11 @@ def _build_record(snapshot, official):
         "predicted_first_hit": int(official["first"]) == p1_lane,
         "hit_probability": hit_probability,
         "stake_policy": stake_policy,
+        # 予想に使ったモデルの版（新しい固定予想は payload に、古いものは各艇の行にある）
+        "model_version": (
+            str(payload.get("model_version") or "").strip()
+            or next((str(r.get("model_version")) for r in lane_payload if r.get("model_version")), None)
+        ),
         **calibrated_fields,
         # Claude の読みがある予想だけ: モデル＋Claude の買い目の当たり外れ
         **claude_reader.result_fields(payload, actual_combo, official["trifecta_payout_per_100"]),
