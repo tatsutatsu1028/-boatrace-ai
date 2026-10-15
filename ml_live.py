@@ -78,8 +78,9 @@ def load_model(version):
 
 
 def load_state(path=None):
+    """集計表を読み、文字列の列をこの環境の型にそろえる（Actions で作った pickle を本番で読むため）。"""
     with gzip.open(path or data_path(STATE_FILE), "rb") as fh:
-        return pickle.load(fh)
+        return mf.unify_state(pickle.load(fh))
 
 
 _STATE_CACHE = {}

@@ -71,7 +71,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml pandas numpy scikit-learn joblib lhafile lightgbm scipy
+        run: pip install requests beautifulsoup4 lxml pandas==3.0.6 numpy==2.4.6 scikit-learn joblib lhafile lightgbm scipy
 
       # ログは誰でも見られるため、hindcast.py は日付・件数・所要時間だけを出す。
       - name: Run hindcast
