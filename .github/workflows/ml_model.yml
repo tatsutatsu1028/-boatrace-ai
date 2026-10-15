@@ -52,7 +52,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml pandas numpy scikit-learn scipy joblib lhafile lightgbm
+        run: pip install requests beautifulsoup4 lxml pandas==3.0.6 numpy==2.4.6 scikit-learn scipy joblib lhafile lightgbm
 
       # ログは誰でも見られるため、ml_nightly.py は日付・件数・所要時間・合否だけを出す。
       - name: Run

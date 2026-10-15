@@ -140,6 +140,23 @@ def load_sources(start=None, end=None):
     return k, b, p
 
 
+def unify_strings(df, cols=None):
+    """文字列の列を、今の環境の既定の文字列型にそろえる（df をそのまま書き換えて返す）。
+
+    pandas 3 の文字列型は、pyarrow がある環境（Streamlit 本番）では pyarrow 保存、無い環境
+    （GitHub Actions）では python 保存になり、保存形式が違う列どうしは結合（merge）できない
+    （MergeError: incompatible merge keys）。Actions で作って pickle した集計表を本番で読むと
+    この組み合わせになるので、結合の前に両側をそろえる。欠損はそのまま残す。
+    """
+    if df is None:
+        return df
+    for c in (df.columns if cols is None else [c for c in cols if c in df.columns]):
+        dt = df[c].dtype
+        if isinstance(dt, pd.StringDtype) or (dt == object and cols is not None):
+            df[c] = df[c].astype("str")
+    return df
+
+
 # ---------------------------------------------------------------
 # 過去の結果の集計（そのレースより前だけ）
 # ---------------------------------------------------------------
@@ -183,10 +200,10 @@ def _cum_by_day(e, keys, cols):
 
 def _asof(targets, cum, keys, cols, shift_days=0, suffix=""):
     """targets の各行の「d - shift_days より前の日まで」の累積値。"""
-    t = targets[keys + ["d"]].copy()
+    t = unify_strings(targets[keys + ["d"]].copy(), keys)
     t["_row"] = np.arange(len(t))
     t["_q"] = t["d"] - pd.Timedelta(days=shift_days)
-    c = cum.rename(columns={"d": "_q"})
+    c = unify_strings(cum.rename(columns={"d": "_q"}), keys)
     t = t.sort_values("_q")
     c = c.sort_values("_q")
     m = pd.merge_asof(t, c, on="_q", by=keys, allow_exact_matches=False)
@@ -655,7 +672,7 @@ def live_table(pages, programs, state, current_meet=None):
     番組表と食い違うことがあるため）。今節成績は本番の current_meet_fetcher の値
     （同じ定義で学習している）をそのまま使う。
     """
-    p = pages.copy()
+    p = unify_strings(pages.copy())
     p["race_key"] = p["race_key"].astype(str)
     p["lane"] = _num(p["lane"])
     p["racer_id"] = p["racer_id"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
@@ -666,7 +683,7 @@ def live_table(pages, programs, state, current_meet=None):
               "fixed_entry", "day_no"]].copy()
     base["race_type"] = p["race_name"]
     base["finish"] = np.nan
-    b = programs.copy() if programs is not None else pd.DataFrame(columns=["race_key", "lane"])
+    b = unify_strings(programs.copy()) if programs is not None else pd.DataFrame(columns=["race_key", "lane"])
     b["race_key"] = b["race_key"].astype(str)
     b["lane"] = _num(b["lane"])
     for c in _B_COLS:
@@ -684,7 +701,7 @@ def live_table(pages, programs, state, current_meet=None):
     base = base.merge(p[_PAGES_COLS].rename(columns=_PAGES_RENAME), on=["race_key", "lane"], how="left")
     meet = pd.DataFrame({"race_key": base["race_key"], "lane": base["lane"]})
     if current_meet is not None and len(current_meet):
-        cm = current_meet.rename(columns=_LIVE_MEET)
+        cm = unify_strings(current_meet.rename(columns=_LIVE_MEET))
         cm["lane"] = _num(cm["lane"])
         meet = meet.merge(cm[["lane"] + [c for c in _LIVE_MEET.values() if c in cm.columns]],
                           on="lane", how="left")
@@ -692,7 +709,15 @@ def live_table(pages, programs, state, current_meet=None):
         if c not in meet.columns:
             meet[c] = np.nan
     meet["meet_n"] = meet["meet_n"].fillna(0)
-    return assemble(base, state, meet)
+    return assemble(unify_strings(base), unify_state(state), unify_strings(meet))
+
+
+def unify_state(state):
+    """集計表（build_state / compact_state の dict）の中の表の文字列の列をそろえる。"""
+    for v in (state or {}).values():
+        if isinstance(v, pd.DataFrame):
+            unify_strings(v)
+    return state
 
 
 def build_dataset(start, end, history_start=None):
