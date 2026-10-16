@@ -124,6 +124,16 @@ def _boat_ai_sync_data():
         model_files = _ml_live.app_model_files(
             _result_tracker.load_prediction_model_setting().get("prediction_model")
         )
+        # 万舟チャンスの展示後版（manshu.py）。版の名前は manshu_latest.json を取ってから読む
+        try:
+            import manshu as _manshu
+
+            _data_paths.sync_from_github(
+                token, repo=repo, files=(_manshu.LATEST_FILE,), dest=result["dir"]
+            )
+            model_files = tuple(model_files) + _manshu.app_files()
+        except Exception as e:
+            print("[DATA] manshu sync error", type(e).__name__, flush=True)
         if model_files:
             more = _data_paths.sync_from_github(
                 token, repo=repo, files=model_files, dest=result["dir"]

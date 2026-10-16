@@ -108,7 +108,7 @@ def _deadline_passed(d, hhmm):
         return False
 
 
-def _render_pick(d, r):
+def _render_pick(d, r, manshu_marks=None):
     post = r.get("post_tickets") is not None
     passed = _deadline_passed(d, r.get("deadline"))
     with st.container(border=True):
@@ -116,6 +116,8 @@ def _render_pick(d, r):
         if passed:
             head += "（締切済み）"
         st.markdown(head)
+        if r["race_key"] in (manshu_marks or {}):
+            st.caption("💥 万舟チャンス（荒れやすいレース）にも入っています。本命が来にくい傾向があります。")
         hp = float(r["hit_probability"])
         if post and r.get("post_hit_probability") is not None:
             st.markdown(f"当たりやすさ（この買い目の的中確率）: 展示前 **{hp:.0%}** → 展示後 **{float(r['post_hit_probability']):.0%}**")
@@ -172,8 +174,8 @@ def _render_summary():
                "中止・不成立のレースは除いています。")
 
 
-def render(d):
-    """予想タブの日付 d の厳選10レース。"""
+def render(d, manshu_marks=None):
+    """予想タブの日付 d の厳選10レース。manshu_marks: 万舟チャンスのレース {race_key: 行}（印を付ける）"""
     iso = d.isoformat()
     try:
         picks = load_picks(iso)
@@ -189,6 +191,6 @@ def render(d):
         if not picks:
             st.info("この日の厳選レースはありません（毎朝8時過ぎに選びます）。")
         for r in picks:
-            _render_pick(d, r)
+            _render_pick(d, r, manshu_marks)
         st.markdown("##### 📈 これまでの成績")
         _render_summary()
