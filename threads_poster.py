@@ -237,8 +237,11 @@ def refresh_access_token(sb_url, sb_key):
     return new_token
 
 
-def post_text(user_id, access_token, text):
-    """テキスト投稿をコンテナ作成からpublishまで行い、投稿IDを返す。"""
+def post_text(user_id, access_token, text, reply_to_id=None):
+    """テキスト投稿をコンテナ作成からpublishまで行い、投稿IDを返す。
+
+    reply_to_id を渡すと、その投稿への返信（スレッド形式のつなぎ）として投稿する。
+    """
     user_id = str(user_id or "").strip()
     access_token = str(access_token or "").strip()
     text = str(text or "").strip()
@@ -250,13 +253,16 @@ def post_text(user_id, access_token, text):
     if len(text) > TEXT_LIMIT:
         raise ValueError(f"本文が{TEXT_LIMIT}文字を超えています（{len(text)}文字）。")
 
+    params = {
+        "media_type": "TEXT",
+        "text": text,
+        "access_token": access_token,
+    }
+    if reply_to_id:
+        params["reply_to_id"] = str(reply_to_id)
     r = requests.post(
         f"{API_BASE}/{user_id}/threads",
-        params={
-            "media_type": "TEXT",
-            "text": text,
-            "access_token": access_token,
-        },
+        params=params,
         timeout=TIMEOUT,
     )
     if r.status_code >= 400:
@@ -487,14 +493,83 @@ def build_post_text(
 
 
 # -------------------------------------------------
+# 買い目の書き方（スレッズ・note・予想カードで共通）
+# -------------------------------------------------
+def compact_combos(combos):
+    """同じ1着-2着の3着候補をまとめる。例: 1-2-3,1-2-4,1-2-6 -> 1-2-346"""
+    grouped = {}
+    fallback = []
+    for combo in combos:
+        parts = [p.strip() for p in str(combo).split("-")]
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            key = (parts[0], parts[1])
+            grouped.setdefault(key, [])
+            if parts[2] not in grouped[key]:
+                grouped[key].append(parts[2])
+        else:
+            fallback.append(str(combo))
+    out = [f"{a}-{b}-{''.join(thirds)}" for (a, b), thirds in grouped.items()]
+    return out + fallback
+
+
+def split_main_cover(tickets):
+    """買い目（DataFrame か [{combo, group}]）→ (本線の組番, 抑えの組番)。穴は抑えに入れる。"""
+    if tickets is None:
+        return [], []
+    rows = tickets.to_dict("records") if hasattr(tickets, "to_dict") else list(tickets)
+    main, cover = [], []
+    for t in rows:
+        combo = _clean(t.get("combo"))
+        if not combo:
+            continue
+        (main if _clean(t.get("group")) == "本線" else cover).append(combo)
+    return main, cover
+
+
+# -------------------------------------------------
+# 朝の無料3レース（展示前予想）の自動投稿
+# -------------------------------------------------
+# 文章は後で Claude の文章に差し替えられるよう、1レース分を作る関数を1つにしている
+# （threads_morning.py の build_texts が writer を受け取り、失敗したらこの型に戻す）。
+MORNING_FOOTER = "※展示前の情報だけの予想です。的中を保証するものではありません。舟券の購入は自己責任でお願いします。"
+
+
+def build_morning_pick_text(race_date, pick, index, total):
+    """朝の無料レース1つ分の投稿（決まった型）。pick は pre_exhibition_picks の1行（買い目はモデルのみ）。"""
+    venue = _clean(pick.get("venue"))
+    try:
+        rno = f"{int(pick.get('race_no'))}R"
+    except Exception:
+        rno = _clean(pick.get("race_no"))
+    deadline = _clean(pick.get("deadline")) or "--:--"
+    lane = _lane_number(pick.get("favorite_lane"))
+    name = _clean(pick.get("favorite_name"))
+    main, cover = split_main_cover(pick.get("tickets"))
+
+    parts = [
+        f"🌅【展示前予想】{_short_date(race_date)} 朝の無料{total}レース（{index}/{total}）",
+        f"{venue} {rno}｜締切 {deadline}",
+        f"◎本命 {lane}号艇 {name}".rstrip() if lane else "",
+    ]
+    if main:
+        parts.append("【本線】\n" + "\n".join(compact_combos(main)))
+    if cover:
+        parts.append("【抑え】\n" + "\n".join(compact_combos(cover)))
+    parts.append(MORNING_FOOTER)
+    return "\n\n".join(p for p in parts if p)[:TEXT_LIMIT]
+
+
+# -------------------------------------------------
 # 1日の発信まとめ
 # -------------------------------------------------
 _PUBLICATIONS_TABLE = "note_publications"
+_MORNING_TABLE = "threads_auto_posts"
 _RESULTS_TABLE = "prediction_results"
 _RESULT_FIELDS = (
     "race_key,trifecta_actual,top_ticket,"
     "hit_top_ticket,hit_any_ticket,candidate_hit,candidate_hit_rank"
 )
+VOID_COMBOS = ("特払い", "不成立", "返還")
 
 
 def _date_text(value):
@@ -520,120 +595,149 @@ def _race_label(venue, race_no):
         return f"{venue}{_clean(race_no)}"
 
 
-def _is_hit(result):
-    """note記事に載せた買い目のどれかが的中したか。
+def _actual_combos(text):
+    """3連単の結果（同着なら複数）を組番のリストにする。"""
+    return [c for c in str(text or "").replace(",", " ").split() if c and c not in VOID_COMBOS]
 
-    note記事・スレッズには購入額0円の候補も含めた全買い目を載せているため、
-    候補全体での的中（candidate_hit）を基準にする。古い行で未計算なら
-    hit_any_ticket で代用する。
+
+def judge_record(record):
+    """結果の分かったレースの的中を、そのレースで載せた買い目で決める（record を書き換えて返す）。
+
+    買い目（tickets）が無い古い note の行だけ、今までどおり保存予想の候補全体の的中
+    （candidate_hit、無ければ hit_any_ticket）を使う。
     """
-    value = result.get("candidate_hit")
-    if value is None:
-        value = result.get("hit_any_ticket")
-    return bool(value)
+    actual = _actual_combos(record.get("trifecta_actual"))
+    record["settled"] = bool(actual)
+    if not actual:
+        record["hit"] = False
+        record["hit_top_ticket"] = False
+        return record
+    combos = [str(c) for c in (record.get("tickets") or [])]
+    if combos:
+        record["hit"] = any(c in combos for c in actual)
+        record["hit_top_ticket"] = combos[0] in actual
+    else:
+        legacy = record.get("legacy") or {}
+        value = legacy.get("candidate_hit")
+        if value is None:
+            value = legacy.get("hit_any_ticket")
+        record["hit"] = bool(value)
+        record["hit_top_ticket"] = bool(legacy.get("hit_top_ticket"))
+    return record
+
+
+def apply_actuals(records, actuals):
+    """公式の結果一覧などで分かった3連単 {race_key: 組番} で、結果待ちのレースを埋めて判定し直す。"""
+    for r in records or []:
+        if not _actual_combos(r.get("trifecta_actual")) and actuals.get(r.get("race_key")):
+            r["trifecta_actual"] = str(actuals[r["race_key"]])
+        judge_record(r)
+    return records
+
+
+def _ticket_combos(tickets):
+    out = []
+    for t in tickets or []:
+        combo = _clean(t.get("combo") if isinstance(t, dict) else t)
+        if combo:
+            out.append(combo)
+    return out
+
+
+def _get(sb_url, sb_key, table, params, what):
+    r = requests.get(f"{sb_url}/rest/v1/{table}", headers=_headers(sb_key), params=params, timeout=TIMEOUT)
+    if r.status_code >= 400:
+        raise RuntimeError(f"{what}の取得に失敗しました（HTTP {r.status_code}）: {r.text[:300]}")
+    return r.json() or []
+
+
+def _db_actuals(sb_url, sb_key, race_keys):
+    """Supabase にある3連単の結果 {race_key: 組番}（保存予想の結果と、展示前厳選の結果）。"""
+    keys = sorted({k for k in race_keys if k})
+    if not keys:
+        return {}, {}
+    rows = _get(sb_url, sb_key, _RESULTS_TABLE,
+                {"select": _RESULT_FIELDS, "race_key": f"in.({','.join(keys)})"}, "的中結果")
+    legacy = {str(r.get("race_key")): r for r in rows}
+    actuals = {k: _clean(r.get("trifecta_actual")) for k, r in legacy.items() if _clean(r.get("trifecta_actual"))}
+    try:
+        pre = _get(sb_url, sb_key, "pre_exhibition_picks",
+                   {"select": "race_key,trifecta_actual", "race_key": f"in.({','.join(keys)})"}, "厳選の結果")
+        for r in pre:
+            if _clean(r.get("trifecta_actual")):
+                actuals.setdefault(str(r["race_key"]), _clean(r["trifecta_actual"]))
+    except Exception:
+        pass
+    return actuals, legacy
 
 
 def fetch_daily_publication_results(sb_url, sb_key, publication_date):
-    """指定日のnote確定レースと、確定済みなら的中結果を突き合わせて返す。
+    """指定日のnote記事のレースと、確定済みなら的中結果を返す（sequence_no 順の dict のリスト）。
 
-    戻り値は sequence_no 順の dict のリスト。結果がまだ prediction_results に
-    無いレース（レース前・レース中・結果未取得）は ``settled=False`` になる。
+    的中は記事に載せた買い目（article_tickets）で判定する。結果がまだ分からないレースは
+    ``settled=False``（apply_actuals で公式の結果一覧から埋められる）。
     """
     sb_url = str(sb_url or "").strip().rstrip("/")
     sb_key = str(sb_key or "").strip()
     if not sb_url or not sb_key:
         raise RuntimeError("Supabaseの接続情報が設定されていません。")
 
-    r = requests.get(
-        f"{sb_url}/rest/v1/{_PUBLICATIONS_TABLE}",
-        headers=_headers(sb_key),
-        params={
-            "select": "race_key,venue,race_no,sequence_no,publication_type",
-            "publication_date": f"eq.{_date_text(publication_date)}",
-            "order": "sequence_no.asc",
-        },
-        timeout=TIMEOUT,
-    )
-    if r.status_code >= 400:
-        raise RuntimeError(
-            f"note確定レースの取得に失敗しました（HTTP {r.status_code}）: {r.text[:300]}"
-        )
-    publications = r.json() or []
-
-    race_keys = [str(p.get("race_key") or "").strip() for p in publications]
-    race_keys = [k for k in race_keys if k]
-    results = {}
-    if race_keys:
-        r2 = requests.get(
-            f"{sb_url}/rest/v1/{_RESULTS_TABLE}",
-            headers=_headers(sb_key),
-            params={
-                "select": _RESULT_FIELDS,
-                "race_key": f"in.({','.join(race_keys)})",
-            },
-            timeout=TIMEOUT,
-        )
-        if r2.status_code >= 400:
-            raise RuntimeError(
-                f"的中結果の取得に失敗しました（HTTP {r2.status_code}）: {r2.text[:300]}"
-            )
-        results = {str(row.get("race_key")): row for row in (r2.json() or [])}
+    publications = _get(sb_url, sb_key, _PUBLICATIONS_TABLE, {
+        "select": "race_key,venue,race_no,sequence_no,publication_type,ticket_source,article_tickets",
+        "publication_date": f"eq.{_date_text(publication_date)}",
+        "order": "sequence_no.asc",
+    }, "note確定レース")
+    actuals, legacy = _db_actuals(sb_url, sb_key, [str(p.get("race_key") or "").strip() for p in publications])
 
     records = []
     for pub in publications:
         key = str(pub.get("race_key") or "").strip()
-        result = results.get(key)
-        settled = bool(result and _clean(result.get("trifecta_actual")))
-        records.append({
+        records.append(judge_record({
+            "section": "note",
             "race_key": key,
             "venue": _clean(pub.get("venue")),
             "race_no": pub.get("race_no"),
             "sequence_no": pub.get("sequence_no"),
-            "publication_type": str(pub.get("publication_type") or "FREE").upper(),
-            "settled": settled,
-            "trifecta_actual": _clean(result.get("trifecta_actual")) if settled else "",
-            "hit": _is_hit(result) if settled else False,
-            "hit_top_ticket": bool(result.get("hit_top_ticket")) if settled else False,
-        })
+            "publication_type": str(pub.get("publication_type") or "PAID").upper(),
+            "ticket_source": _clean(pub.get("ticket_source")) or "model",
+            "tickets": _ticket_combos(pub.get("article_tickets")),
+            "legacy": legacy.get(key) or {},
+            "trifecta_actual": actuals.get(key, ""),
+        }))
     return records
 
 
-def build_daily_summary_text(
-    race_date,
-    records,
-    payouts=None,
-    include_pending=True,
-    note_url="https://note.com/tenji_kara",
-):
-    """「今日も展示から。」用の1日まとめThreads下書き。投稿前にアプリ上で編集できる。
+def fetch_morning_post_results(sb_url, sb_key, race_date):
+    """指定日の朝の自動投稿で投稿できたレースと、確定済みなら的中結果（投稿した買い目で判定）。"""
+    sb_url = str(sb_url or "").strip().rstrip("/")
+    sb_key = str(sb_key or "").strip()
+    if not sb_url or not sb_key:
+        raise RuntimeError("Supabaseの接続情報が設定されていません。")
+    rows = _get(sb_url, sb_key, _MORNING_TABLE,
+                {"select": "status,posts", "race_date": f"eq.{_date_text(race_date)}"}, "朝の自動投稿")
+    posts = [p for p in ((rows[0].get("posts") if rows else None) or []) if p.get("post_id")]
+    actuals, _ = _db_actuals(sb_url, sb_key, [str(p.get("race_key") or "") for p in posts])
+    return [judge_record({
+        "section": "morning",
+        "race_key": str(p.get("race_key") or ""),
+        "venue": _clean(p.get("venue")),
+        "race_no": p.get("race_no"),
+        "ticket_source": "model",
+        "tickets": _ticket_combos(p.get("tickets")),
+        "trifecta_actual": actuals.get(str(p.get("race_key") or ""), ""),
+    }) for p in posts]
 
-    records は fetch_daily_publication_results() の戻り値。payouts は
-    {race_key: 3連単100円払戻} があれば的中レースに払戻を添える。
-    結果待ちのレースは的中率の分母に入れず、include_pending=True なら
-    「結果待ち」として一覧に残す（False なら一覧から外し、見出しの件数だけ示す）。
-    """
-    records = list(records or [])
-    payouts = payouts or {}
-    settled = [r for r in records if r.get("settled")]
-    pending = [r for r in records if not r.get("settled")]
-    hits = [r for r in settled if r.get("hit")]
 
-    title = f"【{_short_date(race_date)}｜本日の予想まとめ】"
+def _closing(hits, settled):
+    """締めの一言（的中率で3パターン）。浮動小数の誤差を避けるため 50% 判定は整数比較で行う。"""
+    if len(hits) * 2 > len(settled):
+        return "明日の予想もお楽しみに✨"
+    if len(hits) * 2 == len(settled):
+        return "五分五分でした、明日に繋げます🙏"
+    return "もっと予想精度上げれる様に頑張ります💪"
 
-    if not records:
-        return ("📊 " + title + "\n\n本日のnote発信はありませんでした。")[:TEXT_LIMIT]
 
-    result_text = f"{len(hits)}レース的中🎯" if hits else "的中なし"
-    if not pending:
-        headline = f"本日発信した{len(records)}レース中、{result_text}"
-    elif not settled:
-        headline = f"本日発信した{len(records)}レースは、まだ結果待ちです。"
-    else:
-        headline = (
-            f"本日発信した{len(records)}レースのうち、"
-            f"結果確定{len(settled)}レース中、{result_text}"
-        )
-
+def _section_lines(records, payouts, include_pending):
     lines = []
     for r in records:
         if not r.get("settled"):
@@ -646,27 +750,64 @@ def build_daily_summary_text(
         if r.get("hit") and payout > 0:
             line += f"（{int(payout):,}円）"
         lines.append(line)
+    return lines
 
-    parts = ["📊 " + title, headline]
-    if lines:
-        parts.append("\n".join(lines))
-    if pending:
+
+def _section_headline(records):
+    settled = [r for r in records if r.get("settled")]
+    hits = [r for r in settled if r.get("hit")]
+    result_text = f"{len(hits)}レース的中🎯" if hits else "的中なし"
+    if len(settled) == len(records):
+        return f"{len(records)}レース中、{result_text}"
+    if not settled:
+        return f"{len(records)}レースとも結果待ちです。"
+    return f"{len(records)}レースのうち、結果確定{len(settled)}レース中、{result_text}"
+
+
+def build_daily_summary_text(
+    race_date,
+    records,
+    payouts=None,
+    include_pending=True,
+    note_url="https://note.com/tenji_kara",
+    morning_records=None,
+):
+    """「今日も展示から。」用の1日まとめThreads下書き。投稿前にアプリ上で編集できる。
+
+    「朝の無料3レース」（morning_records。投稿した買い目で判定）と「noteのレース」
+    （records。記事に載せた買い目で判定）を分けて載せる。payouts は
+    {race_key: 3連単100円払戻} があれば的中レースに払戻を添える。結果待ちのレースは
+    的中率の分母に入れず、include_pending=True なら「結果待ち」として一覧に残す。
+    締めの一言は、両方を合わせた結果確定分の的中率で決める。
+    """
+    note = list(records or [])
+    morning = list(morning_records or [])
+    payouts = payouts or {}
+    title = f"【{_short_date(race_date)}｜本日の予想まとめ】"
+    if not note and not morning:
+        return ("📊 " + title + "\n\n本日の発信はありませんでした。")[:TEXT_LIMIT]
+
+    parts = ["📊 " + title]
+    for label, recs, empty in (
+        ("🌅 朝の無料3レース（展示前予想）", morning, "本日の投稿はありませんでした。"),
+        ("📝 noteのレース（展示後予想）", note, "本日の記事はありませんでした。"),
+    ):
+        if not recs:
+            parts.append(f"{label}\n{empty}")
+            continue
+        body = [label, _section_headline(recs)] + _section_lines(recs, payouts, include_pending)
+        parts.append("\n".join(body))
+
+    everything = morning + note
+    settled = [r for r in everything if r.get("settled")]
+    hits = [r for r in settled if r.get("hit")]
+    if any(not r.get("settled") for r in everything):
         parts.append("残りのレースは結果が出たらお知らせします。")
     if settled:
-        # 締めの一言は結果確定分の的中率（hits / settled）で分岐する。
-        # 浮動小数の誤差を避けるため 50% 判定は整数比較で行う。
-        if len(hits) * 2 > len(settled):
-            parts.append("明日の予想もお楽しみに✨")
-        elif len(hits) * 2 == len(settled):
-            parts.append("五分五分でした、明日に繋げます🙏")
-        else:
-            parts.append("もっと予想精度上げれる様に頑張ります💪")
-    link = str(note_url or "").strip()
-    if link:
+        parts.append(_closing(hits, settled))
+    if str(note_url or "").strip():
         parts.append("予想はプロフィールのnoteから☝️")
-
-    text = "\n\n".join(parts)
-    return text[:TEXT_LIMIT]
+    return "\n\n".join(parts)[:TEXT_LIMIT]
 
 
 # -------------------------------------------------
@@ -708,11 +849,7 @@ def _closing_by_rate(hits, settled):
     """Threadsまとめと同じ的中率の分岐で締めの一言を返す。"""
     if not settled:
         return "結果が出そろったら、あらためて振り返ります。"
-    if len(hits) * 2 > len(settled):
-        return "明日の予想もお楽しみに✨"
-    if len(hits) * 2 == len(settled):
-        return "五分五分でした、明日に繋げます🙏"
-    return "もっと予想精度上げれる様に頑張ります💪"
+    return _closing(hits, settled)
 
 
 def build_daily_summary_note_texts(

@@ -1,0 +1,48 @@
+name: Threads Morning Post
+
+# スレッズの朝の自動投稿（threads_morning.py）。「🌅 展示前厳選10」から、締切まで30分以上ある
+# 的中確率の高い3レースを、スレッド形式で投稿する（買い目はモデルのみ）。
+# Supabase の pg_cron から毎朝 09:00 JST に起動する
+# （supabase/migrations/20261017000000_threads_morning_and_note_paid.sql）。手動でも動かせる。
+# ON/OFF はアプリの設定。投稿の成否は Supabase の threads_auto_posts に残り、アプリに出る。
+
+on:
+  workflow_dispatch:
+    inputs:
+      retry:
+        description: "1投稿もできなかった日をやり直す（true/false）"
+        required: false
+        default: "false"
+
+concurrency:
+  group: threads-morning
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install "requests>=2.31"
+
+      # ログは誰でも見られるため、threads_morning.py は件数・合否だけを出す。
+      - name: Run
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          ARGS="run"
+          if [ "${{ inputs.retry }}" = "true" ]; then ARGS="$ARGS --retry"; fi
+          python threads_morning.py $ARGS
