@@ -28,8 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import history_store as store  # noqa: E402
-
-MANSHU_YEN = 10000  # 100円あたりの3連単の払戻がこれ以上なら万舟
+# 万舟の定義・特徴量は本番（manshu.py）と同じものを使う
+from manshu import MANSHU_YEN, chain_summary, race_features  # noqa: E402,F401
 
 
 def log(*a):
@@ -142,86 +142,6 @@ OOF_FOLDS = [
     ("20260301", "20260301", "20260401", "20260706"),
 ]
 TRAIN_START = OOF_FOLDS[0][2]
-
-# 1艇ずつの列のうち、艇番ごとに横に並べてレースの特徴量にするもの
-LANE_COLS_COMMON = ["class_ord", "national_win_rate", "r365_win", "rc_win", "rc_top3", "avg_st", "r180_st",
-                    "motor_2ren", "mot_top2", "f_count", "rv_win"]
-LANE_COLS_POST = ["exhibition_time", "exhibition_st", "rk_exh_time"]
-RACE_COLS_COMMON = ["jcd", "race_no", "distance_m", "fixed_entry", "race_type_ord", "grade_ord", "day_no",
-                    "is_final_day", "deadline_min", "is_night", "n_boats", "st12_diff", "outer_win_sum",
-                    "outer_win_max", "outer_rc_win_sum"]
-RACE_COLS_POST = ["wind_speed", "wave_cm", "wind_head", "wind_cross", "temperature", "water_temperature",
-                  "weather_code", "stabilizer", "st12_ex_diff", "n_front_entry"]
-
-
-def chain_summary(first, tri):
-    """新モデルの1着確率・3連単確率の散らばり（1レース1行）。"""
-    f = first.copy()
-    f["lane"] = f["lane"].astype(int)
-    p = f.pivot_table(index="race_key", columns="lane", values="p_first").reindex(columns=range(1, 7))
-    p = p.fillna(0.0)
-    arr = p.to_numpy()
-    srt = -np.sort(-arr, axis=1)
-    ent = -(arr * np.log(np.clip(arr, 1e-12, None))).sum(axis=1)
-    out = pd.DataFrame(index=p.index)
-    for ln in range(1, 7):
-        out[f"c_p1_l{ln}"] = arr[:, ln - 1]
-    out["c_p1_max"] = srt[:, 0]
-    out["c_p1_2nd"] = srt[:, 1]
-    out["c_p1_gap"] = srt[:, 0] - srt[:, 1]
-    out["c_p1_entropy"] = ent
-    out["c_p1_fav_lane"] = arr.argmax(axis=1) + 1
-    out["c_p1_out456"] = arr[:, 3:].sum(axis=1)
-
-    t = tri.copy()
-    t["a"] = t["combo"].str[0].astype(int)
-    t["in3_1"] = t["combo"].str.contains("1")
-    t["n_out"] = t["combo"].str.count("[456]")
-    g = t.groupby("race_key")
-    out["c_tri_max"] = g["prob"].max()
-    out["c_tri_entropy"] = g["prob"].apply(lambda s: float(-(s * np.log(np.clip(s, 1e-12, None))).sum()))
-    t = t.sort_values(["race_key", "prob"], ascending=[True, False])
-    t["rank"] = t.groupby("race_key").cumcount()
-    out["c_tri_top5"] = t[t["rank"] < 5].groupby("race_key")["prob"].sum()
-    out["c_tri_top10"] = t[t["rank"] < 10].groupby("race_key")["prob"].sum()
-    out["c_tri_top20"] = t[t["rank"] < 20].groupby("race_key")["prob"].sum()
-    out["c_lane1_out3"] = 1.0 - t[t["in3_1"]].groupby("race_key")["prob"].sum()
-    out["c_two_outer"] = t[t["n_out"] >= 2].groupby("race_key")["prob"].sum()
-    return out
-
-
-def race_features(f, post):
-    """1艇1行の特徴量の表から、1レース1行の特徴量（艇番ごとに横に並べる＋レースの列）。"""
-    lane_cols = LANE_COLS_COMMON + (LANE_COLS_POST if post else [])
-    race_cols = RACE_COLS_COMMON + (RACE_COLS_POST if post else [])
-    x = f[["race_key", "lane"] + lane_cols].copy()
-    x["lane"] = x["lane"].astype(int)
-    w = x.pivot_table(index="race_key", columns="lane", values=lane_cols, dropna=False)
-    w.columns = [f"{c}_l{ln}" for c, ln in w.columns]
-    r = f.drop_duplicates("race_key").set_index("race_key")[race_cols + ["race_date"]]
-    r = r.join(w)
-    # 1号艇の強さ・艇同士の差
-    for c in ("national_win_rate", "class_ord", "rc_win", "avg_st", "motor_2ren"):
-        cols = [f"{c}_l{ln}" for ln in range(1, 7) if f"{c}_l{ln}" in r.columns]
-        v = r[cols].apply(pd.to_numeric, errors="coerce")
-        others = v.iloc[:, 1:]
-        r[f"{c}_sd"] = v.std(axis=1)
-        r[f"{c}_range"] = v.max(axis=1) - v.min(axis=1)
-        r[f"{c}_l1_minus_othermax"] = v.iloc[:, 0] - others.max(axis=1)
-        r[f"{c}_l1_minus_othermean"] = v.iloc[:, 0] - others.mean(axis=1)
-    cls = r[[f"class_ord_l{ln}" for ln in range(1, 7)]].apply(pd.to_numeric, errors="coerce")
-    top = np.nanmax(cls.to_numpy(), axis=1)
-    r["n_top_class"] = (cls.to_numpy() == top[:, None]).sum(axis=1)
-    if post:
-        ex = r[[f"exhibition_time_l{ln}" for ln in range(1, 7)]].apply(pd.to_numeric, errors="coerce")
-        r["exh_sd"] = ex.std(axis=1)
-        r["exh_range"] = ex.max(axis=1) - ex.min(axis=1)
-        r["exh_l1_minus_best_other"] = ex.iloc[:, 0] - ex.iloc[:, 1:].min(axis=1)
-        r["exh_best_lane"] = ex.to_numpy().argmin(axis=1) + 1
-        r.loc[ex.isna().all(axis=1), "exh_best_lane"] = np.nan
-    r["jcd"] = pd.to_numeric(r["jcd"], errors="coerce")
-    return r
-
 
 def fold_models(table, version_tag, features, lane_free, cache):
     """OOF_FOLDS ごとに新モデルを学習し直し、予測する期間の1着確率・3連単確率を返す。"""
@@ -352,7 +272,6 @@ def ticket_returns(sel, labels):
 
 
 def cmd_eval(args):
-    import ml_features as mf  # noqa: F401
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
