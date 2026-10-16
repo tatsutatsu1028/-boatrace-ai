@@ -74,3 +74,40 @@ def test_card_renders_png():
     png = pick_card.render_card("桐生", 3, "10:12", "2026/10/16", TICKETS, na.p_first_map(f),
                                 build_visual_rows(f, None, top_combo="1-2-3"), "モデルのみ予想")
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 10000
+
+
+class _Resp:
+    def __init__(self, text, stop="end_turn"):
+        self.content = [type("B", (), {"type": "text", "text": text})()]
+        self.stop_reason = stop
+        self.model = "claude-haiku-5-5"
+        self.usage = type("U", (), {"input_tokens": 1000, "output_tokens": 500})()
+
+
+def _fake_anthropic(monkeypatch, text, calls):
+    import types
+
+    class Client:
+        def __init__(self, **kw):
+            self.messages = self
+
+        def create(self, **kw):
+            calls.append(kw)
+            return _Resp(text)
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=Client))
+
+
+def test_claude_ok_and_rules(monkeypatch):
+    import json
+
+    calls = []
+    good = json.dumps({"lead": "こんにちは！", "development": "1号艇の逃げが有力と見ます。", "ticket_comment": "1-2-3 を本線に。"})
+    _fake_anthropic(monkeypatch, good, calls)
+    out = na.write_with_claude("key", "k1", {"race": {}}, TICKETS)
+    assert out["status"] == "ok" and out["body"].endswith(na.template_article(TICKETS)) and out["cost"]
+    assert calls[0]["model"] == "claude-haiku-5-5" and calls[0]["output_config"]["format"]["type"] == "json_schema"
+    bad = json.dumps({"lead": "鉄板です", "development": "x", "ticket_comment": "y"})
+    _fake_anthropic(monkeypatch, bad, calls)
+    out = na.write_with_claude("key", "k2", {"race": {}}, TICKETS)
+    assert out["status"] == "error" and "鉄板" in out["error"]

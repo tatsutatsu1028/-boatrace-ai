@@ -179,14 +179,14 @@ def compose(parts, tickets):
     ])
 
 
-def write_with_claude(api_key, race_key, brief, tickets, model=ARTICLE_MODEL):
+def write_with_claude(api_key, race_key, brief, tickets, model=ARTICLE_MODEL, force=False):
     """
     Claude（Haiku）で本文を書く。例外は出さない。
       {"status": "ok"|"error", "body", "model", "served_model", "usage", "cost", "seconds", "error", "called_api"}
-    同じレース・同じデータ・同じ買い目なら、このプロセスの中では1回だけ呼ぶ。
+    同じレース・同じデータ・同じ買い目なら、このプロセスの中では1回だけ呼ぶ（force=True で書き直す）。
     """
     key = (str(race_key), model, json.dumps(brief, ensure_ascii=False, sort_keys=True), ARTICLE_PROMPT_VERSION)
-    if key in _CACHE:
+    if key in _CACHE and not force:
         return _CACHE[key]
     out = {"status": "error", "model": model}
     if not api_key:
