@@ -29,31 +29,25 @@ create table if not exists public.threads_auto_posts (
 
 alter table public.threads_auto_posts enable row level security;
 
-drop policy if exists threads_auto_posts_read on public.threads_auto_posts;
-create policy threads_auto_posts_read on public.threads_auto_posts
-  for select to anon, authenticated using (true);
+do $$
+begin
+  if not exists (select 1 from pg_policies where tablename = 'threads_auto_posts'
+                 and policyname = 'threads_auto_posts_read') then
+    create policy threads_auto_posts_read on public.threads_auto_posts
+      for select to anon, authenticated using (true);
+  end if;
+end $$;
 
 alter table public.note_publications
   add column if not exists ticket_source text not null default 'model',
   add column if not exists article_tickets jsonb,
   add column if not exists article_writer text;
 
--- 記事枠の確定。同じレースは何度押しても1行。全て有料（300円）。
-drop function if exists public.reserve_note_publication(text, date, text, integer, text, integer, double precision, text, text);
-
-create or replace function public.reserve_note_publication(
-  p_race_key text,
-  p_publication_date date,
-  p_venue text,
-  p_race_no integer,
-  p_trigger_reason text,
-  p_p1_lane integer,
-  p_p1_prob double precision,
-  p_title text,
-  p_article_text text,
-  p_ticket_source text default 'model',
-  p_article_tickets jsonb default null,
-  p_article_writer text default null
+-- 記事枠の確定（アプリはこれを呼ぶ）。同じレースは何度押しても1行。全て有料（300円）。
+create or replace function public.reserve_note_publication_v2(
+  p_race_key text, p_publication_date date, p_venue text, p_race_no integer, p_trigger_reason text,
+  p_p1_lane integer, p_p1_prob double precision, p_title text, p_article_text text,
+  p_ticket_source text, p_article_tickets jsonb, p_article_writer text
 )
 returns public.note_publications
 language plpgsql
@@ -64,49 +58,50 @@ declare
   next_no integer;
   created public.note_publications;
 begin
-  select * into existing
-  from public.note_publications
-  where race_key = p_race_key;
-
+  select * into existing from public.note_publications where race_key = p_race_key;
   if found then
     return existing;
   end if;
-
   perform pg_advisory_xact_lock(hashtext(p_publication_date::text));
-
   select coalesce(max(sequence_no), 0) + 1 into next_no
-  from public.note_publications
-  where publication_date = p_publication_date;
-
+  from public.note_publications where publication_date = p_publication_date;
   insert into public.note_publications (
     race_key, publication_date, venue, race_no, sequence_no,
     publication_type, price, trigger_reason, p1_lane, p1_prob,
     title, article_text, ticket_source, article_tickets, article_writer
   ) values (
     p_race_key, p_publication_date, p_venue, p_race_no, next_no,
-    'PAID', 300,
-    p_trigger_reason, p_p1_lane, p_p1_prob, p_title, p_article_text,
+    'PAID', 300, p_trigger_reason, p_p1_lane, p_p1_prob, p_title, p_article_text,
     case when p_ticket_source = 'avg' then 'avg' else 'model' end,
     p_article_tickets, p_article_writer
   )
   returning * into created;
-
   return created;
 end;
 $function$;
 
-grant execute on function public.reserve_note_publication(
+-- 今までの関数（デプロイ前のアプリが呼ぶ）も有料で記録する
+create or replace function public.reserve_note_publication(
+  p_race_key text, p_publication_date date, p_venue text, p_race_no integer, p_trigger_reason text,
+  p_p1_lane integer, p_p1_prob double precision, p_title text, p_article_text text
+)
+returns public.note_publications
+language sql
+set search_path to ''
+as $function$
+  select * from public.reserve_note_publication_v2(
+    p_race_key, p_publication_date, p_venue, p_race_no, p_trigger_reason,
+    p_p1_lane, p_p1_prob, p_title, p_article_text, 'model', null, null);
+$function$;
+
+grant execute on function public.reserve_note_publication_v2(
   text, date, text, integer, text, integer, double precision, text, text, text, jsonb, text
 ) to anon, authenticated;
 
 -- 確定した記事の買い目・本文を差し替える（アプリは締切前だけ呼ぶ）。
 create or replace function public.update_note_publication_article(
-  p_race_key text,
-  p_ticket_source text,
-  p_article_tickets jsonb,
-  p_title text,
-  p_article_text text,
-  p_article_writer text
+  p_race_key text, p_ticket_source text, p_article_tickets jsonb,
+  p_title text, p_article_text text, p_article_writer text
 )
 returns public.note_publications
 language plpgsql
@@ -128,7 +123,6 @@ begin
 end;
 $function$;
 
-revoke all on function public.update_note_publication_article(text, text, jsonb, text, text, text) from public;
 grant execute on function public.update_note_publication_article(text, text, jsonb, text, text, text)
   to anon, authenticated;
 

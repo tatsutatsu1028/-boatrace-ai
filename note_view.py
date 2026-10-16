@@ -233,7 +233,7 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
                 body, writer = na.template_article(tickets), "template"
             p1_lane = max(probs, key=lambda k: probs[k]) if probs else None
             try:
-                _rpc("reserve_note_publication", {
+                _rpc("reserve_note_publication_v2", {
                     "p_race_key": ctx, "p_publication_date": date_iso, "p_venue": venue, "p_race_no": int(rno),
                     "p_trigger_reason": "オーナー判断", "p_p1_lane": p1_lane,
                     "p_p1_prob": float(probs[p1_lane]) if p1_lane else None,
