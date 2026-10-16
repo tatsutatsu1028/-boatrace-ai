@@ -15,6 +15,10 @@
   - note の記事にもなっているレースは note_overlap に記録する（アプリで警告する）
   - 同じ日に2回は投稿しない（--retry は、1投稿もできなかった日のやり直しだけ）
 
+1投稿目には「本日の厳選3レース」画像（日付・会場・R・締切・本命。pick_card.render_morning_card）を付ける。
+画像は Supabase Storage の公開バケット threads-images の morning/ に置き、その公開URLをスレッズに渡す。
+画像が作れない・置けない・画像付きの投稿が失敗したときは、画像なしで投稿する（理由は image_error に残す）。
+
 文章は threads_poster.build_morning_pick_text の決まった型。後で Claude の文章にするときは
 build_texts に writer を渡す（失敗・空・長すぎるときはその投稿だけ決まった型に戻す）。
 
@@ -46,6 +50,9 @@ POST_INTERVAL_SEC = 5
 # 長期トークンはこの日数を過ぎたら延長する（期限60日）
 TOKEN_REFRESH_DAYS = 30
 TICKET_SOURCE = "model"
+# 1投稿目に付ける「本日の厳選3レース」画像の置き場所（Supabase Storage の公開バケット）
+IMAGE_BUCKET = "threads-images"
+IMAGE_PREFIX = "morning"
 _COMBO = re.compile(r"^([1-6])-([1-6])-([1-6])$")
 
 
@@ -207,6 +214,55 @@ def _num(v):
 
 
 # ---------------------------------------------------------------
+# 1投稿目の画像
+# ---------------------------------------------------------------
+def make_image(race_date_iso, chosen):
+    """「本日の厳選3レース」画像の PNG。Pillow が無いなど作れなければ例外。"""
+    import pick_card
+
+    return pick_card.render_morning_card(race_date_iso, chosen)
+
+
+def upload_image(race_date_iso, png):
+    """Supabase Storage の公開バケットに置き、スレッズが取りに行ける公開URLを返す。
+
+    やり直しで前の画像が残っていても混ざらないよう、ファイル名に時刻を入れる。
+    """
+    url, key = _cfg()
+    path = f"{IMAGE_PREFIX}/{race_date_iso}_{datetime.now(JST).strftime('%H%M%S')}.png"
+    r = requests.post(f"{url}/storage/v1/object/{IMAGE_BUCKET}/{path}", data=png, timeout=30, headers={
+        "apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "image/png", "x-upsert": "true"})
+    r.raise_for_status()
+    public = f"{url}/storage/v1/object/public/{IMAGE_BUCKET}/{path}"
+    # 公開URLから読めることを確かめる（読めないとスレッズの投稿が失敗する）
+    g = requests.get(public, timeout=20)
+    if g.status_code >= 400 or not g.content.startswith(b"\x89PNG"):
+        raise RuntimeError(f"公開URLから画像を読めません（HTTP {g.status_code}）")
+    return public
+
+
+def prepare_image(race_date_iso, chosen):
+    """(公開URL, 失敗の理由)。作れなかった・置けなかったときは (None, 理由) で、画像なしで投稿する。"""
+    try:
+        return upload_image(race_date_iso, make_image(race_date_iso, chosen)), None
+    except Exception as e:  # noqa: BLE001
+        log(f"画像を用意できないため画像なしで投稿: {type(e).__name__}")
+        return None, f"画像を用意できませんでした: {type(e).__name__}: {e}"[:300]
+
+
+def _post_first(cfg, text, image_url):
+    """1投稿目。画像付きが失敗したら画像なしで投稿する。(投稿ID, 画像を付けたか, 画像の失敗の理由)。"""
+    if image_url:
+        try:
+            return tp.post_image(cfg["user_id"], cfg["access_token"], text, image_url), True, None
+        except Exception as e:  # noqa: BLE001
+            log(f"画像付きの投稿に失敗したため画像なしで投稿: {type(e).__name__}")
+            reason = f"画像付きの投稿に失敗したため画像なしで投稿: {type(e).__name__}: {e}"[:300]
+            return _post_with_retry(cfg, text), False, reason
+    return _post_with_retry(cfg, text), False, None
+
+
+# ---------------------------------------------------------------
 # 記録
 # ---------------------------------------------------------------
 def _save(race_date_iso, **fields):
@@ -227,7 +283,7 @@ def _post_record(pick, text):
         "race_no": pick.get("race_no"), "deadline": pick.get("deadline"),
         "favorite_lane": pick.get("favorite_lane"), "favorite_name": pick.get("favorite_name"),
         "hit_probability": pick.get("hit_probability"), "tickets": posted_tickets(pick),
-        "text": text, "post_id": None, "error": None,
+        "text": text, "post_id": None, "error": None, "image_url": None,
     }
 
 
@@ -319,6 +375,12 @@ def run(date=None, retry=False, dry_run=False, writer=None):
         for t in texts:
             print("-" * 40)
             print(t)
+        try:
+            with open("threads_morning_preview.png", "wb") as f:
+                f.write(make_image(iso, chosen))
+            log("画像: threads_morning_preview.png")
+        except Exception as e:  # noqa: BLE001
+            log(f"画像を作れません: {type(e).__name__}")
         log(f"{date}: 試し（投稿しない）{len(texts)}件")
         return
 
@@ -329,27 +391,36 @@ def run(date=None, retry=False, dry_run=False, writer=None):
         log("失敗: スレッズ連携が未設定")
         return
 
+    image_url, image_error = prepare_image(iso, chosen)
+    img = {"image_url": image_url, "image_error": image_error}
     # 途中で止まっても2回投稿しないよう、先に記録してから投稿する
     _save(iso, status="failed", reason="投稿を始めましたが終わっていません", posts=posts, race_keys=keys,
-          note_overlap=overlap, attempts=attempts)
+          note_overlap=overlap, attempts=attempts, **img)
     parent = None
     for i, rec in enumerate(posts):
         if i:
             time.sleep(POST_INTERVAL_SEC)
         try:
-            rec["post_id"] = _post_with_retry(cfg, rec["text"], reply_to=parent)
+            if i == 0:
+                rec["post_id"], attached, err = _post_first(cfg, rec["text"], image_url)
+                rec["image_url"] = image_url if attached else None
+                if not attached:
+                    img = {"image_url": None, "image_error": err or image_error}
+            else:
+                rec["post_id"] = _post_with_retry(cfg, rec["text"], reply_to=parent)
             parent = rec["post_id"]
         except Exception as e:  # noqa: BLE001
             rec["error"] = f"{type(e).__name__}: {e}"[:300]
             status = "failed" if i == 0 else "partial"
             _save(iso, status=status, reason=f"{i + 1}投稿目で失敗", posts=posts, race_keys=keys,
                   note_overlap=overlap, attempts=attempts,
-                  posted_at=datetime.now(JST).isoformat(timespec="seconds") if i else None)
+                  posted_at=datetime.now(JST).isoformat(timespec="seconds") if i else None, **img)
             log(f"{date}: {i + 1}投稿目で失敗（{type(e).__name__}）")
             return
         _save(iso, status="partial" if i + 1 < len(posts) else "posted",
               reason=None if i + 1 == len(posts) else "投稿の途中", posts=posts, race_keys=keys,
-              note_overlap=overlap, attempts=attempts, posted_at=datetime.now(JST).isoformat(timespec="seconds"))
+              note_overlap=overlap, attempts=attempts, posted_at=datetime.now(JST).isoformat(timespec="seconds"),
+              **img)
     log(f"{date}: {len(posts)}件を投稿" + (f"（noteと重複 {len(overlap)}件）" if overlap else ""))
 
 

@@ -237,43 +237,36 @@ def refresh_access_token(sb_url, sb_key):
     return new_token
 
 
-def post_text(user_id, access_token, text, reply_to_id=None):
-    """テキスト投稿をコンテナ作成からpublishまで行い、投稿IDを返す。
-
-    reply_to_id を渡すと、その投稿への返信（スレッド形式のつなぎ）として投稿する。
-    """
+def _check_post_args(user_id, access_token, text):
     user_id = str(user_id or "").strip()
     access_token = str(access_token or "").strip()
     text = str(text or "").strip()
-
     if not user_id or not access_token:
         raise ValueError("ユーザーIDとアクセストークンが必要です。")
     if not text:
         raise ValueError("投稿内容が空です。")
     if len(text) > TEXT_LIMIT:
         raise ValueError(f"本文が{TEXT_LIMIT}文字を超えています（{len(text)}文字）。")
+    return user_id, access_token, text
 
-    params = {
-        "media_type": "TEXT",
-        "text": text,
-        "access_token": access_token,
-    }
-    if reply_to_id:
-        params["reply_to_id"] = str(reply_to_id)
+
+def _create_container(user_id, access_token, params):
     r = requests.post(
         f"{API_BASE}/{user_id}/threads",
-        params=params,
+        params={**params, "access_token": access_token},
         timeout=TIMEOUT,
     )
     if r.status_code >= 400:
         raise RuntimeError(
             f"投稿コンテナの作成に失敗しました（HTTP {r.status_code}）: {r.text[:300]}"
         )
-
     creation_id = str((r.json() or {}).get("id") or "").strip()
     if not creation_id:
         raise RuntimeError(f"creation_id が取得できませんでした: {r.text[:300]}")
+    return creation_id
 
+
+def _publish(user_id, access_token, creation_id):
     r2 = requests.post(
         f"{API_BASE}/{user_id}/threads_publish",
         params={
@@ -286,11 +279,63 @@ def post_text(user_id, access_token, text, reply_to_id=None):
         raise RuntimeError(
             f"投稿の公開に失敗しました（HTTP {r2.status_code}）: {r2.text[:300]}"
         )
-
     post_id = str((r2.json() or {}).get("id") or "").strip()
     if not post_id:
         raise RuntimeError(f"投稿IDが取得できませんでした: {r2.text[:300]}")
     return post_id
+
+
+def post_text(user_id, access_token, text, reply_to_id=None):
+    """テキスト投稿をコンテナ作成からpublishまで行い、投稿IDを返す。
+
+    reply_to_id を渡すと、その投稿への返信（スレッド形式のつなぎ）として投稿する。
+    """
+    user_id, access_token, text = _check_post_args(user_id, access_token, text)
+    params = {"media_type": "TEXT", "text": text}
+    if reply_to_id:
+        params["reply_to_id"] = str(reply_to_id)
+    return _publish(user_id, access_token, _create_container(user_id, access_token, params))
+
+
+IMAGE_WAIT_SEC = 60
+IMAGE_POLL_SEC = 3
+
+
+def wait_container(creation_id, access_token, max_sec=IMAGE_WAIT_SEC, poll_sec=IMAGE_POLL_SEC, sleep=None):
+    """画像付きの投稿コンテナが、スレッズ側で画像を読み終わる（FINISHED）まで待つ。"""
+    import time
+
+    sleep = sleep or time.sleep
+    waited = 0
+    while True:
+        r = requests.get(
+            f"{API_BASE}/{creation_id}",
+            params={"fields": "status,error_message", "access_token": access_token},
+            timeout=TIMEOUT,
+        )
+        data = (r.json() or {}) if r.status_code < 400 else {}
+        status = str(data.get("status") or "").upper()
+        if status == "FINISHED":
+            return
+        if status in ("ERROR", "EXPIRED"):
+            raise RuntimeError(f"画像を読み込めませんでした: {str(data.get('error_message') or status)[:300]}")
+        if waited >= max_sec:
+            raise RuntimeError(f"画像の読み込みが{max_sec}秒で終わりませんでした（{status or r.status_code}）")
+        sleep(poll_sec)
+        waited += poll_sec
+
+
+def post_image(user_id, access_token, text, image_url, reply_to_id=None):
+    """画像1枚と本文の投稿（画像は公開URLから、スレッズ側が取りに行く）。投稿IDを返す。"""
+    user_id, access_token, text = _check_post_args(user_id, access_token, text)
+    if not str(image_url or "").startswith("https://"):
+        raise ValueError("画像の公開URL（https）が必要です。")
+    params = {"media_type": "IMAGE", "image_url": str(image_url), "text": text}
+    if reply_to_id:
+        params["reply_to_id"] = str(reply_to_id)
+    creation_id = _create_container(user_id, access_token, params)
+    wait_container(creation_id, access_token)
+    return _publish(user_id, access_token, creation_id)
 
 
 _MARKS = ["◎", "○", "▲", "△", "×", "注"]
