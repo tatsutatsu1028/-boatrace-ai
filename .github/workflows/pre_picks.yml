@@ -1,0 +1,71 @@
+name: Pre-exhibition Picks
+
+# 「🌅 展示前厳選10」（pre_picks.py）。
+#   task=run     : 前の日までの厳選レースの結果を記録し、その日の10レースを展示前モデルで選んで Supabase に保存する
+#   task=results : 結果の記録だけ
+# Supabase の pg_cron から毎朝 08:05 JST に起動する（朝の過去データ収集〜08:00 の後。
+# supabase/migrations/20261016000100_trigger_pre_picks_via_pg_cron.sql）。手動でも動かせる。
+# データ用リポジトリ（学習済みモデル・集計表・競走成績）は読むだけで、書き込まない。
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "run（選定＋結果）/ results（結果だけ）"
+        required: true
+        default: "run"
+      date:
+        description: "選定する日 (YYYYMMDD)。空なら今日（JST）"
+        required: false
+        default: ""
+      force:
+        description: "選定済みの日も選び直す（true/false）"
+        required: false
+        default: "false"
+
+concurrency:
+  group: pre-picks
+  cancel-in-progress: false
+
+jobs:
+  pre-picks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # 過去データの収集が動いているかを確かめるため（actions: read）。このリポジトリへは書き込まない
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ログは誰でも見られるため、pre_picks.py は日付・件数・所要時間・合否だけを出す。
+      - name: Run
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ARGS="${{ inputs.task || 'run' }}"
+          if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi
+          if [ "${{ inputs.force }}" = "true" ]; then ARGS="$ARGS --force"; fi
+          python pre_picks.py $ARGS

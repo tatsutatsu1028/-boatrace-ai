@@ -2,7 +2,9 @@ name: ML Model
 
 # 新しい予想モデル（ml_model.py）の定期処理（ml_nightly.py）。
 #   task=state: 前日までの集計表 models/ml_state.pkl.gz を作り直す（毎晩。数十秒）
-#   task=train: 2年分で学習し直し models/<版>.joblib と models/latest.json を書く（毎週。数分）
+#   task=train: 2年分で学習し直し models/<版>.joblib と models/latest.json を書く（毎週。数分）。
+#               続けて展示前モデル（ml_pre.py。「🌅 展示前厳選10」用）も学習し直し models/pre_latest.json を書く
+#   task=train_pre: 展示前モデルだけ学習し直す（手動用）
 # どちらも保存先は非公開のデータ用リポジトリ（models/）。成果物（artifact）には残さない。
 #
 # 本番の予想を新しいモデルに切り替えたので、Supabase の pg_cron から起動する
@@ -13,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "state（集計表）/ train（学習し直し）"
+        description: "state（集計表）/ train（学習し直し）/ train_pre（展示前モデルだけ）"
         required: true
         default: "state"
       as_of:
