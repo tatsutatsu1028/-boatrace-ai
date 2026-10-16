@@ -31,6 +31,7 @@ from ml_model import is_ml_final
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 import claude_tab
 import claude_usage
+import manshu_view
 import pre_picks_view
 import note_view
 import threads_auto_view
@@ -2536,11 +2537,17 @@ def _meeting_time_badge(deadlines):
 with tab1:
     d = st.date_input("日付", value=_today_jst())
 
+    # 毎朝選んだ「💥 万舟チャンス（荒れやすいレース）」。会場選択・Rカード・予想画面・厳選10に印を出す
+    _manshu_marks = manshu_view.marks_by_key(d)
+
     # 管理者だけ: 展示前モデルで毎朝選んだ「当たりやすいレース」10件（そこからこの下でレースを開ける）
     if IS_ADMIN:
-        pre_picks_view.render(d)
+        pre_picks_view.render(d, manshu_marks=_manshu_marks)
         # 朝の無料3レース（スレッズの自動投稿）の結果。失敗・noteとの重複はここで目立たせる
         threads_auto_view.render_status(d)
+
+    manshu_view.render_list(d, is_admin=IS_ADMIN)
+    _manshu_venues = manshu_view.venue_counts(_manshu_marks)
 
     st.session_state.setdefault("selected_jcd", None)
 
@@ -2689,10 +2696,13 @@ with tab1:
             # 締切15分以内なら2行目を対象R表示に切り替える。
             _urgent = urgent_venues.get(code)
             label = f"{marker} {VENUES[code]}"
+            # 万舟チャンスのレースがある会場は 💥と数
+            _manshu_n = _manshu_venues.get(code, 0)
+            _manshu_tag = f"{manshu_view.manshu.ICON}{_manshu_n}" if _manshu_n else ""
             if _urgent and active_holding:
-                label += f"\n🔥{int(_urgent['race_no'])}R"
-            elif _time_icon:
-                label += f"\n{_time_icon}"
+                label += f"\n🔥{int(_urgent['race_no'])}R" + (f" {_manshu_tag}" if _manshu_tag else "")
+            elif _time_icon or _manshu_tag:
+                label += "\n" + " ".join(x for x in (_time_icon, _manshu_tag) if x)
 
             with col:
                 if st.button(
@@ -2715,6 +2725,7 @@ with tab1:
     st.caption(
         "🌅朝＝早朝〜昼過ぎまで / ☀️昼＝通常デイ開催 / 🌙夜＝ナイター系 / "
         "赤い会場＝次レース締切15分以内（タップでそのRを取得）"
+        + (" / 💥＝万舟チャンス（荒れやすいレース）の数" if _manshu_venues else "")
     )
 
     jcd = st.session_state.get("selected_jcd")
@@ -2846,16 +2857,18 @@ with tab1:
             _near_css.append("</style>")
             st.markdown("".join(_near_css), unsafe_allow_html=True)
 
-        # 1-4R / 5-8R / 9-12R の3段。
+        # 1-4R / 5-8R / 9-12R の3段。万舟チャンスのレースは 💥
+        _manshu_rnos = manshu_view.race_nos(_manshu_marks, jcd)
         for row_start in (1, 5, 9):
             with st.container(key=f"race_row_{row_start}"):
                 cols = st.columns(4)
                 for col, rr in zip(cols, range(row_start, row_start + 4)):
                     hhmm = deadlines.get(rr, "--:--") if deadlines else "--:--"
+                    _rr_mark = manshu_view.manshu.ICON if rr in _manshu_rnos else ""
                     with col:
                         with st.container(key=f"race_btn_wrap_{rr}"):
                             st.button(
-                                f"{rr}R\n{hhmm}",
+                                f"{_rr_mark}{rr}R\n{hhmm}",
                                 key=f"race_pick_btn_{rr}",
                                 use_container_width=True,
                                 type="secondary",
@@ -2873,6 +2886,8 @@ with tab1:
             st.caption("締切予定時刻は取得できませんでしたが、Rカードから公式データ取得はできます。")
         else:
             st.caption("締切15分以内のレースは赤で強調表示します。")
+        if _manshu_rnos:
+            st.caption("💥＝万舟チャンス（荒れやすいレース）。本命が来にくい傾向があります。")
 
         rno = int(st.session_state.get("selected_rno", 12))
         ctx = race_key(d, jcd, rno)
@@ -3394,6 +3409,14 @@ with tab1:
 
                 if result.get("pre_exhibition"):
                     st.warning("⏳ 展示前の予想です。展示後にもう一度押してください")
+
+                # 万舟チャンスの印のレース: 注意書き（管理者には参考の穴寄りの買い目）
+                try:
+                    manshu_view.render_race_note(
+                        _manshu_marks.get(ctx), final=final, model_info=_model_info, is_admin=IS_ADMIN
+                    )
+                except Exception as e:
+                    print("[MANSHU] note error:", type(e).__name__, flush=True)
 
                 # -------------------------------------------------
                 # 予想の自動保存の結果

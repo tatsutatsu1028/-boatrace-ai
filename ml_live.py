@@ -136,10 +136,15 @@ def race_features(date_yyyymmdd, jcd, rno, state, current_meet=None, pages=None,
     return mf.live_table(pages, programs, state, current_meet), pages
 
 
-def predict_race(version, date_yyyymmdd, jcd, rno, current_meet=None, state=None, race=None):
-    """prediction.predict と同じ形の final を返す（買い目・資金配分・画面はそのまま使える）。"""
+def predict_race(version, date_yyyymmdd, jcd, rno, current_meet=None, state=None, race=None, keep=None):
+    """prediction.predict と同じ形の final を返す（買い目・資金配分・画面はそのまま使える）。
+
+    keep に dict を渡すと、使った特徴量（feats）とモデル（model）を入れて返す（万舟確率の計算に使う）。
+    """
     model = load_model(version)
     feats, pages = race_features(date_yyyymmdd, jcd, rno, state or load_state(), current_meet)
+    if keep is not None:
+        keep.update(feats=feats, model=model)
     final = mm.to_final(model, feats, race=race if race is not None else pages)
     # 今のモデルと同じく、検証保存用に今節成績などの入力も final に持ち出す
     if race is not None:
@@ -195,8 +200,9 @@ def production_final(settings, race, date_yyyymmdd, jcd, rno):
             raise RuntimeError("番組表（Bファイル）にこのレースが無い")
         meet_cols = ["lane"] + [c for c in mf._LIVE_MEET if c in race.columns]
         current_meet = race[meet_cols] if len(meet_cols) > 1 else None
+        kept = {}
         final = predict_race(version, date_yyyymmdd, jcd, rno, current_meet=current_meet,
-                             state=state, race=race)
+                             state=state, race=race, keep=kept)
         p1 = pd.to_numeric(final["p_first"], errors="coerce")
         if len(final) < 2 or p1.isna().any() or abs(float(p1.sum()) - 1.0) > 1e-3:
             raise RuntimeError(f"予想の形が不正（{len(final)}艇・1着確率の合計 {float(p1.sum()):.3f}）")
@@ -206,5 +212,19 @@ def production_final(settings, race, date_yyyymmdd, jcd, rno):
             f"{info['fallback_reason']}", flush=True)
         return None, info
     info["model_used"] = version
+    _add_manshu_post(info, kept)
     print(f"[ML_LIVE] {date_yyyymmdd}_{str(jcd).zfill(2)}_{int(rno)} 新しいモデル {version} で予想", flush=True)
     return final, info
+
+
+def _add_manshu_post(info, kept):
+    """展示後版の万舟確率と穴寄りの買い目を info["manshu_post"] に入れる（保存する予想に残る）。
+    出せなくても予想は続ける（理由だけ manshu_post_error に残す）。"""
+    try:
+        import manshu
+
+        if not manshu.latest():
+            return
+        info["manshu_post"] = manshu.post_info(kept["model"], kept["feats"])
+    except Exception as e:  # noqa: BLE001
+        info["manshu_post_error"] = f"{type(e).__name__}: {e}"[:200]
