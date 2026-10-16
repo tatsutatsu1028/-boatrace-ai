@@ -86,7 +86,9 @@ def _yen(v):
 
 
 def ticket_text(tickets):
-    return "　".join(f"{t['combo']} {int(t.get('stake') or 0):,}円" for t in (tickets or []))
+    """賭け金のある買い目だけ（資金配分で0円になった候補は出さない）。"""
+    return "　".join(f"{t['combo']} {int(t.get('stake') or 0):,}円" for t in (tickets or [])
+                    if int(t.get("stake") or 0) > 0)
 
 
 # ---------------------------------------------------------------

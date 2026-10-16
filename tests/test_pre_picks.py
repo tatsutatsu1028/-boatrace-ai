@@ -82,6 +82,45 @@ def test_summary_uses_post_tickets_when_predicted():
     assert s["展示後に印が付いた割合"] == 0.5
 
 
+def test_ticket_text_hides_zero_stake():
+    t = [{"combo": "1-2-3", "stake": 600}, {"combo": "2-1-4", "stake": 0}]
+    assert pre_picks_view.ticket_text(t) == "1-2-3 600円"
+
+
+def test_fetch_racelists_keeps_order_and_failures():
+    orig = pre_picks._fetch_racelist
+    pre_picks._fetch_racelist = lambda rk: None if rk.endswith("_2") else [{"race_key": rk, "lane": 1}]
+    try:
+        rows, failed = pre_picks.fetch_racelists(["d_01_1", "d_01_2", "d_01_3"])
+    finally:
+        pre_picks._fetch_racelist = orig
+    assert list(rows["race_key"]) == ["d_01_1", "d_01_3"] and failed == ["d_01_2"]
+
+
+def test_polite_interval_with_threads():
+    """並べて取っても、リクエストの開始間隔は3.4秒以上のまま（polite_http の共有ロック）。"""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import polite_http
+
+    starts = []
+    orig = polite_http.MIN_INTERVAL
+    polite_http.MIN_INTERVAL = 0.2  # テストを速くするため間隔だけ縮める（仕組みは同じ）
+    polite_http._last_start = None
+    try:
+        def go(_):
+            polite_http._wait_turn()
+            starts.append(time.monotonic())
+            time.sleep(0.5)  # 応答待ち
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            list(ex.map(go, range(6)))
+    finally:
+        polite_http.MIN_INTERVAL = orig
+    starts.sort()
+    assert min(b - a for a, b in zip(starts, starts[1:])) >= 0.2 - 1e-3
+
+
 def test_no_money_wording():
     """表示に「儲かる」と書かない。"""
     import inspect

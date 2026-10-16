@@ -39,6 +39,8 @@ MIN_LEAD_MINUTES = 15
 # 過去データの収集（公式サイトを読む）が動いていれば、この時間まで終わるのを待つ
 WAIT_CRAWLER_MINUTES = 30
 CRAWLER_WORKFLOWS = ("history_backfill.yml", "collect_history_workflow.yml")
+# 出走表ページを同時に待つ本数（開始間隔は polite_http が3.4秒以上に保つ）
+FETCH_WORKERS = 3
 # 展示後に「評価が大きく変わった」とみなす的中確率の下がり幅（Supabase のトリガーと同じ値）
 FLAG_HIT_DROP = 0.10
 VOID_COMBOS = ("特払い", "不成立", "返還")
@@ -113,28 +115,43 @@ def fetch_programs(date):
     return b
 
 
-def fetch_racelists(race_keys, attempts=2):
-    """各レースの出走表ページ（1レース1ページ）。取れなかったレースは除いて返す。"""
+def _fetch_racelist(rk, attempts=2):
+    """1レースの出走表ページ → 6艇の行（取れなければ None）。"""
     import ml_pre
     from history_pages import _fetch, parse_racelist
 
-    rows, failed = [], []
-    for rk in race_keys:
-        d, jcd, rno = rk.split("_")
-        for i in range(attempts):
-            try:
-                race, boats = parse_racelist(_fetch("racelist", d, jcd, int(rno)), d, int(rno))
-                if not any(b.get("racer_id") for b in boats.values()):
-                    raise ValueError("選手が読めない")
-                for ln, b in boats.items():
-                    rec = {"race_key": rk, "lane": ln}
-                    rec.update({c: race.get(c) for c in ("grade", "is_final_day")})
-                    rec.update({c: b.get(c) for c in ml_pre.RACELIST_COLS if c not in ("grade", "is_final_day")})
-                    rows.append(rec)
-                break
-            except Exception:  # noqa: BLE001
-                if i + 1 == attempts:
-                    failed.append(rk)
+    d, jcd, rno = rk.split("_")
+    for i in range(attempts):
+        try:
+            race, boats = parse_racelist(_fetch("racelist", d, jcd, int(rno)), d, int(rno))
+            if not any(b.get("racer_id") for b in boats.values()):
+                raise ValueError("選手が読めない")
+            rows = []
+            for ln, b in boats.items():
+                rec = {"race_key": rk, "lane": ln}
+                rec.update({c: race.get(c) for c in ("grade", "is_final_day")})
+                rec.update({c: b.get(c) for c in ml_pre.RACELIST_COLS if c not in ("grade", "is_final_day")})
+                rows.append(rec)
+            return rows
+        except Exception:  # noqa: BLE001
+            if i + 1 == attempts:
+                return None
+    return None
+
+
+def fetch_racelists(race_keys, workers=FETCH_WORKERS):
+    """各レースの出走表ページ（1レース1ページ）。取れなかったレースは除いて返す。
+
+    公式サイトの応答は1ページ数秒かかるので、数本を並べて待つ。リクエストの開始間隔は
+    polite_http が全スレッド合計で3.4秒以上に保つので、並べても公式サイトへの頻度は上がらない
+    （過去データの収集 history_pages.run と同じやり方）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(_fetch_racelist, race_keys))
+    rows = [r for res in results if res for r in res]
+    failed = [rk for rk, res in zip(race_keys, results) if not res]
     return pd.DataFrame(rows), failed
 
 
