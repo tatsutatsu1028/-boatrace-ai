@@ -130,3 +130,79 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
     print("ok")
+
+
+class _FakeDB:
+    def __init__(self, picks, enabled=True):
+        self.picks, self.enabled, self.rows = picks, enabled, {}
+
+    def __call__(self, method, path, prefer=None, **kw):
+        class R:
+            def __init__(self, data):
+                self._d = data
+
+            def json(self):
+                return self._d
+
+        if method == "GET" and path.startswith("threads_auto_posts"):
+            return R([self.rows[ISO]] if ISO in self.rows else [])
+        if method == "GET" and path.startswith("app_settings"):
+            return R([{"threads_auto_post_enabled": self.enabled}])
+        if method == "GET" and path.startswith("pre_exhibition_runs"):
+            return R([{"picked_count": len(self.picks)}])
+        if method == "GET" and path.startswith("pre_exhibition_picks"):
+            return R(self.picks)
+        if method == "GET" and path.startswith("note_publications"):
+            return R([{"race_key": self.picks[0]["race_key"]}])
+        if method == "POST" and path.startswith("threads_auto_posts"):
+            row = dict(self.rows.get(ISO, {}))
+            row.update(kw["json"])
+            self.rows[ISO] = row
+            return R([])
+        raise AssertionError(path)
+
+
+def _setup(monkeypatch, fail_at=None, enabled=True):
+    picks = [_pick(i, 0.9 - i / 20, "23:00", rno=i) for i in range(1, 11)]
+    db = _FakeDB(picks, enabled)
+    calls = []
+
+    def post(uid, token, text, reply_to_id=None):
+        calls.append(reply_to_id)
+        if fail_at is not None and len(calls) >= fail_at:  # この回から先（やり直しも）失敗
+            raise RuntimeError("boom")
+        return f"id{len(calls)}"
+
+    monkeypatch.setattr(tm, "_sb", db)
+    monkeypatch.setattr(tm, "_load_threads_config", lambda: {"user_id": "u", "access_token": "t"})
+    monkeypatch.setattr(tm.tp, "post_text", post)
+    monkeypatch.setattr(tm.time, "sleep", lambda s: None)
+    class _Now(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 16, 9, 0, tzinfo=tm.JST)
+
+    monkeypatch.setattr(tm, "datetime", _Now)
+    return db, calls
+
+
+def test_run_posts_thread_once(monkeypatch):
+    db, calls = _setup(monkeypatch)
+    tm.run("20261016")
+    row = db.rows[ISO]
+    assert row["status"] == "posted" and calls == [None, "id1", "id2"]
+    assert [p["race_no"] for p in row["posts"]] == [1, 2, 3]
+    assert row["note_overlap"] == [row["posts"][0]["race_key"]] and row["ticket_source"] == "model"
+    tm.run("20261016")
+    tm.run("20261016", retry=True)
+    assert len(calls) == 3  # 同じ日には2回投稿しない
+
+
+def test_run_partial_failure_and_off(monkeypatch):
+    db, calls = _setup(monkeypatch, fail_at=2)
+    tm.run("20261016")
+    row = db.rows[ISO]
+    assert row["status"] == "partial" and row["posts"][0]["post_id"] and row["posts"][1]["error"]
+    db, calls = _setup(monkeypatch, enabled=False)
+    tm.run("20261016")
+    assert db.rows[ISO]["status"] == "skipped" and not calls

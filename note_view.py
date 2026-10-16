@@ -72,22 +72,14 @@ def morning_post_keys(date_iso):
     return {str(p.get("race_key")) for p in ((rows[0].get("posts") if rows else None) or []) if p.get("post_id")}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _saved_claude_section(ctx):
-    """保存済み予想の "claude"（両方の予想平均の買い目がここにある）。同じ保存予想なら読み直さない。"""
-    cache = st.session_state.setdefault("_note_claude_section", {})
+    """保存済み予想の "claude"（両方の予想平均の買い目がここにある）。1分だけ覚えておく。"""
     try:
         snap = load_prediction_snapshot(ctx)
+        return (json.loads((snap or {}).get("payload_json") or "{}") or {}).get("claude")
     except Exception:  # noqa: BLE001
         return None
-    stamp = (snap or {}).get("saved_at")
-    if ctx in cache and cache[ctx][0] == stamp:
-        return cache[ctx][1]
-    try:
-        sec = (json.loads((snap or {}).get("payload_json") or "{}") or {}).get("claude")
-    except Exception:  # noqa: BLE001
-        sec = None
-    cache[ctx] = (stamp, sec)
-    return sec
 
 
 def _deadline_passed(d, hhmm):
@@ -172,7 +164,7 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
                    "有料記事にすると無料の投稿と重なります。")
 
     # 載せる買い目
-    avg = na.avg_option(_saved_claude_section(ctx), claude_tab.bundle(ctx))
+    avg = na.avg_option(None, claude_tab.bundle(ctx)) or na.avg_option(_saved_claude_section(ctx))
     options = ["model"] + (["avg"] if avg else [])
     current = (pub or {}).get("ticket_source") or "model"
     locked = bool(pub) and closed
