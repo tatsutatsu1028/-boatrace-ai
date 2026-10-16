@@ -31,6 +31,7 @@ from ml_model import is_ml_final
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 import claude_tab
 import claude_usage
+import pre_picks_view
 import daily_review
 from race_visuals import (
     ANIMATION_HEIGHT,
@@ -2506,6 +2507,10 @@ def _meeting_time_badge(deadlines):
 
 with tab1:
     d = st.date_input("日付", value=_today_jst())
+
+    # 管理者だけ: 展示前モデルで毎朝選んだ「当たりやすいレース」10件（そこからこの下でレースを開ける）
+    if IS_ADMIN:
+        pre_picks_view.render(d)
 
     st.session_state.setdefault("selected_jcd", None)
 
