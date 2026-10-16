@@ -427,7 +427,8 @@ def evaluate(preds_all, res, lab, out, args):
                   "モデル（新モデルの出力だけ＋場・R）": "p_chain_only", "1着確率のエントロピーだけ": "c_p1_entropy"}
         thr = {"thr:q90": res[f"{kind}_full"]["train_q90"], "thr:q80": res[f"{kind}_full"]["train_q80"]}
         for sname, col in scores.items():
-            for how in hows + list(thr):
+            # 学習期間の基準値はモデル（全部の特徴量）の確率の値なので、そのモデルにだけ使う
+            for how in hows + (list(thr) if col == "p_full" else []):
                 h = how if not how.startswith("thr:q") else f"thr:{thr[how]}"
                 d = picks(te, col, h)
                 r = {"version": kind, "score": sname, "pick": how, "races": len(d),
