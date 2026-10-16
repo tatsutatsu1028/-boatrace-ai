@@ -32,6 +32,8 @@ from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 import claude_tab
 import claude_usage
 import pre_picks_view
+import note_view
+import threads_auto_view
 import daily_review
 from race_visuals import (
     ANIMATION_HEIGHT,
@@ -88,6 +90,8 @@ try:
         build_daily_summary_text as threads_build_daily_summary_text,
         build_daily_summary_note_texts as threads_build_daily_summary_note_texts,
         fetch_daily_publication_results as threads_fetch_daily_publication_results,
+        fetch_morning_post_results as threads_fetch_morning_post_results,
+        apply_actuals as threads_apply_actuals,
         post_text as threads_post_text,
         load_config as threads_load_config,
         save_config as threads_save_config,
@@ -114,6 +118,12 @@ except Exception:
 
     def threads_fetch_daily_publication_results(*args, **kwargs):
         raise RuntimeError("threads_poster.py が未導入です。")
+
+    def threads_fetch_morning_post_results(*args, **kwargs):
+        return []
+
+    def threads_apply_actuals(records, actuals):
+        return records
 
     def threads_post_text(*args, **kwargs):
         raise RuntimeError("threads_poster.py が未導入です。")
@@ -1597,6 +1607,9 @@ with tab3:
                             st.error("保存に失敗しました。")
                             st.code(str(e))
 
+            st.divider()
+            threads_auto_view.render_settings(_today_jst())
+
             # -------------------------------------------------
             # 1日の発信まとめ
             # -------------------------------------------------
@@ -1613,17 +1626,21 @@ with tab3:
 
             if st.button("📊 まとめを作成・更新", key="threads_summary_build"):
                 try:
-                    with st.spinner("note確定レースと結果を照合しています…"):
+                    with st.spinner("朝の無料投稿・note記事のレースと結果を照合しています…"):
                         _sum_records = threads_fetch_daily_publication_results(
                             _sb_url, _sb_key, _sum_date
                         )
-                        # 払戻は的中レースの会場だけ公式結果一覧から引く。
+                        _sum_morning = threads_fetch_morning_post_results(
+                            _sb_url, _sb_key, _sum_date
+                        )
+                        # 3連単の結果と払戻は、記録したレースの会場だけ公式結果一覧から引く
+                        # （その日のうちは Supabase にまだ結果が無いレースがある）。
                         # 取れなくてもまとめ自体は作れるので失敗は無視する。
-                        _sum_payouts = {}
+                        _sum_payouts, _sum_actuals = {}, {}
                         _sum_codes = {
                             str(r["race_key"]).split("_")[1]
-                            for r in _sum_records
-                            if r.get("hit") and str(r.get("race_key", "")).count("_") == 2
+                            for r in _sum_records + _sum_morning
+                            if str(r.get("race_key", "")).count("_") == 2
                         }
                         for _code in sorted(_sum_codes):
                             try:
@@ -1640,13 +1657,18 @@ with tab3:
                                         f"{_sum_date.strftime('%Y%m%d')}_{_code}_"
                                         f"{int(float(_pay_row.get('race_no')))}"
                                     )
+                                    if str(_pay_row.get("trifecta") or "").strip():
+                                        _sum_actuals[_pay_key] = str(_pay_row.get("trifecta")).strip()
                                     _sum_payouts[_pay_key] = int(
                                         float(_pay_row.get("payout_per_100") or 0)
                                     )
                                 except Exception:
                                     continue
+                        threads_apply_actuals(_sum_records, _sum_actuals)
+                        threads_apply_actuals(_sum_morning, _sum_actuals)
                     st.session_state[_sum_state_key] = {
                         "records": _sum_records,
+                        "morning": _sum_morning,
                         "payouts": _sum_payouts,
                     }
                     # 再作成時は下書きも作り直す。
@@ -1661,17 +1683,22 @@ with tab3:
             _sum_loaded = st.session_state.get(_sum_state_key)
             if _sum_loaded is not None:
                 _sum_records = _sum_loaded["records"]
-                _sum_pending = [r for r in _sum_records if not r.get("settled")]
-                _sum_settled = [r for r in _sum_records if r.get("settled")]
-                _sum_hits = [r for r in _sum_settled if r.get("hit")]
+                _sum_morning = _sum_loaded.get("morning") or []
+                _sum_all = _sum_morning + _sum_records
+                _sum_pending = [r for r in _sum_all if not r.get("settled")]
+
+                def _sum_score(_recs):
+                    _done = [r for r in _recs if r.get("settled")]
+                    return f"{sum(1 for r in _done if r.get('hit'))} / {len(_done)}R"
 
                 _c1, _c2, _c3 = st.columns(3)
                 with _c1:
-                    st.metric("発信", f"{len(_sum_records)}R")
+                    st.metric("朝の無料（的中）", _sum_score(_sum_morning) if _sum_morning else "なし")
                 with _c2:
-                    st.metric("的中", f"{len(_sum_hits)} / {len(_sum_settled)}R")
+                    st.metric("note（的中）", _sum_score(_sum_records) if _sum_records else "なし")
                 with _c3:
                     st.metric("結果待ち", f"{len(_sum_pending)}R")
+                st.caption("朝の無料レースは投稿した買い目、noteのレースは記事に載せた買い目で的中を判定しています。")
 
                 _include_pending = True
                 if _sum_pending:
@@ -1693,6 +1720,7 @@ with tab3:
                     records=_sum_records,
                     payouts=_sum_loaded.get("payouts"),
                     include_pending=_include_pending,
+                    morning_records=_sum_morning,
                 )
                 # 結果待ちの表示切替で下書きを作り直せるよう、キーに含める。
                 _sum_text = st.text_area(
@@ -1719,7 +1747,7 @@ with tab3:
                 elif st.button(
                     "🧵 このまとめをスレッズに投稿",
                     key=f"post_threads_summary_{_sum_date_str}",
-                    disabled=_sum_len > THREADS_TEXT_LIMIT or not _sum_records,
+                    disabled=_sum_len > THREADS_TEXT_LIMIT or not _sum_all,
                 ):
                     try:
                         _sum_post_id = threads_post_text(
@@ -2511,6 +2539,8 @@ with tab1:
     # 管理者だけ: 展示前モデルで毎朝選んだ「当たりやすいレース」10件（そこからこの下でレースを開ける）
     if IS_ADMIN:
         pre_picks_view.render(d)
+        # 朝の無料3レース（スレッズの自動投稿）の結果。失敗・noteとの重複はここで目立たせる
+        threads_auto_view.render_status(d)
 
     st.session_state.setdefault("selected_jcd", None)
 
@@ -3425,9 +3455,8 @@ with tab1:
                 _saved_final, _saved_tickets = None, None
                 try:
                     if IS_ADMIN:
+                        # 保存された予想のモデルの買い目。note記事は欄の中で「両方の予想平均」も選べる
                         _saved_final, _saved_tickets = _saved_prediction_frames(ctx, result)
-                        # 記事の買い目: ＋Claude予想タブで選んだ予想（選んでいなければ押したボタンの予想）
-                        _saved_tickets = claude_tab.article_tickets(ctx, _saved_tickets)
                 except Exception as e:
                     print("[SNAPSHOT] saved prediction load error:", type(e).__name__, str(e), flush=True)
                     _saved_final, _saved_tickets = None, None
@@ -3487,215 +3516,22 @@ with tab1:
                     claude_tab.render_inline(ctx, _model_tickets)
 
                 # -------------------------------------------------
-                # note投稿管理（オーナー専用）
+                # note記事（オーナー専用・全て有料）
                 # -------------------------------------------------
-                # 記事投稿の最終判断はオーナーが行うため、全レースを投稿候補にする。
-                # 「記事用に確定」を押した時点でSupabase側が当日の通し番号を原子的に採番し、
-                # 1〜3本目=無料、4本目以降=有料300円に固定する。同一レースの再押下では増えない。
+                # 載せる買い目（モデルのみ予想／両方の予想平均）・Claudeの本文・予想カードは note_view.py。
+                _existing_pub = None
                 if IS_ADMIN and _saved_final is None:
                     st.caption("📝 保存された予想が無いため、note記事用の確定は使えません。")
                 elif IS_ADMIN:
                     try:
-                        _pub_probs = pd.to_numeric(_saved_final["p_first"], errors="coerce")
-                        _pub_top_idx = _pub_probs.idxmax()
-                        _pub_p1_prob = float(_pub_probs.loc[_pub_top_idx])
-                        _pub_p1_lane = int(_saved_final.loc[_pub_top_idx, "lane"])
-                        # 記事投稿の最終判断はオーナーが行うため、全レースで投稿UIを表示する。
-                        _pub_eligible = True
-
-                        if _pub_eligible:
-                            _pub_reason = (
-                                "本命70%以上" if _pub_p1_prob >= 0.70 else "オーナー判断"
-                            )
-                            _pub_deadline = str((deadlines or {}).get(rno) or "").strip()
-
-                            _pub_groups = {"本線": [], "抑え": [], "穴": []}
-                            if "combo" in _saved_tickets.columns:
-                                for _, _pub_row in _saved_tickets.iterrows():
-                                    _pub_combo = str(_pub_row.get("combo", "") or "").strip()
-                                    _pub_group = str(_pub_row.get("group", "抑え") or "抑え").strip()
-                                    if _pub_combo:
-                                        _pub_groups.setdefault(_pub_group, []).append(_pub_combo)
-
-                            def _compact_note_tickets(_combos):
-                                """同じ1着-2着の3着候補をまとめる。例: 1-2-3,1-2-4,1-2-6 -> 1-2-346"""
-                                _grouped = {}
-                                _fallback = []
-                                for _combo in _combos:
-                                    _parts = [p.strip() for p in str(_combo).split("-")]
-                                    if len(_parts) == 3 and all(p.isdigit() for p in _parts):
-                                        _key = (_parts[0], _parts[1])
-                                        _grouped.setdefault(_key, [])
-                                        if _parts[2] not in _grouped[_key]:
-                                            _grouped[_key].append(_parts[2])
-                                    else:
-                                        _fallback.append(str(_combo))
-                                _out = []
-                                for (_first, _second), _thirds in _grouped.items():
-                                    _third_text = "".join(_thirds)
-                                    _out.append(f"{_first}-{_second}-{_third_text}")
-                                return _out + _fallback
-
-                            _pub_lines = ["【本線買い目】"]
-                            if _pub_groups.get("本線"):
-                                _pub_lines += _compact_note_tickets(_pub_groups["本線"])
-                            else:
-                                _pub_lines += ["なし"]
-
-                            _cover_tickets = (_pub_groups.get("抑え") or []) + (_pub_groups.get("穴") or [])
-                            _pub_lines += ["", "【抑え買い目】"]
-                            if _cover_tickets:
-                                _pub_lines += _compact_note_tickets(_cover_tickets)
-                            else:
-                                _pub_lines += ["なし"]
-
-                            _pub_lines += [
-                                "",
-                                "※資金配分は指定していません。",
-                                "オッズとご自身の予算に合わせて、購入する買い目・金額をご判断ください。",
-                                "",
-                                "※掲載している予想は、的中や利益を保証するものではありません。舟券の購入はご自身の判断でお願いします。",
-                            ]
-                            _pub_article = "\n".join(_pub_lines)
-
-                            _pub_url, _pub_key = supabase_config()
-                            _pub_race_key = ctx
-                            _pub_date = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
-
-                            # 当日の未投稿DRAFTだけを削除して、投稿回数を0から数え直す。
-                            # 公開済み（note_url / published_atあり）は誤削除しない。
-                            if _pub_url and _pub_key:
-                                if st.button("🔄 本日の投稿回数をリセット", key=f"reset_note_count_{_pub_date}"):
-                                    try:
-                                        _reset = requests.post(
-                                            f"{_pub_url}/rest/v1/rpc/reset_note_publications_for_date",
-                                            headers={
-                                                "apikey": _pub_key,
-                                                "Authorization": f"Bearer {_pub_key}",
-                                                "Content-Type": "application/json",
-                                            },
-                                            json={"p_publication_date": _pub_date},
-                                            timeout=10,
-                                        )
-                                        _reset.raise_for_status()
-                                        _deleted = int(_reset.json() or 0)
-                                        st.success(f"本日の未投稿記事 {_deleted}件をリセットしました。投稿回数は0から数え直します。")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error("投稿回数のリセットに失敗しました。")
-                                        st.code(str(e))
-
-                            _existing_pub = None
-                            if _pub_url and _pub_key:
-                                try:
-                                    _er = requests.get(
-                                        f"{_pub_url}/rest/v1/note_publications",
-                                        params={"race_key": f"eq.{_pub_race_key}", "select": "*"},
-                                        headers={"apikey": _pub_key, "Authorization": f"Bearer {_pub_key}"},
-                                        timeout=10,
-                                    )
-                                    if _er.ok and (_er.json() or []):
-                                        _existing_pub = _er.json()[0]
-                                except Exception:
-                                    _existing_pub = None
-
-                            if _existing_pub:
-                                _ptype = _existing_pub.get("publication_type")
-                                _seq = int(_existing_pub.get("sequence_no") or 0)
-                                _price = int(_existing_pub.get("price") or 0)
-                                if _ptype == "FREE":
-                                    st.success(f"✅ 本日{_seq}本目 → 無料予想（確定済み）")
-                                else:
-                                    st.success(f"🔒 本日{_seq}本目 → 有料予想 {_price}円（確定済み）")
-                                _title_prefix = "無料予想" if _ptype == "FREE" else "有料予想"
-                                _note_title = st.text_input(
-                                    "noteタイトル",
-                                    value=(f"【{_title_prefix}】{VENUES[jcd]} {rno}R｜締切 {_pub_deadline}" if _pub_deadline else f"【{_title_prefix}】{VENUES[jcd]} {rno}R"),
-                                    key=f"note_title_{ctx}",
-                                )
-                                _note_body = st.text_area(
-                                    "note本文（そのままコピー用）",
-                                    # 確定後に締切前の再予想で保存内容が変わっても、最新の保存予想で作り直す。
-                                    value=_pub_article,
-                                    height=420,
-                                    key=f"note_body_{ctx}",
-                                )
-                                _copy_payload = json.dumps(
-                                    {"title": _note_title, "body": _note_body},
-                                    ensure_ascii=False,
-                                ).replace("</", "<\\/")
-                                components.html(
-                                    f"""
-                                    <style>
-                                      body {{ margin:0; }}
-                                      .copy-row {{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:2px 0 4px 0; }}
-                                      .copy-row button {{ min-height:44px; padding:6px 4px; cursor:pointer; font-size:13px; border-radius:10px; white-space:nowrap; }}
-                                      #copy-status {{ font-size:13px; color:#9fe7a9; min-height:18px; text-align:center; }}
-                                    </style>
-                                    <div class="copy-row">
-                                      <button id="copy-title">📋 タイトル</button>
-                                      <button id="copy-body">📋 本文</button>
-                                      <button id="copy-tags">📋 ハッシュタグ</button>
-                                    </div>
-                                    <div id="copy-status"></div>
-                                    <script>
-                                    const data = {_copy_payload};
-                                    const status = document.getElementById("copy-status");
-                                    async function copyText(value) {{
-                                      try {{
-                                        await navigator.clipboard.writeText(value);
-                                        status.textContent = "コピーしました";
-                                      }} catch (e) {{
-                                        status.textContent = "コピーできませんでした";
-                                      }}
-                                      setTimeout(() => status.textContent = "", 1800);
-                                    }}
-                                    document.getElementById("copy-title").onclick = () => copyText(data.title);
-                                    document.getElementById("copy-body").onclick = () => copyText(data.body);
-                                    document.getElementById("copy-tags").onclick = () => copyText("#ボートレース #競艇 #展示 #予想");
-                                    </script>
-                                    """,
-                                    height=76,
-                                )
-                            else:
-                                st.caption("まだ記事枠は確定していません。確定した順に本日の1〜3本目は無料、4本目以降は有料300円になります。")
-                                if st.button("📝 note記事用に確定", key=f"reserve_note_{ctx}"):
-                                    if not _pub_url or not _pub_key:
-                                        st.error("Supabase設定が見つかりません。")
-                                    else:
-                                        try:
-                                            _rr = requests.post(
-                                                f"{_pub_url}/rest/v1/rpc/reserve_note_publication",
-                                                headers={
-                                                    "apikey": _pub_key,
-                                                    "Authorization": f"Bearer {_pub_key}",
-                                                    "Content-Type": "application/json",
-                                                },
-                                                json={
-                                                    "p_race_key": _pub_race_key,
-                                                    "p_publication_date": _pub_date,
-                                                    "p_venue": VENUES[jcd],
-                                                    "p_race_no": int(rno),
-                                                    "p_trigger_reason": _pub_reason,
-                                                    "p_p1_lane": _pub_p1_lane,
-                                                    "p_p1_prob": _pub_p1_prob,
-                                                    "p_title": (f"{VENUES[jcd]} {rno}R｜締切 {_pub_deadline}" if _pub_deadline else f"{VENUES[jcd]} {rno}R"),
-                                                    "p_article_text": _pub_article,
-                                                },
-                                                timeout=10,
-                                            )
-                                            _rr.raise_for_status()
-                                            st.success("記事枠を確定しました。無料／有料は自動判定されています。")
-                                            st.rerun()
-                                        except Exception as e:
-                                            st.error("記事枠の確定に失敗しました。")
-                                            st.code(str(e))
-                        else:
-                            st.caption(
-                                f"📝 記事投稿対象外：本命 {_pub_p1_lane}号艇 {_pub_p1_prob:.1%}"
-                            )
+                        _existing_pub = note_view.render(
+                            ctx, d, VENUES[jcd], rno, str((deadlines or {}).get(rno) or "").strip(),
+                            _saved_final, _saved_tickets, work_result,
+                            api_key=_secret_text("ANTHROPIC_API_KEY"),
+                            model=_secret_text("CLAUDE_ARTICLE_MODEL") or None,
+                        )
                     except Exception as e:
-                        st.caption(f"記事投稿判定を表示できませんでした: {e}")
+                        st.caption(f"note記事の欄を表示できませんでした: {type(e).__name__}: {e}")
 
                 # -------------------------------------------------
                 # スレッズ投稿
@@ -3719,11 +3555,8 @@ with tab1:
                             final=_saved_final,
                             tickets=_saved_tickets,
                             deadline=(deadlines or {}).get(rno),
-                            publication_type=(
-                                str(_existing_pub.get("publication_type") or "FREE")
-                                if "_existing_pub" in locals() and _existing_pub
-                                else "FREE"
-                            ),
+                            # note は全て有料。記事にしていないレースも有料記事の案内の型にする
+                            publication_type=str((_existing_pub or {}).get("publication_type") or "PAID"),
                         )
 
                         _posted_key = f"threads_posted_{ctx}"

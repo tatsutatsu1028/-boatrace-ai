@@ -7,7 +7,7 @@ app_core.py からは次だけ呼ぶ:
                           call_api=False（モデルのみ）は呼ばず、前に取った読みがあればそれを使う
   - display_tickets(...)  予想タブに出す買い目（押したボタンの予想）
   - render_inline(...)    予想タブに3つの買い目を小さく並べる
-  - article_tickets(...)  note・スレッズに使う買い目
+  - bundle(...)           このセッションで作った3つの予想（note の「両方の予想平均」に使う）
   - render_tab(...)       「＋Claude予想」タブの中身
 スタッフの操作では、この中の API 呼び出しは一切動かない（呼ぶ側で IS_ADMIN を確かめる）。
 """
@@ -20,7 +20,6 @@ import streamlit as st
 import claude_reader as cr
 
 SESSION_KEY = "claude_by_race"
-CHOICE_KEY = "claude_article_choice"
 MODES = ("model", "claude", "avg")
 MODE_LABELS = {"model": "モデルのみ予想", "claude": "Claudeのみ予想", "avg": "両方の予想平均"}
 
@@ -128,14 +127,9 @@ def display_tickets(ctx, mode, model_tickets):
     return t, mode
 
 
-def article_tickets(ctx, saved_tickets):
-    """note・スレッズに使う買い目（タブで選んだ予想。選んでいなければ予想タブで押した予想）。"""
-    b = _store().get(ctx) or {}
-    mode = st.session_state.get(CHOICE_KEY, {}).get(ctx) or b.get("mode") or "model"
-    t = (b.get("tickets") or {}).get(mode)
-    if mode == "model" or t is None or not len(t):
-        return saved_tickets
-    return t
+def bundle(ctx):
+    """このセッションで作ったそのレースの3つの予想（無ければ None）。"""
+    return _store().get(ctx)
 
 
 def set_mode(ctx, mode):
@@ -259,14 +253,7 @@ def render_tab(current_ctx):
         st.caption("両方の予想平均：モデルとClaudeの3連単の確率を組み合わせごとに平均し、モデルと同じ手順で買い目を選び直したもの。"
                    "Claudeが挙げなかった組み合わせには、Claudeの確率の残りをモデルの確率の比率で配っています。")
 
-    available = [m for m in MODES if tickets.get(m) is not None]
-    if len(available) > 1:
-        choices = st.session_state.setdefault(CHOICE_KEY, {})
-        current = choices.get(ctx) or b.get("mode") or "model"
-        picked = st.radio("記事（note・スレッズ）に使う買い目", available,
-                          index=available.index(current) if current in available else 0,
-                          format_func=lambda m: MODE_LABELS[m], horizontal=True, key=f"claude_choice_{ctx}")
-        choices[ctx] = picked
+    st.caption("note記事に載せる買い目（モデルのみ予想／両方の予想平均）は、予想タブの「📝 note記事（有料）」欄で選びます。")
 
     usage, cost = reading.get("usage") or {}, reading.get("cost")
     if usage:
