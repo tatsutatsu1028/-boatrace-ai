@@ -162,7 +162,7 @@ class _FakeDB:
         raise AssertionError(path)
 
 
-def _setup(monkeypatch, fail_at=None, enabled=True):
+def _setup(monkeypatch, fail_at=None, enabled=True, image=("https://x/img.png", None), image_fails=False):
     picks = [_pick(i, 0.9 - i / 20, "23:00", rno=i) for i in range(1, 11)]
     db = _FakeDB(picks, enabled)
     calls = []
@@ -173,6 +173,14 @@ def _setup(monkeypatch, fail_at=None, enabled=True):
             raise RuntimeError("boom")
         return f"id{len(calls)}"
 
+    def post_image(uid, token, text, image_url, reply_to_id=None):
+        calls.append(("image", image_url))
+        if image_fails:
+            raise RuntimeError("image boom")
+        return "img1"
+
+    monkeypatch.setattr(tm, "prepare_image", lambda iso, chosen: image)
+    monkeypatch.setattr(tm.tp, "post_image", post_image)
     monkeypatch.setattr(tm, "_sb", db)
     monkeypatch.setattr(tm, "_load_threads_config", lambda: {"user_id": "u", "access_token": "t"})
     monkeypatch.setattr(tm.tp, "post_text", post)
@@ -190,7 +198,8 @@ def test_run_posts_thread_once(monkeypatch):
     db, calls = _setup(monkeypatch)
     tm.run("20261016")
     row = db.rows[ISO]
-    assert row["status"] == "posted" and calls == [None, "id1", "id2"]
+    assert row["status"] == "posted" and calls == [("image", "https://x/img.png"), "img1", "id2"]
+    assert row["image_url"] == "https://x/img.png" and row["posts"][0]["image_url"] == "https://x/img.png"
     assert [p["race_no"] for p in row["posts"]] == [1, 2, 3]
     assert row["note_overlap"] == [row["posts"][0]["race_key"]] and row["ticket_source"] == "model"
     tm.run("20261016")
@@ -206,3 +215,45 @@ def test_run_partial_failure_and_off(monkeypatch):
     db, calls = _setup(monkeypatch, enabled=False)
     tm.run("20261016")
     assert db.rows[ISO]["status"] == "skipped" and not calls
+
+
+def test_image_failures_fall_back_to_text(monkeypatch):
+    # 画像を用意できなかった日
+    db, calls = _setup(monkeypatch, image=(None, "画像を用意できませんでした: X"))
+    tm.run("20261016")
+    row = db.rows[ISO]
+    assert row["status"] == "posted" and calls == [None, "id1", "id2"]
+    assert row["image_url"] is None and "用意できません" in row["image_error"]
+    # 画像付きの投稿が失敗した日は、画像なしで投稿し直す
+    db, calls = _setup(monkeypatch, image_fails=True)
+    tm.run("20261016")
+    row = db.rows[ISO]
+    assert row["status"] == "posted" and calls[0][0] == "image" and calls[1] is None
+    assert row["posts"][0]["image_url"] is None and "画像なしで投稿" in row["image_error"]
+
+
+def test_morning_image_renders():
+    png = tm.make_image(ISO, [_pick(1, 0.5, "10:12", rno=3), _pick(2, 0.5, "11:00"), _pick(3, 0.5, "12:00")])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 10000
+
+
+def test_wait_container(monkeypatch):
+    seq = iter([{"status": "IN_PROGRESS"}, {"status": "FINISHED"}])
+
+    class R:
+        status_code = 200
+
+        def __init__(self):
+            self._d = next(seq)
+
+        def json(self):
+            return self._d
+
+    monkeypatch.setattr(tp.requests, "get", lambda *a, **k: R())
+    tp.wait_container("c", "t", sleep=lambda s: None)
+    seq = iter([{"status": "ERROR", "error_message": "bad"}])
+    try:
+        tp.wait_container("c", "t", sleep=lambda s: None)
+        raise AssertionError("例外が出ない")
+    except RuntimeError as e:
+        assert "bad" in str(e)

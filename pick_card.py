@@ -160,3 +160,63 @@ def render_card(venue, race_no, deadline, race_date, tickets, p_first, visual_ro
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------
+# スレッズの朝の投稿に付ける「本日の厳選3レース」画像
+# ---------------------------------------------------------------
+_WEEKDAYS = "月火水木金土日"
+MORNING_W, MORNING_H = 1080, 1350
+
+
+def render_morning_card(race_date_iso, picks):
+    """朝の無料3レースの画像（PNG の bytes）。picks は投稿する順の厳選の行（会場・R・締切・本命）。
+
+    スマホで読めるよう文字を大きくし、1レース1枚の横長のカードを縦に並べる。
+    """
+    from datetime import datetime as _dt
+
+    d = _dt.strptime(str(race_date_iso)[:10], "%Y-%m-%d")
+    img = Image.new("RGB", (MORNING_W, MORNING_H), BG)
+    dr = ImageDraw.Draw(img)
+    f_head, f_date, f_rank, f_venue, f_mid, f_small = _font(72), _font(44), _font(56), _font(76), _font(44), _font(30)
+
+    # ヘッダー
+    dr.text((MORNING_W // 2, 96), "本日の厳選3レース", font=f_head, fill=INK, anchor="mm")
+    dr.text((MORNING_W // 2, 178), f"{d.month}/{d.day}（{_WEEKDAYS[d.weekday()]}）　展示前予想", font=f_date,
+            fill=SUB, anchor="mm")
+    dr.line([(MORNING_W // 2 - 220, 226), (MORNING_W // 2 + 220, 226)], fill=ACCENT, width=4)
+
+    # 3レース
+    top, card_h, gap = 268, 300, 28
+    for i, p in enumerate(list(picks)[:3]):
+        y0 = top + i * (card_h + gap)
+        dr.rounded_rectangle([48, y0, MORNING_W - 48, y0 + card_h], radius=32, fill=PANEL)
+        # 順番の丸
+        dr.ellipse([84, y0 + 40, 184, y0 + 140], fill=ACCENT)
+        dr.text((134, y0 + 90), str(i + 1), font=f_rank, fill=BG, anchor="mm")
+        try:
+            rno = f"{int(p.get('race_no'))}R"
+        except (TypeError, ValueError):
+            rno = str(p.get("race_no") or "")
+        dr.text((224, y0 + 90), f"{p.get('venue') or ''} {rno}", font=f_venue, fill=INK, anchor="lm")
+        dr.text((MORNING_W - 90, y0 + 72), "締切", font=f_small, fill=SUB, anchor="rm")
+        dr.text((MORNING_W - 90, y0 + 118), str(p.get("deadline") or "--:--"), font=f_mid, fill=INK, anchor="rm")
+        # 本命
+        dr.line([(84, y0 + 176), (MORNING_W - 84, y0 + 176)], fill=(44, 60, 94), width=2)
+        dr.text((84, y0 + 238), "本命", font=f_small, fill=SUB, anchor="lm")
+        try:
+            lane = int(p.get("favorite_lane"))
+        except (TypeError, ValueError):
+            lane = None
+        if lane in LANE_COLORS:
+            _boat(dr, 194, y0 + 238, lane, r=34, font=f_mid)
+            dr.text((250, y0 + 238), f"{lane}号艇　{p.get('favorite_name') or ''}".rstrip(), font=f_mid, fill=INK,
+                    anchor="lm")
+
+    dr.text((MORNING_W // 2, MORNING_H - 70), "買い目はスレッドの投稿で", font=f_small, fill=SUB, anchor="mm")
+    dr.text((MORNING_W // 2, MORNING_H - 30), "※展示前の情報だけの予想です。的中を保証するものではありません。",
+            font=_font(24), fill=SUB, anchor="mm")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()

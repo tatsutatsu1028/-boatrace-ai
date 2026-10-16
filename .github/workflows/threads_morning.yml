@@ -34,8 +34,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 1投稿目の画像（pick_card.py）に Pillow・pandas と日本語フォントを使う。
+      # 入らなくても threads_morning.py は画像なしで投稿する
       - name: Install dependencies
-        run: pip install "requests>=2.31"
+        run: |
+          pip install "requests>=2.31" Pillow "pandas==3.0.6" "numpy==2.4.6"
+          sudo apt-get install -y -q fonts-ipafont-gothic || echo "日本語フォントを入れられませんでした"
 
       # ログは誰でも見られるため、threads_morning.py は件数・合否だけを出す。
       - name: Run

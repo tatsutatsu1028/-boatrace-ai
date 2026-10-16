@@ -88,11 +88,15 @@ def _render_row(row, compact=False):
         st.caption(RETRY_NOTE)
     else:
         st.info(f"{head}　理由: {row.get('reason') or '—'}")
+    if row.get("image_error") and posted:
+        st.warning(f"🖼 画像なしで投稿しました（{row['image_error']}）")
     overlap = note_overlap(row)
     if overlap:
         st.warning("⚠️ 朝の無料投稿と同じレースを note の有料記事にしています: " + "、".join(_race(p) for p in overlap))
     if not compact and posted:
         with st.expander("投稿した本文", expanded=False):
+            if row.get("image_url"):
+                st.image(row["image_url"], caption="1投稿目の画像", width=320)
             for p in row.get("posts") or []:
                 st.caption(f"{_race(p)}　買い目: モデルのみ予想" + ("　（失敗）" if p.get("error") else ""))
                 st.code(p.get("text") or "", language=None)
