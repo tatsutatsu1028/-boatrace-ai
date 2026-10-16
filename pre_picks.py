@@ -25,7 +25,7 @@ import argparse
 import os
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import numpy as np
