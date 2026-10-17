@@ -5,7 +5,8 @@
 会場・レース番号・締切・的中確率・本命・買い目で並べる。「このレースを開く」で予想タブの
 下の欄にそのレースを読み込む。展示後にそのレースを予想すると（アプリか自動固定）、買い目は
 今の新モデル（展示後）の予想に差し替わり、本命が変わった・的中確率が10ポイント以上下がった
-レースには印が付く（外さない）。結果（的中・払戻）は翌朝に記録され、下の成績にまとまる。
+レースには印が付く（外さない）。結果（的中・払戻）はレースが終わるとその日のうちに書き込まれ（list_results.py）、
+各レースと一覧の最後（その日の集計）に出る。翌朝のまとめての記録は取りこぼしの保険。
 
 表示は「当たりやすいレース」。回収率が上がることを示すものではないので、そうは書かない。
 """
@@ -108,7 +109,7 @@ def _deadline_passed(d, hhmm):
         return False
 
 
-def _render_pick(d, r, manshu_marks=None):
+def _render_pick(d, r, manshu_marks=None, cancelled=()):
     post = r.get("post_tickets") is not None
     passed = _deadline_passed(d, r.get("deadline"))
     with st.container(border=True):
@@ -136,16 +137,51 @@ def _render_pick(d, r, manshu_marks=None):
         else:
             st.caption("買い目（展示前の予想。展示後にこのレースを予想すると差し替わります）")
             st.markdown(ticket_text(r.get("tickets")))
-        status = r.get("result_status")
-        if status == "void":
-            st.caption("結果: 中止・不成立")
-        elif status == "settled":
-            hit, stake, ret = used_result(r)
-            mark = "✅ 的中" if hit else "❌ 不的中"
-            st.caption(f"結果: {mark}　3連単 {r.get('trifecta_actual')}（{_yen(r.get('trifecta_payout'))}）"
-                       f"　払戻 {_yen(ret)} / 賭け金 {_yen(stake)}")
+        line = result_line(r, result_state(d, r, cancelled))
+        if line:
+            st.markdown(line)
         st.button("🎯 このレースを開く", key=f"pre_pick_open_{r['race_key']}", on_click=_open_race,
                   args=(r["jcd"], r["race_no"]), use_container_width=True)
+
+
+def result_state(d, r, cancelled=()):
+    """"settled" / "void"（中止） / "waiting"（結果待ち） / None（締切前）。結果はその日のうちに書き込まれる。"""
+    status = r.get("result_status")
+    if status in ("settled", "void"):
+        return status
+    if str(r.get("jcd")).zfill(2) in set(cancelled):
+        return "void"
+    if _deadline_passed(d, r.get("deadline")):
+        return "waiting"
+    return None
+
+
+def result_line(r, state):
+    if state == "void":
+        return "結果: 中止"
+    if state == "waiting":
+        return "結果待ち"
+    if state != "settled":
+        return None
+    hit, stake, ret = used_result(r)
+    return (f"結果: 3連単 {r.get('trifecta_actual')}（{_yen(r.get('trifecta_payout'))}）　"
+            f"表示した買い目 {'○' if hit else '×'}　払戻 {_yen(ret)} / 賭け金 {_yen(stake)}")
+
+
+def day_summary(rows, d, cancelled=()):
+    """その日の集計（何レース中何レース的中・合計の払戻）。"""
+    states = [result_state(d, r, cancelled) for r in rows]
+    done = [used_result(r) for r, s_ in zip(rows, states) if s_ == "settled"]
+    return {"races": len(rows), "settled": len(done), "void": states.count("void"),
+            "waiting": states.count("waiting"), "hits": sum(1 for h, _, _ in done if h),
+            "stake": sum(st_ for _, st_, _ in done), "return": sum(rt for _, _, rt in done)}
+
+
+def _render_day_summary(rows, d, cancelled):
+    s = day_summary(rows, d, cancelled)
+    st.markdown("##### 🧾 この日の集計")
+    st.markdown(f"結果の出たレース {s['settled']} / {s['races']}（結果待ち {s['waiting']}・中止 {s['void']}）　"
+                f"**{s['hits']} / {s['settled']}レース的中**　合計の払戻 **{_yen(s['return'])}** / 賭け金 {_yen(s['stake'])}")
 
 
 def _render_summary():
@@ -155,7 +191,7 @@ def _render_summary():
         st.caption(f"成績を読めませんでした: {type(e).__name__}")
         return
     if not rows:
-        st.caption("結果の出たレースはまだありません（翌朝に記録します）。")
+        st.caption("結果の出たレースはまだありません（レースが終わるとその日のうちに記録します）。")
         return
     today = datetime.now(JST).date()
     out = []
@@ -187,10 +223,16 @@ def render(d, manshu_marks=None):
         st.caption(
             "展示・直前情報を使わずに毎朝その日の全レースを予想し、「この買い目の的中確率」が高い順に選んだ"
             "当たりやすいレースです（毎朝8時過ぎに更新）。払戻や回収率が上がることを示すものではありません。"
+            "結果はレースが終わるとその日のうちに出ます。"
         )
         if not picks:
             st.info("この日の厳選レースはありません（毎朝8時過ぎに選びます）。")
+        import manshu_view
+
+        cancelled = manshu_view.cancelled_jcds(d)
         for r in picks:
-            _render_pick(d, r, manshu_marks)
+            _render_pick(d, r, manshu_marks, cancelled)
+        if picks:
+            _render_day_summary(picks, d, cancelled)
         st.markdown("##### 📈 これまでの成績")
         _render_summary()

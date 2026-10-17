@@ -3537,6 +3537,13 @@ with tab1:
                 # 管理者だけ: 3つの予想の買い目を並べて表示（Claude が取れたときだけ）
                 if IS_ADMIN:
                     claude_tab.render_inline(ctx, _model_tickets)
+                    # 万舟チャンスの印のレース: 通常の買い目と万舟狙いの買い目を並べる（予想した時点のオッズ）
+                    try:
+                        manshu_view.render_aim_compare(
+                            _manshu_marks.get(ctx), final, _model_tickets, odds, is_admin=IS_ADMIN
+                        )
+                    except Exception as e:
+                        print("[MANSHU] aim compare error:", type(e).__name__, flush=True)
 
                 # -------------------------------------------------
                 # note記事（オーナー専用・全て有料）

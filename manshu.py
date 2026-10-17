@@ -291,6 +291,8 @@ def summarize(rows):
     df = pd.DataFrame(rows)
 
     def roi(prefix):
+        if f"{prefix}_stake" not in df.columns:
+            return None
         st_ = pd.to_numeric(df.get(f"{prefix}_stake"), errors="coerce").fillna(0)
         rt = pd.to_numeric(df.get(f"{prefix}_return"), errors="coerce").fillna(0)
         return float(rt.sum() / st_.sum()) if st_.sum() else None
@@ -310,4 +312,20 @@ def summarize(rows):
         "本線 回収率": roi("main"),
         "穴寄り 的中率": hit("longshot"),
         "穴寄り 回収率": roi("longshot"),
+        **aim_summary(df),
+    }
+
+
+def aim_summary(df):
+    """表示した万舟狙いの買い目の成績（表示したレースだけ）。"""
+    if "aim_stake" not in df.columns:
+        return {}
+    a = df[pd.to_numeric(df["aim_stake"], errors="coerce").fillna(0) > 0]
+    if not len(a):
+        return {"万舟狙い レース数": 0}
+    return {
+        "万舟狙い レース数": int(len(a)),
+        "万舟狙い 的中率": float(a["aim_hit"].fillna(False).astype(bool).mean()),
+        "万舟狙い 回収率": float(pd.to_numeric(a["aim_return"], errors="coerce").fillna(0).sum()
+                             / pd.to_numeric(a["aim_stake"], errors="coerce").fillna(0).sum()),
     }
