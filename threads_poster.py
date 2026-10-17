@@ -577,10 +577,19 @@ def split_main_cover(tickets):
 # 文章は後で Claude の文章に差し替えられるよう、1レース分を作る関数を1つにしている
 # （threads_morning.py の build_texts が writer を受け取り、失敗したらこの型に戻す）。
 MORNING_FOOTER = "※展示前の情報だけの予想です。的中を保証するものではありません。舟券の購入は自己責任でお願いします。"
+# 最後の投稿に入れる note の宣伝（文章を変えるときはここだけ直す）
+MORNING_NOTE_PROMO = (
+    "📝 展示後の最終予想はnoteで\n"
+    "展示データを反映した本命・本線・抑えの買い目を、有料記事で公開しています。\n"
+    "プロフィールのnoteからどうぞ☝️"
+)
 
 
-def build_morning_pick_text(race_date, pick, index, total):
-    """朝の無料レース1つ分の投稿（決まった型）。pick は pre_exhibition_picks の1行（買い目はモデルのみ）。"""
+def build_morning_pick_text(race_date, pick, index, total, promo=""):
+    """朝の無料レース1つ分の投稿（決まった型）。pick は pre_exhibition_picks の1行（買い目はモデルのみ）。
+
+    promo（note の宣伝）を渡すと、注意書きの前に入れる。
+    """
     venue = _clean(pick.get("venue"))
     try:
         rno = f"{int(pick.get('race_no'))}R"
@@ -600,6 +609,7 @@ def build_morning_pick_text(race_date, pick, index, total):
         parts.append("【本線】\n" + "\n".join(compact_combos(main)))
     if cover:
         parts.append("【抑え】\n" + "\n".join(compact_combos(cover)))
+    parts.append(promo)
     parts.append(MORNING_FOOTER)
     return "\n\n".join(p for p in parts if p)[:TEXT_LIMIT]
 

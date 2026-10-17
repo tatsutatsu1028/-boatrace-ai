@@ -81,7 +81,19 @@ def test_writer_falls_back_to_template():
 
     assert tm.build_texts(ISO, picks, writer=boom) == tm.build_texts(ISO, picks)
     assert tm.build_texts(ISO, picks, writer=lambda *a: "あ" * 600) == tm.build_texts(ISO, picks)
-    assert tm.build_texts(ISO, picks, writer=lambda d, p, i, n: f"本文{i}") == ["本文1", "本文2"]
+    assert tm.build_texts(ISO, picks, writer=lambda d, p, i, n: f"本文{i}") == [
+        "本文1", "本文2\n\n" + tp.MORNING_NOTE_PROMO]
+
+
+def test_note_promo_only_in_last_post():
+    texts = tm.build_texts(ISO, [_pick(1, 0.5, "10:00"), _pick(2, 0.5, "11:00"), _pick(3, 0.5, "12:00")])
+    assert tp.MORNING_NOTE_PROMO not in texts[0] and tp.MORNING_NOTE_PROMO not in texts[1]
+    assert tp.MORNING_NOTE_PROMO in texts[2]
+    assert texts[2].index(tp.MORNING_NOTE_PROMO) < texts[2].index(tp.MORNING_FOOTER)
+    assert all(len(t) <= tp.TEXT_LIMIT for t in texts)
+    # 長すぎる宣伝は入れない（投稿はそのまま）
+    long = tm.build_texts(ISO, [_pick(1, 0.5, "10:00")], promo="あ" * 480)
+    assert "あ" * 480 not in long[0] and "1-2-34" in long[0]
 
 
 def _rec(section, key, tickets, actual, legacy=None):
