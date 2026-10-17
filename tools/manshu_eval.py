@@ -458,6 +458,110 @@ def main_tickets(kind, args, te, labs):
     return g
 
 
+# ---------------------------------------------------------------
+# オッズを使う万舟狙いの買い目（odds）
+# ---------------------------------------------------------------
+ODDS_MIN = 100.0   # 「オッズ100倍以上」
+ODDS_N = 10        # 1レースの点数（各100円）
+
+
+def load_odds(data_dir):
+    """data/odds3t/ の最終オッズ（race_key, combo, odds）。"""
+    files = sorted(Path(data_dir).glob("odds3t_*.csv"))
+    if not files:
+        raise SystemExit("data/odds3t にオッズがありません（Odds Backfill を先に動かす）")
+    o = pd.concat([pd.read_csv(f, dtype={"race_key": str, "combo": str}) for f in files], ignore_index=True)
+    o["odds"] = pd.to_numeric(o["odds"], errors="coerce")
+    return o.drop_duplicates(["race_key", "combo"], keep="last")
+
+
+def is_outer_top2(combo):
+    """4〜6号艇が1着か2着に入る組か。"""
+    s = pd.Series(combo).astype(str)
+    return s.str[0].isin(list("456")) | s.str[2].isin(list("456"))
+
+
+def odds_strategies(tri, odds, n=ODDS_N, odds_min=ODDS_MIN):
+    """tri: race_key, combo, prob（モデルの3連単確率）/ odds: race_key, combo, odds → {名前: race_key, combo の表}"""
+    t = tri.merge(odds, on=["race_key", "combo"], how="inner")
+    t["outer"] = is_outer_top2(t["combo"]).to_numpy()
+    hi = t[t["odds"] >= odds_min].sort_values(["race_key", "prob"], ascending=[True, False])
+    out = {}
+    out["A 100倍以上から確率順"] = hi.groupby("race_key").head(n)
+    b = hi.sort_values(["race_key", "outer", "prob"], ascending=[True, False, False])
+    out["B 100倍以上・4〜6号艇が1〜2着の組を優先"] = b.groupby("race_key").head(n)
+    out["B' 100倍以上・4〜6号艇が1〜2着の組だけ"] = hi[hi["outer"]].groupby("race_key").head(n)
+    c = t[t["combo"].str[0] != "1"].sort_values(["race_key", "prob"], ascending=[True, False])
+    out["C 参考: 1号艇を1着から外した上位10点（オッズなし）"] = c.groupby("race_key").head(n)
+    return out
+
+
+def cmd_odds(args):
+    out = Path(args.out)
+    cache = Path(args.cache)
+    from data_paths import data_path
+
+    odds = load_odds(args.odds_dir or data_path("data/odds3t"))
+    have = set(odds["race_key"])
+    targets = pd.read_csv(out / "odds_targets.csv", dtype=str)
+    lab = labeled_races(TEST_START, args.test_end)
+    lab = lab[lab["race_key"].isin(have)]
+    rows, outer_rows = [], []
+    for kind in ("pre", "post"):
+        rl = pd.read_csv(out / f"race_level_{kind}.csv.gz", dtype={"race_date": str})
+        rl = rl[rl["race_key"].isin(have)]
+        full = pd.read_csv(out / f"race_level_{kind}.csv.gz", dtype={"race_date": str})
+        sets = {
+            "印: 毎日10レース": picks(full, "p_full", "day10"),
+            "印: 毎日20レース": picks(full, "p_full", "day20"),
+        }
+        rand = set(targets.loc[targets["set"] == "random", "race_key"])
+        sets["比較: 印の無いレース（無作為800）"] = full[full["race_key"].isin(rand)]
+        if kind == "post":
+            sets.pop("印: 毎日20レース")  # 展示後版の20レースは取っていない
+        ch = pd.read_pickle(cache / f"chain_{kind}.pkl")
+        tri = ch["tri"][ch["tri"]["race_key"].isin(have)]
+        strategies = odds_strategies(tri, odds)
+        for sname, d in sets.items():
+            keys = set(d["race_key"])
+            got = keys & have
+            for tname, sel in strategies.items():
+                sel = sel[sel["race_key"].isin(got)]
+                g = ticket_returns(sel, lab).join(lab.set_index("race_key")[["race_date", "manshu"]])
+                g = g.reindex(sorted(got & set(lab["race_key"])))
+                g["stake"] = g["stake"].fillna(0.0)
+                g["ret"] = g["ret"].fillna(0.0)
+                g["race_date"] = lab.set_index("race_key").loc[g.index, "race_date"].to_numpy()
+                bet = g[g["stake"] > 0]
+                if not len(bet):
+                    continue
+                hit = bet["ret"] > 0
+                mid = sorted(lab["race_date"].unique())[lab["race_date"].nunique() // 2]
+                r = {"version": kind, "races_set": sname, "tickets": tname,
+                     "races_in_set": len(keys), "races_with_odds": len(got), "races_bet": len(bet),
+                     "points_per_race": float(bet["stake"].mean() / 100), "stake": float(bet["stake"].sum()),
+                     "return": float(bet["ret"].sum()), "roi": float(bet["ret"].sum() / bet["stake"].sum()),
+                     "hit_rate": float(hit.mean()),
+                     "avg_hit_return": float(bet.loc[hit, "ret"].mean()) if hit.any() else np.nan,
+                     "manshu_rate": float(bet["manshu"].mean())}
+                r["roi_ci95"] = boot_ci(bet.reset_index(), lambda q: q["ret"].sum() / q["stake"].sum())
+                for half, m in (("first_half", bet["race_date"] < mid), ("second_half", bet["race_date"] >= mid)):
+                    q = bet[m]
+                    r[f"{half}_roi"] = float(q["ret"].sum() / q["stake"].sum()) if len(q) else np.nan
+                rows.append(r)
+            # 100倍以上の組の数と、そのうち4〜6号艇が1〜2着の組の数（1レースあたり）
+            t = tri[tri["race_key"].isin(got)].merge(odds, on=["race_key", "combo"])
+            hi = t[t["odds"] >= ODDS_MIN]
+            outer_rows.append({"version": kind, "races_set": sname,
+                               "combos_100x_per_race": len(hi) / max(len(got), 1),
+                               "outer_combos_100x_per_race": float(is_outer_top2(hi["combo"]).sum()) / max(len(got), 1),
+                               "prob_sum_100x": float(hi.groupby("race_key")["prob"].sum().mean())})
+        log(f"[MANSHU] odds {kind}")
+    pd.DataFrame(rows).to_csv(out / "odds_roi.csv", index=False, encoding="utf-8")
+    pd.DataFrame(outer_rows).to_csv(out / "odds_combos.csv", index=False, encoding="utf-8")
+    log(f"[MANSHU] odds 終了 {len(have)}レース分のオッズ")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -471,8 +575,13 @@ def main():
     e.add_argument("--post-model", required=True, help="今の新モデル（reports/ml_v2 の 2y と同じ学習期間）")
     e.add_argument("--pre-model", required=True, help="展示前モデル（reports/pre_exhibition と同じ）")
     e.add_argument("--test-end", default="20261014")
+    o = sub.add_parser("odds", help="オッズ100倍以上から選ぶ万舟狙いの買い目（Odds Backfill のオッズを使う）")
+    o.add_argument("--out", required=True, help="reports/manshu（race_level_*.csv.gz・odds_targets.csv がある）")
+    o.add_argument("--cache", required=True, help="eval の途中結果（chain_pre.pkl・chain_post.pkl）")
+    o.add_argument("--odds-dir", default="", help="既定: <BOATRACE_DATA_DIR>/data/odds3t")
+    o.add_argument("--test-end", default="20261014")
     args = ap.parse_args()
-    {"rates": cmd_rates, "eval": cmd_eval}[args.cmd](args)
+    {"rates": cmd_rates, "eval": cmd_eval, "odds": cmd_odds}[args.cmd](args)
 
 
 if __name__ == "__main__":

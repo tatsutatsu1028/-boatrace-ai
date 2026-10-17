@@ -277,6 +277,12 @@ def add_manshu(cands, model, feats):
         probs, longs, mversion = manshu.predict_with_chain("pre", model, feats)
         cands["manshu_prob"] = cands["race_key"].map(probs).astype(float)
         cands["longshot_tickets"] = cands["race_key"].map(lambda rk: longs.get(rk, []))
+        # 3連単の全120通りの確率（展示前）。一覧で、その時点のオッズから万舟狙いの買い目を作るのに使う
+        tri = probs.attrs.get("tri")
+        if tri is not None:
+            by = {rk: {str(c): round(float(p), 6) for c, p in zip(g["combo"], g["prob"])}
+                  for rk, g in tri.groupby("race_key", sort=False)}
+            cands["tri_probs"] = cands["race_key"].map(lambda rk: by.get(rk))
         cands.attrs["manshu_version"] = mversion
     except Exception as e:  # noqa: BLE001  万舟チャンスが出せなくても厳選10は続ける
         cands.attrs["manshu_error"] = f"{type(e).__name__}: {e}"[:300]
@@ -299,6 +305,7 @@ def select_manshu(cands, n=None):
 def manshu_rows(marks):
     cols = ["race_key", "race_date", "jcd", "venue", "race_no", "deadline", "pick_rank", "manshu_prob",
             "model_version", "favorite_lane", "favorite_prob", "p_first", "tickets", "longshot_tickets"]
+    cols += [c for c in ("tri_probs",) if c in marks.columns]
     out = []
     for r in marks[cols].to_dict("records"):
         r["manshu_model_version"] = marks.attrs.get("manshu_version", "")
@@ -328,7 +335,7 @@ def run_picks(date=None, force=False):
         return
     runtime, programs, failed, cands, version, state_as_of = day
     picks = select_picks(cands)
-    pick_cols = [c for c in picks.columns if c not in ("manshu_prob", "longshot_tickets")]
+    pick_cols = [c for c in picks.columns if c not in ("manshu_prob", "longshot_tickets", "tri_probs")]
     if have:
         _sb("DELETE", f"pre_exhibition_picks?race_date=eq.{iso}")
     _sb("POST", "pre_exhibition_picks", json=picks[pick_cols].to_dict("records"), prefer="return=minimal")
@@ -382,7 +389,12 @@ def save_manshu(date, cands):
         try:
             _sb("DELETE", f"manshu_chance_picks?race_date=eq.{iso}")
             if len(marks):
-                _sb("POST", "manshu_chance_picks", json=manshu_rows(marks), prefer="return=minimal")
+                rows = manshu_rows(marks)
+                try:
+                    _sb("POST", "manshu_chance_picks", json=rows, prefer="return=minimal")
+                except Exception:  # noqa: BLE001  新しい列（tri_probs）がまだ無いデータベースでは無しで保存する
+                    _sb("POST", "manshu_chance_picks", json=[{k: v for k, v in r.items() if k != "tri_probs"}
+                                                             for r in rows], prefer="return=minimal")
                 _sb("POST", "rpc/manshu_picks_sync_post", json={"p_race_date": iso})
         except Exception as e:  # noqa: BLE001  厳選10の保存は続ける
             manshu_error = f"保存に失敗: {type(e).__name__}"[:300]
@@ -493,6 +505,9 @@ def manshu_result_fields(row, pays):
     if row.get("post_longshot_tickets"):
         out["post_longshot_hit"], out["post_longshot_stake"], out["post_longshot_return"] = ticket_result(
             manshu.stake_longshots(row["post_longshot_tickets"]), real)
+    if row.get("aim_tickets"):
+        # 表示した万舟狙いの買い目（締切前に最後に表示したもの）
+        out["aim_hit"], out["aim_stake"], out["aim_return"] = ticket_result(row["aim_tickets"], real)
     return out
 
 
@@ -507,8 +522,8 @@ def record_manshu_results(today=None):
         if pays is None:
             log(f"{d.replace('-', '')}: 競走成績がまだ無いため万舟チャンスの結果は次回に回す")
             continue
-        day = _sb("GET", f"manshu_chance_picks?race_date=eq.{d}&result_at=is.null"
-                         "&select=race_key,tickets,longshot_tickets,post_tickets,post_longshot_tickets").json() or []
+        # select=*（列がまだ無いデータベースでも読める）
+        day = _sb("GET", f"manshu_chance_picks?race_date=eq.{d}&result_at=is.null&select=*").json() or []
         for r in day:
             _sb("PATCH", f"manshu_chance_picks?race_key=eq.{r['race_key']}", prefer="return=minimal",
                 json=manshu_result_fields(r, pays.get(r["race_key"])))
