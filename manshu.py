@@ -135,6 +135,72 @@ def longshot_tickets(tri, n=LONGSHOT_N):
 
 
 # ---------------------------------------------------------------
+# 万舟狙いの買い目（検証中・参考。オッズを使う）
+# ---------------------------------------------------------------
+# 作り方は検証（tools/manshu_eval.py odds）の結果で決める。ここを変えれば画面・保存・成績の全部が変わる。
+#   "A": オッズ AIM_ODDS_MIN 倍以上の組の中から、モデルの3連単確率が高い順に AIM_N 点
+#   "B": 同じ組の中で、4〜6号艇が1着か2着に入る組を優先（足りなければ残りで埋める）
+AIM_METHOD = "A"
+AIM_N = 10
+AIM_ODDS_MIN = 100.0
+AIM_STAKE = 100             # 1点あたり（資金配分しない）
+AIM_LABEL = "万舟狙いの買い目"
+AIM_NOTE = ("検証中・参考: 今の時点の3連単オッズが100倍以上の組から、モデルの確率が高い順に選んでいます。"
+            "儲かるとは限りません。")
+AIM_MORNING_NOTE = "朝の時点のオッズは売れ始めで当てになりません。締切前に「オッズを更新」で取り直してください。"
+
+
+def is_outer_top2(combo):
+    """4〜6号艇が1着か2着に入る組か。"""
+    c = str(combo)
+    return len(c) >= 3 and (c[0] in "456" or c[2] in "456")
+
+
+def aim_tickets(probs, odds, method=None, n=None, odds_min=None):
+    """万舟狙いの買い目。probs: {組番: 3連単確率} / odds: {組番: オッズ}
+    → [{combo, prob, odds, stake, payout}]（payout は当たったときの払戻。オッズ × 賭け金）"""
+    method = method or AIM_METHOD
+    n = n or AIM_N
+    odds_min = AIM_ODDS_MIN if odds_min is None else odds_min
+    rows = []
+    for combo, p in (probs or {}).items():
+        o = (odds or {}).get(combo)
+        try:
+            o, p = float(o), float(p)
+        except (TypeError, ValueError):
+            continue
+        if o != o or p != p or o < odds_min:
+            continue
+        rows.append((combo, p, o))
+    if method == "B":
+        rows.sort(key=lambda r: (not is_outer_top2(r[0]), -r[1], r[0]))
+    else:
+        rows.sort(key=lambda r: (-r[1], r[0]))
+    return [{"combo": c, "prob": round(p, 5), "odds": o, "stake": AIM_STAKE, "payout": int(round(o * AIM_STAKE))}
+            for c, p, o in rows[:n]]
+
+
+def tri_dict(tri):
+    """3連単確率の表（combo, prob）か dict → {組番: 確率}。"""
+    if tri is None:
+        return {}
+    if isinstance(tri, dict):
+        return {str(k): float(v) for k, v in tri.items()}
+    return {str(c): float(p) for c, p in zip(tri["combo"], tri["prob"])}
+
+
+def odds_dict(odds):
+    """fetch_odds3t の表（combo, odds）か dict → {組番: オッズ}。"""
+    if odds is None:
+        return {}
+    if isinstance(odds, dict):
+        return {str(k): float(v) for k, v in odds.items()}
+    if len(odds) == 0 or "combo" not in odds.columns:
+        return {}
+    return {str(c): float(o) for c, o in zip(odds["combo"], pd.to_numeric(odds["odds"], errors="coerce"))}
+
+
+# ---------------------------------------------------------------
 # 学習済みモデル
 # ---------------------------------------------------------------
 def latest():
@@ -188,6 +254,7 @@ def predict_with_chain(kind, chain_model, feats):
     first, second, third = chain_model.predict_tables(feats)
     tri = mm.trifecta_table(first, second, third)
     probs = predict_frame(bst, feats, first, tri, post=(kind == "post"))
+    probs.attrs["tri"] = tri
     return probs, longshot_tickets(tri), version
 
 

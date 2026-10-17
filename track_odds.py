@@ -570,6 +570,11 @@ def _try_finalize_result(race_date, jcd, rno):
         )
         return False
 
+    # 一覧（展示前厳選10・万舟チャンス）のレースなら、同じ結果をその日のうちに書き込む（追加のアクセスなし）
+    import list_results
+
+    list_results.on_official_result(ctx, official_result)
+
     record = _build_result_record(
         snapshot,
         race_date,

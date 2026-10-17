@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 
 import claude_reader
+import list_results
 from hit_calibration import CALIBRATED_RESULT_COLUMNS, snapshot_calibrated_fields
 from official_fetcher import fetch_race_result
 from today_schedule_fetcher import fetch_venue_deadlines
@@ -358,6 +359,17 @@ def _upsert_result(record):
 
 
 def main():
+    try:
+        _collect_auto_results()
+    finally:
+        # 一覧のレースのうち、結果確定に拾われなかったレースだけ結果ページを読む（1日最大20レース）
+        try:
+            list_results.sync_pending()
+        except Exception as e:  # noqa: BLE001
+            print("[LIST_RESULTS] skip", type(e).__name__, e)
+
+
+def _collect_auto_results():
     snapshots = _pending_snapshots()
     if not snapshots:
         print("[AUTO_RESULT] no auto snapshots")
@@ -377,6 +389,8 @@ def main():
                 continue
 
             official = fetch_race_result(date_key, jcd, rno)
+            # 一覧（展示前厳選10・万舟チャンス）のレースなら、同じ結果をその日のうちに書き込む（追加のアクセスなし）
+            list_results.on_official_result(race_key, official)
             snapshot = dict(snap)
             snapshot["payload_json"] = _snapshot_payload(race_key)
             record = _build_record(snapshot, official)
