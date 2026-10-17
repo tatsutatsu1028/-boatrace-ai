@@ -186,12 +186,18 @@ def select_for_post(picks, now, n=POST_COUNT, lead=MIN_LEAD_MINUTES):
     return [p for _, _, p in ok[:n]]
 
 
-def build_texts(race_date_iso, chosen, writer=None):
-    """投稿する本文のリスト。writer(race_date, pick, index, total) → 本文 があれば先に使う。"""
+def build_texts(race_date_iso, chosen, writer=None, promo=None):
+    """投稿する本文のリスト。writer(race_date, pick, index, total) → 本文 があれば先に使う。
+
+    最後の投稿には note の宣伝（promo。既定は threads_poster.MORNING_NOTE_PROMO）を入れる。
+    入れると文字数の上限を超えるときだけ、宣伝なしにする。
+    """
+    promo = tp.MORNING_NOTE_PROMO if promo is None else promo
     texts = []
     total = len(chosen)
     for i, p in enumerate(chosen, start=1):
         pick = {**p, "tickets": posted_tickets(p)}
+        last = i == total
         text = None
         if writer is not None:
             try:
@@ -201,7 +207,17 @@ def build_texts(race_date_iso, chosen, writer=None):
                 text = None
             if not text or len(text) > tp.TEXT_LIMIT:
                 text = None
-        texts.append(text or tp.build_morning_pick_text(race_date_iso, pick, i, total))
+            elif last and promo and promo not in text and len(text) + 2 + len(promo) <= tp.TEXT_LIMIT:
+                text = f"{text}\n\n{promo}"
+        if text is None:
+            text = tp.build_morning_pick_text(race_date_iso, pick, i, total)
+            if last and promo:
+                with_promo = tp.build_morning_pick_text(race_date_iso, pick, i, total, promo=promo)
+                if len(with_promo) < tp.TEXT_LIMIT:
+                    text = with_promo
+                else:
+                    log("文字数が上限を超えるため、noteの宣伝を入れない")
+        texts.append(text)
     return texts
 
 
