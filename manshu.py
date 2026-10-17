@@ -138,16 +138,45 @@ def longshot_tickets(tri, n=LONGSHOT_N):
 # 万舟狙いの買い目（検証中・参考。オッズを使う）
 # ---------------------------------------------------------------
 # 作り方は検証（tools/manshu_eval.py odds）の結果で決める。ここを変えれば画面・保存・成績の全部が変わる。
-#   "A": オッズ AIM_ODDS_MIN 倍以上の組の中から、モデルの3連単確率が高い順に AIM_N 点
-#   "B": 同じ組の中で、4〜6号艇が1着か2着に入る組を優先（足りなければ残りで埋める）
-AIM_METHOD = "A"
+#   "MIX": 中穴（AIM_MID_MIN〜AIM_HIGH_MIN 未満）から AIM_MIX["中穴"] 点＋万舟（AIM_HIGH_MIN 以上）から
+#          AIM_MIX["万舟"] 点。それぞれ AIM_ORDER（"prob" 確率順 / "ev" 確率×オッズ順）の高い順。
+#          片方の組が足りなければ、もう片方から同じ順で埋める（合計 AIM_N 点）
+#   "A":   万舟（AIM_HIGH_MIN 以上）の組の中から、確率が高い順に AIM_N 点
+#   "B":   A と同じ組の中で、4〜6号艇が1着か2着に入る組を優先（足りなければ残りで埋める）
+AIM_METHOD = "MIX"
+AIM_MIX = {"中穴": 5, "万舟": 5}
+AIM_ORDER = "prob"
 AIM_N = 10
-AIM_ODDS_MIN = 100.0
+AIM_MID_MIN = 30.0          # 中穴 = 3連単オッズ 30〜99倍
+AIM_HIGH_MIN = 100.0        # 万舟 = 100倍以上
+AIM_ODDS_MIN = AIM_HIGH_MIN  # 互換（A・B の下限）
 AIM_STAKE = 100             # 1点あたり（資金配分しない）
-AIM_LABEL = "万舟狙いの買い目"
-AIM_NOTE = ("検証中・参考: 今の時点の3連単オッズが100倍以上の組から、モデルの確率が高い順に選んでいます。"
-            "儲かるとは限りません。")
+AIM_LABEL = "中穴〜万舟狙いの買い目"
+AIM_NOTE = ("検証中・参考: 今の時点の3連単オッズで、中穴（30〜99倍）から5点・万舟（100倍以上）から5点を、"
+            "モデルの確率が高い順に選んでいます。儲かるとは限りません。")
 AIM_MORNING_NOTE = "朝の時点のオッズは売れ始めで当てになりません。締切前に「オッズを更新」で取り直してください。"
+
+
+def aim_method_name():
+    """保存する作り方の名前（例: MIX5+5-prob）。"""
+    if AIM_METHOD == "MIX":
+        return f"MIX{AIM_MIX['中穴']}+{AIM_MIX['万舟']}-{AIM_ORDER}"
+    return f"{AIM_METHOD}{AIM_N}"
+
+
+def odds_tier(odds):
+    """"中穴"（30〜99倍） / "万舟"（100倍以上） / None"""
+    try:
+        o = float(odds)
+    except (TypeError, ValueError):
+        return None
+    if o != o:
+        return None
+    if o >= AIM_HIGH_MIN:
+        return "万舟"
+    if o >= AIM_MID_MIN:
+        return "中穴"
+    return None
 
 
 def is_outer_top2(combo):
@@ -156,12 +185,13 @@ def is_outer_top2(combo):
     return len(c) >= 3 and (c[0] in "456" or c[2] in "456")
 
 
-def aim_tickets(probs, odds, method=None, n=None, odds_min=None):
-    """万舟狙いの買い目。probs: {組番: 3連単確率} / odds: {組番: オッズ}
-    → [{combo, prob, odds, stake, payout}]（payout は当たったときの払戻。オッズ × 賭け金）"""
+def aim_tickets(probs, odds, method=None, n=None, mix=None, order=None):
+    """中穴〜万舟狙いの買い目。probs: {組番: 3連単確率} / odds: {組番: オッズ}
+    → [{combo, prob, odds, tier, stake, payout}]（tier は "中穴"/"万舟"、payout は当たったときの払戻）"""
     method = method or AIM_METHOD
     n = n or AIM_N
-    odds_min = AIM_ODDS_MIN if odds_min is None else odds_min
+    mix = mix or AIM_MIX
+    order = order or AIM_ORDER
     rows = []
     for combo, p in (probs or {}).items():
         o = (odds or {}).get(combo)
@@ -169,15 +199,29 @@ def aim_tickets(probs, odds, method=None, n=None, odds_min=None):
             o, p = float(o), float(p)
         except (TypeError, ValueError):
             continue
-        if o != o or p != p or o < odds_min:
+        tier = odds_tier(o)
+        if p != p or tier is None:
             continue
-        rows.append((combo, p, o))
-    if method == "B":
-        rows.sort(key=lambda r: (not is_outer_top2(r[0]), -r[1], r[0]))
+        rows.append((combo, p, o, tier))
+    if method == "MIX":
+        key = (lambda r: (-r[1] * r[2], r[0])) if order == "ev" else (lambda r: (-r[1], r[0]))
+        rows.sort(key=key)
+        picked = []
+        for tier, k in mix.items():
+            picked += [r for r in rows if r[3] == tier][:k]
+        rest = [r for r in rows if r not in picked]
+        picked += rest[:max(0, sum(mix.values()) - len(picked))]  # 片方が足りなければもう片方で埋める
+        order_tier = {t: i for i, t in enumerate(mix)}
+        picked.sort(key=lambda r: (order_tier.get(r[3], 9), key(r)))
     else:
-        rows.sort(key=lambda r: (-r[1], r[0]))
-    return [{"combo": c, "prob": round(p, 5), "odds": o, "stake": AIM_STAKE, "payout": int(round(o * AIM_STAKE))}
-            for c, p, o in rows[:n]]
+        rows = [r for r in rows if r[3] == "万舟"]
+        if method == "B":
+            rows.sort(key=lambda r: (not is_outer_top2(r[0]), -r[1], r[0]))
+        else:
+            rows.sort(key=lambda r: (-r[1], r[0]))
+        picked = rows[:n]
+    return [{"combo": c, "prob": round(p, 5), "odds": o, "tier": t, "stake": AIM_STAKE,
+             "payout": int(round(o * AIM_STAKE))} for c, p, o, t in picked]
 
 
 def tri_dict(tri):

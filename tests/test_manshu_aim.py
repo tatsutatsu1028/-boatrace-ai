@@ -34,6 +34,28 @@ def test_aim_tickets_b_prefers_outer():
     assert manshu.aim_tickets(PROBS, ODDS, method="B", n=2) == t[:2]
 
 
+def test_aim_tickets_mix_mid_and_high():
+    probs = {f"{a}-{b}-{c}": p for (a, b, c), p in zip(
+        [(1, 2, 3), (1, 3, 2), (2, 1, 3), (3, 1, 2), (1, 2, 4), (1, 4, 2), (4, 1, 2), (5, 1, 2), (6, 1, 2),
+         (2, 3, 1), (4, 5, 6), (6, 5, 4), (5, 6, 4)],
+        [0.2, 0.1, 0.06, 0.05, 0.04, 0.035, 0.03, 0.02, 0.015, 0.012, 0.004, 0.003, 0.002])}
+    odds = {"1-2-3": 4.0, "1-3-2": 8.0, "2-1-3": 31.0, "3-1-2": 45.0, "1-2-4": 30.0, "1-4-2": 60.0,
+            "4-1-2": 99.9, "5-1-2": 150.0, "6-1-2": 210.0, "2-3-1": 100.0, "4-5-6": 3000.0, "6-5-4": 2500.0,
+            "5-6-4": 900.0}
+    t = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": 5, "万舟": 5}, order="prob")
+    assert [x["combo"] for x in t] == ["2-1-3", "3-1-2", "1-2-4", "1-4-2", "4-1-2",
+                                       "5-1-2", "6-1-2", "2-3-1", "4-5-6", "6-5-4"]
+    assert [x["tier"] for x in t] == ["中穴"] * 5 + ["万舟"] * 5  # 30倍ちょうどは中穴・100倍ちょうどは万舟
+    ev = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": 5, "万舟": 5}, order="ev")
+    assert ev[5]["combo"] == "4-5-6"  # 万舟の中で確率×オッズが最大（0.004×3000=12）
+    # 中穴が足りないときは万舟で埋める（合計10点）
+    few = {k: v for k, v in odds.items() if not 30 <= v < 100 or k == "2-1-3"}
+    t2 = manshu.aim_tickets(probs, few, method="MIX", mix={"中穴": 5, "万舟": 5})
+    assert len(t2) == 7 and [x["tier"] for x in t2].count("中穴") == 1  # 中穴1組＋万舟6組（全部）
+    assert manshu.odds_tier(29.9) is None and manshu.odds_tier(30) == "中穴" and manshu.odds_tier(100) == "万舟"
+    assert manshu.aim_method_name() == "MIX5+5-prob"
+
+
 def test_aim_tickets_missing_odds():
     assert manshu.aim_tickets(PROBS, {}) == []
     assert manshu.aim_tickets(PROBS, {"1-2-3": float("nan")}) == []
@@ -52,7 +74,7 @@ def test_aim_result_fields():
     aim = manshu.aim_tickets(PROBS, ODDS)
     row = {"tickets": [{"combo": "1-2-3", "stake": 2000}], "longshot_tickets": [], "aim_tickets": aim}
     out = pre_picks.manshu_result_fields(row, [("4-1-2", 15230)])
-    assert out["aim_hit"] is True and out["aim_stake"] == 400 and out["aim_return"] == 15230
+    assert out["aim_hit"] is True and out["aim_stake"] == 500 and out["aim_return"] == 15230
     assert out["is_manshu"] is True and out["main_hit"] is False
     assert "aim_hit" not in pre_picks.manshu_result_fields({"tickets": []}, [("4-1-2", 15230)])
 

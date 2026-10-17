@@ -133,7 +133,7 @@ def save_aim(race_key, tickets, source, odds_at):
     try:
         r = requests.post(f"{url}/rest/v1/rpc/manshu_save_aim",
                           headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                          json={"p_race_key": race_key, "p_tickets": tickets, "p_method": manshu.AIM_METHOD,
+                          json={"p_race_key": race_key, "p_tickets": tickets, "p_method": manshu.aim_method_name(),
                                 "p_source": source, "p_odds_at": odds_at}, timeout=15)
         r.raise_for_status()
         ok = bool(r.json())
@@ -147,7 +147,8 @@ def save_aim(race_key, tickets, source, odds_at):
 
 
 def aim_frame(tickets):
-    return pd.DataFrame([{"買い目": t["combo"], "確率": f"{float(t['prob']):.1%}", "オッズ": f"{float(t['odds']):.1f}倍",
+    return pd.DataFrame([{"区分": t.get("tier") or manshu.odds_tier(t.get("odds")) or "—",
+                          "買い目": t["combo"], "確率": f"{float(t['prob']):.1%}", "オッズ": f"{float(t['odds']):.1f}倍",
                           "賭け金": _yen(t["stake"]), "当たった時の払戻": _yen(t["payout"])} for t in tickets])
 
 
@@ -199,7 +200,7 @@ def _render_aim_in_list(d, r):
         return
     tickets = manshu.aim_tickets(r["tri_probs"], odds)
     if not tickets:
-        st.caption("オッズ100倍以上の組がありません。")
+        st.caption("オッズ30倍以上の組がありません。")
         return
     st.dataframe(aim_frame(tickets), hide_index=True, use_container_width=True)
     _aim_caption(at, morning=True)
@@ -248,7 +249,7 @@ def render_aim_compare(mark, final, tickets, odds_df, is_admin=False):
         if aim:
             st.dataframe(aim_frame(aim), hide_index=True, use_container_width=True)
         else:
-            st.caption("オッズ100倍以上の組がありません。")
+            st.caption("オッズ30倍以上の組がありません。")
     _aim_caption(at)
     if aim and not _deadline_passed(datetime.fromisoformat(f"{rk[:4]}-{rk[4:6]}-{rk[6:8]}").date(),
                                     mark.get("deadline")):
