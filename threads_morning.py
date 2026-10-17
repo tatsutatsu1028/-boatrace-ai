@@ -12,7 +12,6 @@
   - アプリの設定（app_settings.threads_auto_post_enabled）が OFF なら投稿しない
   - 厳選が3レースそろわない日、厳選のデータに異常がある日は投稿しない（理由を記録する）
   - 投稿の成否・投稿したレース・買い目を threads_auto_posts に1日1行で記録する（アプリに表示）
-  - note の記事にもなっているレースは note_overlap に記録する（アプリで警告する）
   - 同じ日に2回は投稿しない（--retry は、1投稿もできなかった日のやり直しだけ）
 
 1投稿目には「本日の厳選3レース」画像（日付・会場・R・締切・本命。pick_card.render_morning_card）を付ける。
@@ -383,8 +382,6 @@ def run(date=None, retry=False, dry_run=False, writer=None):
         return
 
     keys = [p["race_key"] for p in chosen]
-    notes = _json(_sb("GET", f"note_publications?race_key=in.({','.join(keys)})&select=race_key"))
-    overlap = [r["race_key"] for r in notes]
     texts = build_texts(iso, chosen, writer=writer)
     posts = [_post_record(p, t) for p, t in zip(chosen, texts)]
     if dry_run:
@@ -403,7 +400,7 @@ def run(date=None, retry=False, dry_run=False, writer=None):
     cfg = _load_threads_config()
     if not cfg:
         _save(iso, status="failed", reason="スレッズ連携が未設定", posts=posts, race_keys=keys,
-              note_overlap=overlap, attempts=attempts)
+              attempts=attempts)
         log("失敗: スレッズ連携が未設定")
         return
 
@@ -411,7 +408,7 @@ def run(date=None, retry=False, dry_run=False, writer=None):
     img = {"image_url": image_url, "image_error": image_error}
     # 途中で止まっても2回投稿しないよう、先に記録してから投稿する
     _save(iso, status="failed", reason="投稿を始めましたが終わっていません", posts=posts, race_keys=keys,
-          note_overlap=overlap, attempts=attempts, **img)
+          attempts=attempts, **img)
     parent = None
     for i, rec in enumerate(posts):
         if i:
@@ -429,15 +426,15 @@ def run(date=None, retry=False, dry_run=False, writer=None):
             rec["error"] = f"{type(e).__name__}: {e}"[:300]
             status = "failed" if i == 0 else "partial"
             _save(iso, status=status, reason=f"{i + 1}投稿目で失敗", posts=posts, race_keys=keys,
-                  note_overlap=overlap, attempts=attempts,
+                  attempts=attempts,
                   posted_at=datetime.now(JST).isoformat(timespec="seconds") if i else None, **img)
             log(f"{date}: {i + 1}投稿目で失敗（{type(e).__name__}）")
             return
         _save(iso, status="partial" if i + 1 < len(posts) else "posted",
               reason=None if i + 1 == len(posts) else "投稿の途中", posts=posts, race_keys=keys,
-              note_overlap=overlap, attempts=attempts, posted_at=datetime.now(JST).isoformat(timespec="seconds"),
+              attempts=attempts, posted_at=datetime.now(JST).isoformat(timespec="seconds"),
               **img)
-    log(f"{date}: {len(posts)}件を投稿" + (f"（noteと重複 {len(overlap)}件）" if overlap else ""))
+    log(f"{date}: {len(posts)}件を投稿")
 
 
 def main():
