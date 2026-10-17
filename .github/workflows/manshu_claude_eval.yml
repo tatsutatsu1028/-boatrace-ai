@@ -1,0 +1,60 @@
+name: Manshu Claude Aim Eval
+
+# 検証用: 万舟狙いの買い目 D「Claude に選ばせる」（tools/manshu_claude_aim.py）。手動で起動するだけ。
+# 万舟チャンスの印のレース（テスト期間）から無作為に sample レースを選び、入力データ・新モデルの確率・
+# オッズ100倍以上の組を Claude に渡して買い目を選んでもらい、データ用リポジトリの
+# reports/manshu/claude_aim.jsonl に追記する。費用の上限（max_usd）を超えたら止める。止まっても次回は続きから。
+# Secrets: ANTHROPIC_API_KEY（Claude API）・DATA_REPO_TOKEN（データ用リポジトリの読み書き）
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: "レース数"
+        required: true
+        default: "100"
+      max_usd:
+        description: "費用の上限（米ドル）"
+        required: true
+        default: "20"
+
+concurrency:
+  group: manshu-claude-eval
+  cancel-in-progress: false
+
+jobs:
+  claude-aim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ask Claude
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then echo "Secrets に ANTHROPIC_API_KEY がありません"; exit 1; fi
+          python tools/manshu_claude_aim.py --out _data/reports/manshu/claude_aim.jsonl \
+            --sample "${{ inputs.sample }}" --max-usd "${{ inputs.max_usd }}"
+
+      - name: Commit results
+        if: always()
+        run: bash tools/commit_history_data.sh reports/manshu/claude_aim.jsonl
