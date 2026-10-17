@@ -5,6 +5,7 @@
 
   python pre_picks.py run      [--date YYYYMMDD] [--force]   結果の記録 → その日の10レースの選定
   python pre_picks.py results                                 結果の記録だけ
+  python pre_picks.py manshu   [--date YYYYMMDD]              万舟チャンスだけ選び直す（厳選10は変えない）
 
 起動は pg_cron → pre_picks.yml（毎朝 08:05 JST。朝の過去データ収集〜08:00 の後）。
 公式サイトへのアクセスは polite_http（開始間隔3.4秒以上）を通し、過去データの収集が
@@ -322,12 +323,41 @@ def run_picks(date=None, force=False):
         log(f"{date}: 選定済み（{len(have)}レース）。選び直すときは --force")
         return
     t0 = time.time()
+    day = _predict_today(date, t0)
+    if day is None:
+        return
+    runtime, programs, failed, cands, version, state_as_of = day
+    picks = select_picks(cands)
+    pick_cols = [c for c in picks.columns if c not in ("manshu_prob", "longshot_tickets")]
+    if have:
+        _sb("DELETE", f"pre_exhibition_picks?race_date=eq.{iso}")
+    _sb("POST", "pre_exhibition_picks", json=picks[pick_cols].to_dict("records"), prefer="return=minimal")
+    _sb("POST", "pre_exhibition_runs?on_conflict=race_date", prefer="resolution=merge-duplicates,return=minimal", json={
+        "race_date": iso, "model_version": version, "state_as_of": state_as_of,
+        "race_count": int(programs["race_key"].nunique()), "candidate_count": int(len(cands)),
+        "racelist_failed": len(failed), "picked_count": int(len(picks)),
+        "hit_probability_by_race": {r.race_key: round(float(r.hit_probability), 4) for r in cands.itertuples()},
+        "settings": {**runtime, "pick_count": PICK_COUNT, "min_lead_minutes": MIN_LEAD_MINUTES,
+                     "flag_hit_drop": FLAG_HIT_DROP},
+        "code_sha": _code_sha(),
+        "picked_at": datetime.now(JST).isoformat(timespec="seconds"),
+    })
+    # 万舟チャンス（失敗しても厳選10は保存済み）
+    n_marks, manshu_error = save_manshu(date, cands)
+    # すでに展示後の予想があるレース（選び直したとき）にも展示後の値を付ける
+    _sb("POST", "rpc/pre_picks_sync_post", json={"p_race_date": iso})
+    log(f"{date}: 候補 {len(cands)}レースから {len(picks)}レースを保存・万舟チャンス "
+        f"{'失敗' if manshu_error else f'{n_marks}レース'} {time.time() - t0:.0f}秒")
+
+
+def _predict_today(date, t0):
+    """番組表・出走表を取り、その日の全レースを展示前モデルで予想する（締切が近いレースは除く）。"""
     runtime = _runtime()
     wait_for_crawlers()
     programs = fetch_programs(date)
     if programs is None or programs.empty:
         log(f"{date}: 番組表が無い")
-        return
+        return None
     now = datetime.now(JST) if date == _today() else None
     keys = programs.drop_duplicates("race_key")
     if now is not None:
@@ -338,12 +368,13 @@ def run_picks(date=None, force=False):
     cands, version, state_as_of = predict_day(date, runtime, programs, racelists, now=datetime.now(JST) if now else None)
     if cands.empty:
         log(f"{date}: 予想できたレースが無い")
-        return
-    picks = select_picks(cands)
-    pick_cols = [c for c in picks.columns if c not in ("manshu_prob", "longshot_tickets")]
-    if have:
-        _sb("DELETE", f"pre_exhibition_picks?race_date=eq.{iso}")
-    _sb("POST", "pre_exhibition_picks", json=picks[pick_cols].to_dict("records"), prefer="return=minimal")
+        return None
+    return runtime, programs, failed, cands, version, state_as_of
+
+
+def save_manshu(date, cands):
+    """万舟チャンスの10レースを保存し、pre_exhibition_runs に全レースの確率を書く。戻り値 (印の数, 失敗の理由)。"""
+    iso = f"{date[:4]}-{date[4:6]}-{date[6:]}"
     marks = select_manshu(cands)
     marks.attrs = dict(cands.attrs)
     manshu_error = cands.attrs.get("manshu_error")
@@ -356,17 +387,7 @@ def run_picks(date=None, force=False):
         except Exception as e:  # noqa: BLE001  厳選10の保存は続ける
             manshu_error = f"保存に失敗: {type(e).__name__}"[:300]
             log(f"{date}: 万舟チャンスの保存に失敗: {type(e).__name__}")
-    _sb("POST", "pre_exhibition_runs?on_conflict=race_date", prefer="resolution=merge-duplicates,return=minimal", json={
-        "race_date": iso, "model_version": version, "state_as_of": state_as_of,
-        "race_count": int(programs["race_key"].nunique()), "candidate_count": int(len(cands)),
-        "racelist_failed": len(failed), "picked_count": int(len(picks)),
-        "hit_probability_by_race": {r.race_key: round(float(r.hit_probability), 4) for r in cands.itertuples()},
-        "settings": {**runtime, "pick_count": PICK_COUNT, "min_lead_minutes": MIN_LEAD_MINUTES,
-                     "flag_hit_drop": FLAG_HIT_DROP},
-        "code_sha": _code_sha(),
-        "picked_at": datetime.now(JST).isoformat(timespec="seconds"),
-    })
-    # 万舟チャンスの列は別に書く（列がまだ無いデータベースでも厳選10の記録は残す）
+    # 列は厳選10の記録とは別に書く（列がまだ無いデータベースでも厳選10の記録は残す）
     try:
         _sb("PATCH", f"pre_exhibition_runs?race_date=eq.{iso}", prefer="return=minimal", json={
             "manshu_model_version": cands.attrs.get("manshu_version"),
@@ -377,10 +398,22 @@ def run_picks(date=None, force=False):
         })
     except Exception as e:  # noqa: BLE001
         log(f"{date}: 万舟チャンスの記録（runs）に失敗: {type(e).__name__}")
-    # すでに展示後の予想があるレース（選び直したとき）にも展示後の値を付ける
-    _sb("POST", "rpc/pre_picks_sync_post", json={"p_race_date": iso})
-    log(f"{date}: 候補 {len(cands)}レースから {len(picks)}レースを保存・万舟チャンス "
-        f"{'失敗' if manshu_error else f'{len(marks)}レース'} {time.time() - t0:.0f}秒")
+    return int(len(marks)), manshu_error
+
+
+def run_manshu(date=None):
+    """万舟チャンスだけ選び直す（展示前厳選10は変えない）。締切が近い・過ぎたレースは候補に入らない。"""
+    date = date or _today()
+    t0 = time.time()
+    day = _predict_today(date, t0)
+    if day is None:
+        return
+    cands = day[3]
+    n_marks, manshu_error = save_manshu(date, cands)
+    log(f"{date}: 万舟チャンス {'失敗' if manshu_error else f'{n_marks}レース'}（候補 {len(cands)}レース）"
+        f" {time.time() - t0:.0f}秒")
+    if manshu_error:
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------
@@ -510,7 +543,7 @@ def record_results(today=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("task", choices=["run", "results"])
+    ap.add_argument("task", choices=["run", "results", "manshu"])
     ap.add_argument("--date", default="")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
@@ -525,6 +558,8 @@ def main():
         raise failed
     if a.task == "run":
         run_picks(a.date or None, force=a.force)
+    elif a.task == "manshu":
+        run_manshu(a.date or None)
 
 
 if __name__ == "__main__":

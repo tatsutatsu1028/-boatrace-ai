@@ -38,6 +38,18 @@ def load_results():
                 "&order=race_date.asc&limit=10000")
 
 
+MIGRATION = "supabase/migrations/20261018000000_create_manshu_chance_picks.sql"
+
+
+def load_error_text(e):
+    """読めなかったときの管理者向けの文。保存先の表がまだ無い（マイグレーション前）ときはやることを書く。"""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    if status == 404:
+        return (f"保存先の表がまだありません。Supabase の SQL Editor で `{MIGRATION}` を実行してください"
+                "（実行後は翌朝から印が付きます。当日分は Pre-exhibition Picks を task=manshu で動かすと選び直せます）。")
+    return f"読めませんでした（{type(e).__name__}{f' {status}' if status else ''}）"
+
+
 def marks_by_key(d):
     """その日の印のレース {race_key: 行}。読めなければ空（画面は印なしで動く）。"""
     try:
@@ -155,7 +167,7 @@ def render_list(d, is_admin=False):
         marks = load_marks(d.isoformat())
     except Exception as e:  # noqa: BLE001
         if is_admin:
-            st.caption(f"{TITLE}: 読めませんでした（{type(e).__name__}）")
+            st.caption(f"{TITLE}: {load_error_text(e)}")
         return
     if not marks and not is_admin:
         return

@@ -180,6 +180,86 @@ def test_view_helpers():
     assert len(longs) == manshu.LONGSHOT_N and all(t["combo"][0] != "1" for t in longs)
 
 
+def _cands():
+    n = 14
+    c = pd.DataFrame({
+        "race_key": [f"20261018_01_{i}" for i in range(1, n + 1)], "race_date": "2026-10-18", "jcd": "01",
+        "venue": "桐生", "race_no": list(range(1, n + 1)), "deadline": [f"{9 + i // 2}:{(i % 2) * 30:02d}" for i in range(n)],
+        "model_version": "ml-chain-pre", "hit_probability": [0.3 + i / 50 for i in range(n)],
+        "favorite_lane": 1, "favorite_name": "", "favorite_prob": 0.5,
+        "p_first": [[0.5, 0.1, 0.1, 0.1, 0.1, 0.1]] * n, "tickets": [[{"combo": "1-2-3", "stake": 2000}]] * n,
+        "manshu_prob": [0.3 - i / 100 for i in range(n)],
+        "longshot_tickets": [[{"combo": "2-1-3", "prob": 0.05}]] * n,
+    })
+    c.attrs["manshu_version"] = "manshu-v1"
+    return c
+
+
+class _FakeSb:
+    def __init__(self, fail_manshu=False):
+        self.calls, self.fail_manshu = [], fail_manshu
+
+    def __call__(self, method, path, **kw):
+        self.calls.append((method, path.split("?")[0], kw.get("json")))
+        if self.fail_manshu and "manshu" in path:
+            raise RuntimeError("404")
+
+        class R:
+            def json(self_):
+                return []
+        return R()
+
+
+def _run(fn, sb, *args, **kw):
+    orig = (pre_picks._sb, pre_picks._predict_today, pre_picks._runtime)
+    pre_picks._sb = sb
+    pre_picks._predict_today = lambda date, t0: ({}, pd.DataFrame({"race_key": ["x"]}), [], _cands(), "v", "2026-10-17")
+    pre_picks._runtime = lambda: {}
+    try:
+        fn(*args, **kw)
+    finally:
+        pre_picks._sb, pre_picks._predict_today, pre_picks._runtime = orig
+
+
+def test_run_picks_saves_both():
+    sb = _FakeSb()
+    _run(pre_picks.run_picks, sb, "20261018")
+    posts = {p: j for m, p, j in sb.calls if m == "POST"}
+    assert len(posts["pre_exhibition_picks"]) == 10
+    assert all("manshu_prob" not in r for r in posts["pre_exhibition_picks"])  # 厳選10の行に万舟の列は入れない
+    assert [r["race_no"] for r in posts["manshu_chance_picks"]][:3] == [1, 2, 3]
+    patch = [j for m, p, j in sb.calls if m == "PATCH" and p == "pre_exhibition_runs"][0]
+    assert patch["manshu_picked_count"] == 10 and patch["manshu_error"] is None
+    assert len(patch["manshu_prob_by_race"]) == 14
+
+
+def test_run_picks_survives_missing_manshu_table():
+    """万舟チャンスの表・列がまだ無くても、厳選10は保存する。"""
+    sb = _FakeSb(fail_manshu=True)
+    _run(pre_picks.run_picks, sb, "20261018")
+    assert any(m == "POST" and p == "pre_exhibition_picks" for m, p, _ in sb.calls)
+    assert any(m == "POST" and p == "rpc/pre_picks_sync_post" for m, p, _ in sb.calls)
+
+
+def test_run_manshu_does_not_touch_pre_picks():
+    sb = _FakeSb()
+    _run(pre_picks.run_manshu, sb, "20261018")
+    assert not any("pre_exhibition_picks" in p for _, p, _ in sb.calls)
+    assert any(m == "POST" and p == "manshu_chance_picks" for m, p, _ in sb.calls)
+
+
+def test_load_error_text():
+    import manshu_view
+    import requests
+
+    r = requests.Response()
+    r.status_code = 404
+    assert "SQL Editor" in manshu_view.load_error_text(requests.HTTPError(response=r))
+    r.status_code = 500
+    assert "500" in manshu_view.load_error_text(requests.HTTPError(response=r))
+    assert "RuntimeError" in manshu_view.load_error_text(RuntimeError("x"))
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

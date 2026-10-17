@@ -74,7 +74,9 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 学習済みファイル: データ用リポジトリの `models/manshu_latest.json`（版と、展示前版・展示後版のファイル名）。
   今は検証で作った版（学習 2025-08〜2026-07）を使う。学習し直しは `tools/manshu_eval.py eval` の結果を
   確かめてから `models/` に置き、`manshu_latest.json` を書き換える
-- データベース: `supabase/migrations/20261018000000_create_manshu_chance_picks.sql`
+- データベース: `supabase/migrations/20261018000000_create_manshu_chance_picks.sql`（SQL Editor で実行する。
+  実行前は画面に「保存先の表がまだありません」と出て、印は付かない。厳選10は止まらない）
+- 万舟チャンスだけ選び直す: `Pre-exhibition Picks` を task=manshu で動かす（厳選10は変えない。締切が近い・過ぎたレースは候補に入らない）
 
 ## 🧵 スレッズ・note の投稿（管理者だけ）
 ### 朝の無料3レース（スレッズの自動投稿）
