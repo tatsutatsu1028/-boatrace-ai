@@ -607,6 +607,105 @@ def cmd_odds(args):
     pd.concat(cal, ignore_index=True).to_csv(out / "odds_calibration.csv", index=False, encoding="utf-8")
     log(f"[MANSHU] odds 終了 {len(have)}レース分のオッズ")
 
+# ---------------------------------------------------------------
+# 中穴〜万舟狙いの買い目（aim）: 本番と同じ manshu.aim_tickets で作って比べる
+# ---------------------------------------------------------------
+def aim_strategies():
+    """{名前: (probs, odds) → 買い目 [{combo, ...}]}（各10点）"""
+    import manshu
+
+    def ge30(probs, odds, n=10):
+        rows = [(c, p) for c, p in probs.items() if (odds.get(c) or 0) >= manshu.AIM_MID_MIN]
+        rows.sort(key=lambda r: (-r[1], r[0]))
+        return [{"combo": c} for c, _ in rows[:n]]
+
+    def mix(m, h, order):
+        return lambda probs, odds: manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": m, "万舟": h},
+                                                      order=order)
+
+    return {
+        "1 30倍以上から確率順10点": ge30,
+        "2 中穴5＋万舟5（確率順）": mix(5, 5, "prob"),
+        "3 中穴5＋万舟5（期待値順）": mix(5, 5, "ev"),
+        "4a 中穴7＋万舟3（確率順）": mix(7, 3, "prob"),
+        "4b 中穴3＋万舟7（確率順）": mix(3, 7, "prob"),
+        "4c 中穴7＋万舟3（期待値順）": mix(7, 3, "ev"),
+        "4d 中穴3＋万舟7（期待値順）": mix(3, 7, "ev"),
+        "5 参考: 今のA（100倍以上から確率順）": lambda probs, odds: manshu.aim_tickets(probs, odds, method="A", n=10),
+    }
+
+
+def cmd_aim(args):
+    out = Path(args.out)
+    cache = Path(args.cache)
+    from data_paths import data_path
+
+    odds = load_odds(args.odds_dir or data_path("data/odds3t"))
+    have = set(odds["race_key"])
+    od = {rk: dict(zip(g["combo"], g["odds"])) for rk, g in odds.groupby("race_key")}
+    targets = pd.read_csv(out / "odds_targets.csv", dtype=str)
+    lab = labeled_races(TEST_START, args.test_end)
+    lab = lab[lab["race_key"].isin(have)]
+    mid = sorted(lab["race_date"].unique())[lab["race_date"].nunique() // 2]
+    rows, cal = [], []
+    strategies = aim_strategies()
+    for kind in ("pre", "post"):
+        full = pd.read_csv(out / f"race_level_{kind}.csv.gz", dtype={"race_date": str})
+        sets = {"印: 毎日10レース": picks(full, "p_full", "day10"), "印: 毎日20レース": picks(full, "p_full", "day20")}
+        rand = set(targets.loc[targets["set"] == "random", "race_key"])
+        sets["比較: 印の無いレース（無作為800）"] = full[full["race_key"].isin(rand)]
+        if kind == "post":
+            sets.pop("印: 毎日20レース")
+        ch = pd.read_pickle(cache / f"chain_{kind}.pkl")
+        tri = ch["tri"][ch["tri"]["race_key"].isin(have)]
+        pr = {rk: dict(zip(g["combo"], g["prob"])) for rk, g in tri.groupby("race_key")}
+        keys_all = set().union(*[set(d["race_key"]) for d in sets.values()]) & have & set(pr)
+        sel = {name: pd.DataFrame([{"race_key": rk, "combo": t["combo"]} for rk in sorted(keys_all)
+                                   for t in fn(pr[rk], od[rk])]) for name, fn in strategies.items()}
+        for sname, d in sets.items():
+            keys = set(d["race_key"]) & keys_all
+            for tname, sl in sel.items():
+                r = _roi_row(sl, lab, keys, mid, version=kind, races_set=sname, tickets=tname,
+                             races_in_set=len(d), races_with_odds=len(keys))
+                if r:
+                    rows.append(r)
+        cal.append(calibration_bands(tri, odds, lab, kind))
+        log(f"[MANSHU] aim {kind}")
+    pd.DataFrame(rows).to_csv(out / "aim_roi.csv", index=False, encoding="utf-8")
+    pd.concat(cal, ignore_index=True).to_csv(out / "aim_calibration.csv", index=False, encoding="utf-8")
+    log("[MANSHU] aim 終了")
+
+
+AIM_ODDS_BANDS = [1, 10, 30, 50, 100, 200, 500, 1000, 1e9]
+
+
+def calibration_bands(tri, odds, lab, kind):
+    """全レース・全組の確率の当てはまりを、オッズの帯ごとに（中穴・万舟を含む）。"""
+    t = tri.merge(odds, on=["race_key", "combo"], how="inner")
+    inv = 1.0 / t["odds"]
+    t["market"] = inv / inv.groupby(t["race_key"]).transform("sum")
+    act = lab.set_index("race_key")["combo"]
+    t = t[t["race_key"].isin(act.index)]
+    t["hit"] = (t["combo"] == t["race_key"].map(act)).astype(float)
+    t["odds_band"] = pd.cut(t["odds"], AIM_ODDS_BANDS, right=False).astype(str)
+    g = t.groupby("odds_band", sort=False).agg(combos=("hit", "size"), model_prob=("prob", "sum"),
+                                                actual=("hit", "sum"), market_prob=("market", "sum"))
+    g["actual_per_model"] = g["actual"] / g["model_prob"]
+    g["actual_per_market"] = g["actual"] / g["market_prob"]
+    g = g.reset_index()
+    g["lo"] = g["odds_band"].str.extract(r"\[([\d.]+)").astype(float)
+    # 中穴（30〜99倍）の中で、モデルの確率の帯ごと
+    m = t[(t["odds"] >= 30) & (t["odds"] < 100)].copy()
+    m["prob_band"] = pd.cut(m["prob"], [0, 0.005, 0.01, 0.02, 0.03, 0.05, 1.0], right=False).astype(str)
+    h = m.groupby("prob_band").agg(combos=("hit", "size"), model_prob=("prob", "sum"), actual=("hit", "sum"),
+                                   market_prob=("market", "sum")).reset_index()
+    h["actual_per_model"] = h["actual"] / h["model_prob"]
+    h["actual_per_market"] = h["actual"] / h["market_prob"]
+    return pd.concat([g.sort_values("lo").drop(columns="lo").rename(columns={"odds_band": "band"}).assign(by="odds"),
+                      h.rename(columns={"prob_band": "band"}).assign(by="中穴の確率帯")], ignore_index=True).assign(
+        version=kind)
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -625,8 +724,13 @@ def main():
     o.add_argument("--cache", required=True, help="eval の途中結果（chain_pre.pkl・chain_post.pkl）")
     o.add_argument("--odds-dir", default="", help="既定: <BOATRACE_DATA_DIR>/data/odds3t")
     o.add_argument("--test-end", default="20261014")
+    a2 = sub.add_parser("aim", help="中穴〜万舟狙いの買い目の比較（本番と同じ manshu.aim_tickets で作る）")
+    a2.add_argument("--out", required=True)
+    a2.add_argument("--cache", required=True)
+    a2.add_argument("--odds-dir", default="")
+    a2.add_argument("--test-end", default="20261014")
     args = ap.parse_args()
-    {"rates": cmd_rates, "eval": cmd_eval, "odds": cmd_odds}[args.cmd](args)
+    {"rates": cmd_rates, "eval": cmd_eval, "odds": cmd_odds, "aim": cmd_aim}[args.cmd](args)
 
 
 if __name__ == "__main__":
