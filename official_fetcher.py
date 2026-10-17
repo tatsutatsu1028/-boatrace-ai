@@ -386,6 +386,11 @@ def fetch_odds3t(date_yyyymmdd, jcd, rno):
     2着艇は rowspan=4 で表示されるため、_expand_table() で展開して読む。
     """
     html, url = _get("odds3t", date_yyyymmdd, jcd, rno)
+    return parse_odds3t(html, url)
+
+
+def parse_odds3t(html, url=None):
+    """3連単オッズのページ（HTML）→ DataFrame(combo, odds)。読めた組が100未満なら空。"""
     soup = BeautifulSoup(html, "lxml")
 
     best = None

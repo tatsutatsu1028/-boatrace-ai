@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # 過去データ収集の途中保存。データ用リポジトリ（非公開。BOATRACE_DATA_DIR に
-# 取り出したもの）の data/history/ だけをコミットしてpushする。
+# 取り出したもの）の data/history/ だけをコミットしてpushする（引数で別のフォルダも指定できる）。
 # history_full.csv は日次収集（Collect History）が書くので触らない。
 # 収集中のプロセスが書き足した未ステージの変更があっても pull できるよう --autostash を付ける。
 set -u
 cd "${BOATRACE_DATA_DIR:?BOATRACE_DATA_DIR が未設定です}" || exit 0
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
-git add data/history
+TARGET="${1:-data/history}"
+git add "$TARGET"
 if ! git diff --staged --quiet; then
-  git commit -q -m "collect history backfill data"
+  git commit -q -m "collect ${TARGET} data"
 elif [ -z "$(git log --oneline '@{u}..HEAD' 2>/dev/null)" ]; then
   echo "[COMMIT] 変更なし"
   exit 0

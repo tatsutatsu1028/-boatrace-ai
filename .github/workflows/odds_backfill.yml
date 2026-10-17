@@ -1,0 +1,63 @@
+name: Odds Backfill
+
+# 検証用: 過去のレースの3連単の最終オッズ（全120通り）を公式サイトから取り、データ用リポジトリの
+# data/odds3t/ に保存する（tools/odds_backfill.py）。万舟チャンスの「オッズ100倍以上から選ぶ買い目」の
+# 検証（tools/manshu_eval.py odds）に使う。手動で起動するだけ（定期実行はしない）。
+# 取るのは targets の CSV（データ用リポジトリ内のパス。列 race_key）に並んだレースだけ。
+# 取得間隔は全体で3.4秒以上。過去データの収集が動いていれば終わるまで待つ。止まっても次回は続きから。
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "対象レースのCSV（データ用リポジトリ内のパス）"
+        required: true
+        default: "reports/manshu/odds_targets.csv"
+      max_minutes:
+        description: "取得する最大の時間（分）"
+        required: true
+        default: "300"
+
+concurrency:
+  group: odds-backfill
+  cancel-in-progress: false
+
+jobs:
+  odds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    # このリポジトリへは書き込まない（データは _data/ の非公開リポジトリへpush）。
+    # actions: read は過去データの収集の実行中チェック用。
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch odds
+        run: |
+          python tools/odds_backfill.py --targets "_data/${{ inputs.targets }}" \
+            --max-minutes "${{ inputs.max_minutes }}" --wait-crawlers \
+            --checkpoint-cmd 'bash tools/commit_history_data.sh data/odds3t' --checkpoint-minutes 30
+
+      - name: Commit collected odds
+        if: always()
+        run: bash tools/commit_history_data.sh data/odds3t
