@@ -2,7 +2,7 @@
 スレッズの朝の自動投稿（threads_morning.py）の設定と記録の表示（管理者だけ）。
 
   - render_settings(): 設定タブ。自動投稿の ON/OFF と、直近の投稿の記録（失敗はエラーで出す）
-  - render_status(d) : 予想タブ。その日の朝の投稿の結果（失敗・note との重複は目立つように）
+  - render_status(d) : 予想タブ。その日の朝の投稿の結果（失敗は目立つように）
 """
 
 from __future__ import annotations
@@ -55,20 +55,6 @@ def load_log(since_iso):
     return _get(f"threads_auto_posts?race_date=gte.{since_iso}&select=*&order=race_date.desc")
 
 
-def note_overlap(row):
-    """投稿したレースのうち、note の記事にもなっているレース（投稿の後に記事にしたものも含める）。"""
-    posted = [p for p in (row.get("posts") or []) if p.get("post_id")]
-    keys = {str(p.get("race_key")) for p in posted}
-    found = set(row.get("note_overlap") or []) & keys
-    if keys:
-        try:
-            found |= {str(r["race_key"]) for r in _get(
-                f"note_publications?race_key=in.({','.join(sorted(keys))})&select=race_key")}
-        except Exception:  # noqa: BLE001
-            pass
-    return [p for p in posted if str(p.get("race_key")) in found]
-
-
 def _race(p):
     return f"{p.get('venue')}{p.get('race_no')}R（締切 {p.get('deadline') or '--:--'}）"
 
@@ -90,9 +76,6 @@ def _render_row(row, compact=False):
         st.info(f"{head}　理由: {row.get('reason') or '—'}")
     if row.get("image_error") and posted:
         st.warning(f"🖼 画像なしで投稿しました（{row['image_error']}）")
-    overlap = note_overlap(row)
-    if overlap:
-        st.warning("⚠️ 朝の無料投稿と同じレースを note の有料記事にしています: " + "、".join(_race(p) for p in overlap))
     if not compact and posted:
         with st.expander("投稿した本文", expanded=False):
             if row.get("image_url"):

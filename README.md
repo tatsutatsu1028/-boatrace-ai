@@ -92,7 +92,6 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 投稿しない日: 厳選が3レースそろわない日・厳選のデータに異常がある日（理由を記録する）
 - 記録: `threads_auto_posts`（1日1行。成否・投稿したレース・買い目・本文・失敗の内容）。失敗は設定タブと予想タブに出る。
   同じ日に2回は投稿しない（1投稿もできなかった日だけ、手動実行の retry = true でやり直せる）
-- note の記事と同じレースは、設定タブ・予想タブ・note 欄で警告する
 - 文章は `threads_poster.build_morning_pick_text` の決まった型（展示前の予想・レース・締切・本命・買い目）。最後の投稿（3/3）には note の宣伝（`MORNING_NOTE_PROMO`）を入れる。
   後で Claude の文章にするときは `threads_morning.build_texts` に writer を渡す（失敗したらその投稿だけ決まった型）
 - 止めるとき: アプリで OFF、または `select cron.unschedule('trigger-threads-morning');`

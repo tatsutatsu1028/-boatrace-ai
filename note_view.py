@@ -6,7 +6,6 @@
   - 「note記事用に確定」で、本文を Claude（Haiku）に書いてもらってから記事枠を確定する（全て有料300円）。
     Claude が失敗したら今までの決まった型の本文にする
   - 確定後も締切前なら、買い目・本文を保存し直せる（夜のまとめは保存した買い目で的中を判定する）
-  - 朝の無料投稿（スレッズ）と同じレースなら警告する
   - 予想カード画像（記事と同じ買い目・1着確率）を作って保存できる
 """
 
@@ -60,16 +59,6 @@ def load_publication(race_key):
         return rows[0] if rows else None
     except Exception:  # noqa: BLE001
         return None
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def morning_post_keys(date_iso):
-    """その日の朝の無料投稿（スレッズ）で投稿できたレース。"""
-    try:
-        rows = _get(f"threads_auto_posts?race_date=eq.{date_iso}&select=posts")
-    except Exception:  # noqa: BLE001
-        return set()
-    return {str(p.get("race_key")) for p in ((rows[0].get("posts") if rows else None) or []) if p.get("post_id")}
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -158,10 +147,6 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
     label = f"{venue} {rno}R"
     pub = load_publication(ctx)
     closed = _deadline_passed(d, deadline)
-
-    if ctx in morning_post_keys(date_iso):
-        st.warning("⚠️ このレースは朝の無料投稿（スレッズ）で展示前の予想を出しています。"
-                   "有料記事にすると無料の投稿と重なります。")
 
     # 載せる買い目
     avg = na.avg_option(None, claude_tab.bundle(ctx)) or na.avg_option(_saved_claude_section(ctx))

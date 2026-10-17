@@ -164,8 +164,6 @@ class _FakeDB:
             return R([{"picked_count": len(self.picks)}])
         if method == "GET" and path.startswith("pre_exhibition_picks"):
             return R(self.picks)
-        if method == "GET" and path.startswith("note_publications"):
-            return R([{"race_key": self.picks[0]["race_key"]}])
         if method == "POST" and path.startswith("threads_auto_posts"):
             row = dict(self.rows.get(ISO, {}))
             row.update(kw["json"])
@@ -213,7 +211,7 @@ def test_run_posts_thread_once(monkeypatch):
     assert row["status"] == "posted" and calls == [("image", "https://x/img.png"), "img1", "id2"]
     assert row["image_url"] == "https://x/img.png" and row["posts"][0]["image_url"] == "https://x/img.png"
     assert [p["race_no"] for p in row["posts"]] == [1, 2, 3]
-    assert row["note_overlap"] == [row["posts"][0]["race_key"]] and row["ticket_source"] == "model"
+    assert "note_overlap" not in row and row["ticket_source"] == "model"
     tm.run("20261016")
     tm.run("20261016", retry=True)
     assert len(calls) == 3  # 同じ日には2回投稿しない
