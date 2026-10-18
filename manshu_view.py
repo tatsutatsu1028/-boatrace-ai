@@ -146,6 +146,19 @@ def save_aim(race_key, tickets, source, odds_at):
     return ok
 
 
+def jst_hhmm(ts):
+    """保存された時刻（データベースは世界標準時で返す）を日本時間の HH:MM に。読めなければ空。"""
+    if not ts:
+        return ""
+    try:
+        t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=JST)
+    return t.astimezone(JST).strftime("%H:%M")
+
+
 def aim_frame(tickets):
     return pd.DataFrame([{"区分": t.get("tier") or manshu.odds_tier(t.get("odds")) or "—",
                           "買い目": t["combo"], "確率": f"{float(t['prob']):.1%}", "オッズ": f"{float(t['odds']):.1f}倍",
@@ -167,7 +180,7 @@ def normal_frame(tickets, odds):
 
 
 def _aim_caption(odds_at, morning=False):
-    st.caption(manshu.AIM_NOTE + (f"（オッズ {odds_at[11:16]} 時点）" if odds_at else ""))
+    st.caption(manshu.AIM_NOTE + (f"（オッズ {jst_hhmm(odds_at)} 時点）" if odds_at else ""))
     if morning:
         st.caption(manshu.AIM_MORNING_NOTE)
 
@@ -301,7 +314,7 @@ def _manshu_tickets_block(d, r, passed):
     saved = r.get("aim_tickets") or []
     if passed:
         if saved:
-            st.caption(f"{manshu.AIM_LABEL}（締切前に最後に表示した買い目・{(r.get('aim_odds_at') or '')[11:16]} のオッズ）")
+            st.caption(f"{manshu.AIM_LABEL}（締切前に最後に表示した買い目・{jst_hhmm(r.get('aim_odds_at'))} のオッズ）")
             st.markdown(aim_text(saved))
         else:
             st.caption(f"{manshu.AIM_LABEL}: 締切前に表示した買い目はありません")
@@ -324,10 +337,10 @@ def _manshu_tickets_block(d, r, passed):
             st.caption("オッズがまだ出ていません（発売前など）。")
     if rk in shown:
         tickets, at, which = shown[rk]
-        st.caption(f"{manshu.AIM_LABEL}（{at[11:16]} のオッズ・{which}の確率で作成）")
+        st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(at)} のオッズ・{which}の確率で作成）")
         st.markdown(aim_text(tickets) if tickets else "オッズ30倍以上の組がありません。")
     elif saved:
-        st.caption(f"{manshu.AIM_LABEL}（{(r.get('aim_odds_at') or '')[11:16]} のオッズ・保存済み）")
+        st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(r.get('aim_odds_at'))} のオッズ・保存済み）")
         st.markdown(aim_text(saved))
     elif not probs:
         st.caption(f"{manshu.AIM_LABEL}: 朝の3連単の確率が無いため作れません（次の朝から作れます）。")

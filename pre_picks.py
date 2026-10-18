@@ -461,7 +461,8 @@ def ticket_result(tickets, pays):
         by_combo[t["combo"]] = by_combo.get(t["combo"], 0) + int(t.get("stake") or 0)
     hit, ret = False, 0
     for combo, po in pays:
-        if combo in by_combo:
+        # 資金配分で0円になった候補（買っていない・画面に出していない買い目）は的中に数えない
+        if by_combo.get(combo, 0) > 0:
             hit = True
             ret += int(round(by_combo[combo] * float(po) / 100.0)) if po == po and po is not None else 0
     return hit, stake, ret
