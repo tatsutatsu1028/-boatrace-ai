@@ -306,8 +306,12 @@ def post_info(chain_model, feats):
     """展示後版（アプリ・自動固定の1レース）。保存する予想の prediction_model.manshu_post に入れる値。"""
     probs, longs, version = predict_with_chain("post", chain_model, feats)
     rk = str(probs.index[0])
+    tri = probs.attrs.get("tri")
+    t = tri[tri["race_key"] == rk] if tri is not None else None
     return {"prob": round(float(probs.iloc[0]), 4), "version": version, "race_key": rk,
-            "longshot": longs.get(rk, [])}
+            "longshot": longs.get(rk, []),
+            # 3連単の全120通りの確率（万舟チャンスの一覧で、展示後の確率から中穴〜万舟狙いの買い目を作る）
+            "tri": ({str(c): round(float(p), 6) for c, p in zip(t["combo"], t["prob"])} if t is not None else {})}
 
 
 def select_marks(probs, n=PICK_COUNT):

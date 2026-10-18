@@ -190,9 +190,33 @@ def test_list_states_and_day_summaries():
     ]
     line = manshu_view.manshu_result_line(m_rows[0], "settled")
     assert "💥 万舟" in line and "○" in line and "15,230円" in line
-    assert "表示なし" in manshu_view.manshu_result_line(m_rows[1], "settled")
+    assert "表示した買い目: なし" in manshu_view.manshu_result_line(m_rows[1], "settled")
     ms = manshu_view.manshu_day_summary(m_rows, d)
-    assert (ms["manshu"], ms["aim_races"], ms["aim_hits"], ms["aim_return"], ms["aim_stake"]) == (1, 1, 1, 15230, 1000)
+    # 買い目を表示しなかったレースは的中の母数に入れない。実際に万舟だった数も出す
+    assert (ms["settled"], ms["with_tickets"], ms["hits"], ms["return"], ms["stake"]) == (2, 1, 1, 15230, 1000)
+    assert "1 / 2" in ms["extra"] and "万舟" in ms["extra"]
+    # 展示前厳選10と万舟チャンスで、結果の行の作りは同じ（違うのは万舟の一言だけ）
+    pre_line = pre_picks_view.result_line(pre_rows[0], "settled")
+    assert pre_line.startswith("結果: 3連単 1-2-3（1,230円）") and "表示した買い目 ○" in pre_line
+
+
+def test_aim_probs_prefer_post_and_post_flag_fields():
+    import manshu_view
+
+    r = {"tri_probs": {"1-2-3": 0.1}, "post_tri_probs": None}
+    assert manshu_view.aim_probs(r) == ({"1-2-3": 0.1}, "展示前")
+    r["post_tri_probs"] = {"1-2-3": 0.2}
+    assert manshu_view.aim_probs(r) == ({"1-2-3": 0.2}, "展示後")
+    assert manshu_view.aim_result({"aim_tickets": None}) is None
+    assert manshu_view.aim_result({"aim_tickets": [{"combo": "1-2-3"}], "aim_stake": 1000, "aim_hit": False,
+                                   "aim_return": 0}) == (False, 1000, 0)
+    txt = manshu_view.aim_text([{"combo": "2-1-3", "odds": 45.2, "tier": "中穴", "stake": 100, "payout": 4520}])
+    assert txt == "【中穴】2-1-3 45.2倍 100円（払戻4,520円）"
+    import pre_picks_view
+
+    assert pre_picks_view.favorite_line({"favorite_lane": 1, "favorite_prob": 0.5, "post_favorite_lane": 3}) \
+        == "本命: 1号艇（1着確率 50%） → 展示後 3号艇"
+    assert pre_picks_view.favorite_line({"favorite_lane": None}) is None
 
 
 def test_morning_rows_keep_tri_probs_and_fallback():
