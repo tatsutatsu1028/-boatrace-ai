@@ -172,43 +172,6 @@ def _aim_caption(odds_at, morning=False):
         st.caption(manshu.AIM_MORNING_NOTE)
 
 
-def _render_aim_in_list(d, r):
-    """一覧の1レース: 万舟狙いの買い目（そのレースを開いたときにオッズを1回取る）。"""
-    rk = r["race_key"]
-    passed = _deadline_passed(d, r.get("deadline"))
-    saved = r.get("aim_tickets") or []
-    if passed:
-        if saved:
-            st.caption(f"{manshu.AIM_LABEL}（表示した買い目・{(r.get('aim_odds_at') or '')[11:16]} のオッズ）")
-            st.dataframe(aim_frame(saved), hide_index=True, use_container_width=True)
-        return
-    if not st.toggle(f"💰 {manshu.AIM_LABEL}を見る（オッズを取得）", key=f"manshu_aim_open_{rk}"):
-        if saved:
-            st.caption(f"保存済みの{manshu.AIM_LABEL}: " + "　".join(t["combo"] for t in saved))
-        return
-    if not r.get("tri_probs"):
-        st.caption("この日は朝の3連単の確率が保存されていないため作れません（次の朝から作れます）。")
-        return
-    refresh = st.button("🔄 オッズを更新", key=f"manshu_aim_refresh_{rk}")
-    try:
-        odds, at = odds_for(rk, refresh=refresh)
-    except Exception as e:  # noqa: BLE001
-        st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
-        return
-    if not odds:
-        st.caption("オッズがまだ出ていません（発売前など）。")
-        return
-    tickets = manshu.aim_tickets(r["tri_probs"], odds)
-    if not tickets:
-        st.caption("オッズ30倍以上の組がありません。")
-        return
-    st.dataframe(aim_frame(tickets), hide_index=True, use_container_width=True)
-    _aim_caption(at, morning=True)
-    st.caption("確率は朝の展示前の予想。予想タブでこのレースを予想すると、その時点の予想とオッズで作り直します。")
-    if save_aim(rk, tickets, "list", at) is False:
-        st.caption("（買い目の保存に失敗しました。データベースの準備がまだかもしれません）")
-
-
 def render_aim_compare(mark, final, tickets, odds_df, is_admin=False):
     """予想タブ: 印のレースで「通常の買い目（今のモデル）」と「万舟狙いの買い目」を並べる（管理者だけ）。"""
     if not mark or not is_admin:
@@ -266,66 +229,6 @@ def cancelled_jcds(d):
     return {str(k).zfill(2) for k, v in sched.items() if str((v or {}).get("status") or "").strip() == "中止"}
 
 
-def result_state(d, r, cancelled=()):
-    """"settled" / "void"（中止） / "waiting"（結果待ち） / None（締切前）"""
-    status = r.get("result_status")
-    if status in ("settled", "void"):
-        return status
-    if str(r.get("jcd")).zfill(2) in set(cancelled):
-        return "void"
-    if _deadline_passed(d, r.get("deadline")):
-        return "waiting"
-    return None
-
-
-def _ox(hit):
-    return "○" if hit else "×"
-
-
-def manshu_result_line(r, state):
-    if state == "void":
-        return "結果: 中止"
-    if state == "waiting":
-        return "結果待ち"
-    if state != "settled":
-        return None
-    mark = "💥 万舟" if r.get("is_manshu") else "万舟ではない"
-    line = f"結果: 3連単 {r.get('trifecta_actual')}（{_yen(r.get('trifecta_payout'))}）　{mark}"
-    if r.get("aim_tickets"):
-        line += (f"　{manshu.AIM_LABEL} {_ox(r.get('aim_hit'))} 払戻 {_yen(r.get('aim_return') or 0)}"
-                 f" / {_yen(r.get('aim_stake') or 0)}")
-    else:
-        line += f"　{manshu.AIM_LABEL}: 表示なし"
-    return line
-
-
-def manshu_day_summary(rows, d, cancelled=()):
-    """その日の集計（万舟チャンス）。"""
-    states = [result_state(d, r, cancelled) for r in rows]
-    done = [r for r, s in zip(rows, states) if s == "settled"]
-    aim = [r for r in done if r.get("aim_tickets")]
-    return {
-        "races": len(rows), "settled": len(done), "void": states.count("void"), "waiting": states.count("waiting"),
-        "manshu": sum(1 for r in done if r.get("is_manshu")),
-        "aim_races": len(aim), "aim_hits": sum(1 for r in aim if r.get("aim_hit")),
-        "aim_stake": sum(int(r.get("aim_stake") or 0) for r in aim),
-        "aim_return": sum(int(r.get("aim_return") or 0) for r in aim),
-    }
-
-
-def _render_manshu_day_summary(rows, d, cancelled):
-    s = manshu_day_summary(rows, d, cancelled)
-    st.markdown("##### 🧾 この日の集計（管理者だけ）")
-    text = (f"結果の出たレース {s['settled']} / {s['races']}（結果待ち {s['waiting']}・中止 {s['void']}）　"
-            f"実際に万舟だったレース **{s['manshu']}** / {s['settled']}")
-    st.markdown(text)
-    if s["aim_races"]:
-        st.markdown(f"{manshu.AIM_LABEL}: **{s['aim_hits']} / {s['aim_races']}レース的中**　"
-                    f"合計の払戻 **{_yen(s['aim_return'])}** / 賭け金 {_yen(s['aim_stake'])}")
-    else:
-        st.caption(f"{manshu.AIM_LABEL}を表示して結果の出たレースはまだありません。")
-
-
 # ---------------------------------------------------------------
 # 表示
 # ---------------------------------------------------------------
@@ -347,7 +250,8 @@ def render_race_note(mark, final=None, model_info=None, is_admin=False):
     st.caption(manshu.NOTE)
 
 
-def _render_mark(d, r, is_admin=False, cancelled=()):
+def _render_mark(d, r):
+    """スタッフの画面（今までどおり）: 確率と結果だけ。"""
     passed = _deadline_passed(d, r.get("deadline"))
     with st.container(border=True):
         head = f"**{r['pick_rank']}. {r['venue']} {r['race_no']}R**　締切 {r.get('deadline') or '--:--'}"
@@ -359,18 +263,128 @@ def _render_mark(d, r, is_admin=False, cancelled=()):
             line += f" → 展示後 **{float(r['post_manshu_prob']):.0%}**"
         st.markdown(line)
         status = r.get("result_status")
-        if is_admin:
-            line = manshu_result_line(r, result_state(d, r, cancelled))
-            if line:
-                st.markdown(line)
-            _render_aim_in_list(d, r)
-        elif status == "void":
+        if status == "void":
             st.caption("結果: 中止・不成立")
         elif status == "settled":
             mark = "💥 万舟" if r.get("is_manshu") else "万舟ではない"
             st.caption(f"結果: {mark}　3連単 {r.get('trifecta_actual')}（{_yen(r.get('trifecta_payout'))}）")
         st.button("🎯 このレースを開く", key=f"manshu_open_{r['race_key']}", on_click=_open_race,
                   args=(r["jcd"], r["race_no"]), use_container_width=True)
+
+
+# ---------------------------------------------------------------
+# 管理者の一覧（「🌅 展示前厳選10」と同じ部品。違うのは確率の行と買い目の欄だけ）
+# ---------------------------------------------------------------
+def aim_text(tickets):
+    """中穴〜万舟狙いの買い目を1行に（区分・組番・オッズ・賭け金・当たった時の払戻）。"""
+    return "　".join(f"【{t.get('tier') or manshu.odds_tier(t.get('odds')) or '—'}】{t['combo']} "
+                    f"{float(t['odds']):.1f}倍 {int(t.get('stake') or 0):,}円（払戻{int(t.get('payout') or 0):,}円）"
+                    for t in (tickets or []))
+
+
+def aim_probs(r):
+    """買い目を作る3連単の確率: 展示後に予想していればその確率、無ければ朝（展示前）の確率。"""
+    if r.get("post_tri_probs"):
+        return r["post_tri_probs"], "展示後"
+    return r.get("tri_probs"), "展示前"
+
+
+def _manshu_prob_line(r):
+    line = f"万舟になる確率の目安: 展示前 **{float(r['manshu_prob']):.0%}**"
+    if r.get("post_manshu_prob") is not None:
+        line += f" → 展示後 **{float(r['post_manshu_prob']):.0%}**"
+    return line + f"（全レースの平均 約{manshu.BASE_RATE:.0%}）"
+
+
+def _manshu_tickets_block(d, r, passed):
+    rk = r["race_key"]
+    saved = r.get("aim_tickets") or []
+    if passed:
+        if saved:
+            st.caption(f"{manshu.AIM_LABEL}（締切前に最後に表示した買い目・{(r.get('aim_odds_at') or '')[11:16]} のオッズ）")
+            st.markdown(aim_text(saved))
+        else:
+            st.caption(f"{manshu.AIM_LABEL}: 締切前に表示した買い目はありません")
+        return
+    probs, which = aim_probs(r)
+    shown = st.session_state.setdefault("manshu_aim_list", {})
+    label = "🔄 オッズを更新" if (shown.get(rk) or saved) else "💰 オッズを取得して買い目を作る"
+    if probs and st.button(label, key=f"manshu_aim_refresh_{rk}"):
+        try:
+            odds, at = odds_for(rk, refresh=True)
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
+            odds, at = {}, None
+        if odds:
+            tickets = manshu.aim_tickets(probs, odds)
+            shown[rk] = (tickets, at, which)
+            if tickets and save_aim(rk, tickets, "list", at) is False:
+                st.caption("（買い目の保存に失敗しました）")
+        elif at is not None:
+            st.caption("オッズがまだ出ていません（発売前など）。")
+    if rk in shown:
+        tickets, at, which = shown[rk]
+        st.caption(f"{manshu.AIM_LABEL}（{at[11:16]} のオッズ・{which}の確率で作成）")
+        st.markdown(aim_text(tickets) if tickets else "オッズ30倍以上の組がありません。")
+    elif saved:
+        st.caption(f"{manshu.AIM_LABEL}（{(r.get('aim_odds_at') or '')[11:16]} のオッズ・保存済み）")
+        st.markdown(aim_text(saved))
+    elif not probs:
+        st.caption(f"{manshu.AIM_LABEL}: 朝の3連単の確率が無いため作れません（次の朝から作れます）。")
+    else:
+        st.caption(f"{manshu.AIM_LABEL}: まだ作っていません（上のボタンでその時点のオッズから作ります）。")
+    st.caption(manshu.AIM_NOTE + " " + manshu.AIM_MORNING_NOTE
+               + " 当たり外れは、締切前に最後に表示した買い目で判定します。")
+
+
+def aim_result(r):
+    """表示した中穴〜万舟狙いの買い目の結果（表示していなければ None）。"""
+    if not r.get("aim_tickets") or r.get("aim_stake") is None:
+        return None
+    return bool(r.get("aim_hit")), int(r.get("aim_stake") or 0), int(r.get("aim_return") or 0)
+
+
+def _manshu_summary_extra(settled):
+    n = sum(1 for r in settled if r.get("is_manshu"))
+    return f"実際に万舟だったレース **{n} / {len(settled)}**"
+
+
+def _load_marks_list(iso):
+    return load_marks(iso)
+
+
+def _spec():
+    from pre_picks_view import ListSpec
+
+    return ListSpec(
+        title=f"{TITLE}",
+        caption=("展示・直前情報を使わずに毎朝その日の全レースを予想し、3連単が万舟（100円あたり1万円以上）に"
+                 "なりやすい順に選んだレースです（毎朝8時過ぎに更新）。" + manshu.NOTE
+                 + "結果はレースが終わるとその日のうちに出ます。"),
+        empty="この日の万舟チャンスのレースはありません（毎朝8時過ぎに選びます）。",
+        key="manshu_list",
+        load=_load_marks_list,
+        prob_line=_manshu_prob_line,
+        tickets_block=_manshu_tickets_block,
+        result=aim_result,
+        result_extra=lambda r: "💥 万舟" if r.get("is_manshu") else "万舟ではない",
+        summary_extra=_manshu_summary_extra,
+        overall=_render_summary,
+        other_marks_note="🌅 展示前厳選10（当たりやすいレース）にも入っています。",
+        flag_note="（万舟チャンスからは外していません）",
+    )
+
+
+def manshu_result_line(r, state):
+    from pre_picks_view import list_result_line
+
+    return list_result_line(r, state, _spec())
+
+
+def manshu_day_summary(rows, d, cancelled=()):
+    from pre_picks_view import list_day_summary
+
+    return list_day_summary(rows, d, _spec(), cancelled)
 
 
 def _render_summary():
@@ -402,28 +416,31 @@ def _render_summary():
 
 
 def render_list(d, is_admin=False):
-    """予想タブの日付 d の万舟チャンスのレース。"""
+    """予想タブの日付 d の万舟チャンスのレース。管理者は「🌅 展示前厳選10」と同じ一覧、スタッフは今までどおり。"""
+    if is_admin:
+        try:
+            load_marks(d.isoformat())
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"{TITLE}: {load_error_text(e)}")
+            return
+        import pre_picks_view
+
+        try:
+            pre = {r["race_key"]: r for r in pre_picks_view.load_picks(d.isoformat())}
+        except Exception:  # noqa: BLE001
+            pre = {}
+        pre_picks_view.render_list(d, _spec(), pre)
+        return
     try:
         marks = load_marks(d.isoformat())
-    except Exception as e:  # noqa: BLE001
-        if is_admin:
-            st.caption(f"{TITLE}: {load_error_text(e)}")
+    except Exception:  # noqa: BLE001
         return
-    if not marks and not is_admin:
+    if not marks:
         return
-    label = TITLE + (f"　{len(marks)}レース" if marks else "")
-    with st.expander(label, expanded=False):
+    with st.expander(TITLE + f"　{len(marks)}レース", expanded=False):
         st.caption(
             "展示・直前情報を使わずに毎朝その日の全レースを予想し、3連単が万舟（100円あたり1万円以上）に"
             "なりやすい順に選んだレースです（毎朝8時過ぎに更新）。" + manshu.NOTE
         )
-        if not marks:
-            st.info("この日の万舟チャンスのレースはありません（毎朝8時過ぎに選びます）。")
-        cancelled = cancelled_jcds(d)
         for r in marks:
-            _render_mark(d, r, is_admin=is_admin, cancelled=cancelled)
-        if is_admin and marks:
-            _render_manshu_day_summary(marks, d, cancelled)
-        if is_admin:
-            st.markdown("##### 📈 これまでの成績（管理者だけ）")
-            _render_summary()
+            _render_mark(d, r)
