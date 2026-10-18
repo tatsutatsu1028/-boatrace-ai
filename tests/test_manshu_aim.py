@@ -253,6 +253,21 @@ def test_morning_rows_keep_tri_probs_and_fallback():
     assert n == 1 and err is None and len(posts) == 2 and "tri_probs" not in posts[1][0]
 
 
+def test_zero_stake_candidate_is_not_a_hit():
+    """資金配分で0円になった候補が来ても的中にしない（画面に出していない買い目）。"""
+    tickets = [{"combo": "1-2-4", "stake": 1500}, {"combo": "1-4-3", "stake": 0}]
+    assert pre_picks.ticket_result(tickets, [("1-4-3", 1650)]) == (False, 1500, 0)
+    assert pre_picks.ticket_result(tickets, [("1-2-4", 1000)]) == (True, 1500, 15000)
+
+
+def test_jst_hhmm():
+    import manshu_view
+
+    assert manshu_view.jst_hhmm("2026-10-18T00:30:12+00:00") == "09:30"  # データベースは世界標準時で返す
+    assert manshu_view.jst_hhmm("2026-10-18T10:12:00+09:00") == "10:12"
+    assert manshu_view.jst_hhmm(None) == "" and manshu_view.jst_hhmm("x") == ""
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
