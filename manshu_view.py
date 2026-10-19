@@ -289,9 +289,8 @@ def _render_mark(d, r):
 # 管理者の一覧（「🌅 展示前厳選10」と同じ部品。違うのは確率の行と買い目の欄だけ）
 # ---------------------------------------------------------------
 def aim_text(tickets):
-    """中穴〜万舟狙いの買い目を1行に（区分・組番・オッズ・賭け金・当たった時の払戻）。"""
-    return "　".join(f"【{t.get('tier') or manshu.odds_tier(t.get('odds')) or '—'}】{t['combo']} "
-                    f"{float(t['odds']):.1f}倍 {int(t.get('stake') or 0):,}円（払戻{int(t.get('payout') or 0):,}円）"
+    """中穴〜万舟狙いの買い目を1行に（区分の印・組番・オッズだけ）。"""
+    return "　".join(f"【{t.get('tier') or manshu.odds_tier(t.get('odds')) or '—'}】{t['combo']} {float(t['odds']):.1f}倍"
                     for t in (tickets or []))
 
 
@@ -340,7 +339,11 @@ def _manshu_tickets_block(d, r, passed):
         st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(at)} のオッズ・{which}の確率で作成）")
         st.markdown(aim_text(tickets) if tickets else "オッズ30倍以上の組がありません。")
     elif saved:
-        st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(r.get('aim_odds_at'))} のオッズ・保存済み）")
+        if r.get("aim_source") == "morning":
+            st.caption(f"{manshu.AIM_LABEL}（朝 {jst_hhmm(r.get('aim_odds_at'))} のオッズで作成。"
+                       "オッズは締切前に動くので「オッズを更新」で取り直せます）")
+        else:
+            st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(r.get('aim_odds_at'))} のオッズ・保存済み）")
         st.markdown(aim_text(saved))
     elif not probs:
         st.caption(f"{manshu.AIM_LABEL}: 朝の3連単の確率が無いため作れません（次の朝から作れます）。")
