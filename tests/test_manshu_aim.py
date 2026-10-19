@@ -211,7 +211,7 @@ def test_aim_probs_prefer_post_and_post_flag_fields():
     assert manshu_view.aim_result({"aim_tickets": [{"combo": "1-2-3"}], "aim_stake": 1000, "aim_hit": False,
                                    "aim_return": 0}) == (False, 1000, 0)
     txt = manshu_view.aim_text([{"combo": "2-1-3", "odds": 45.2, "tier": "中穴", "stake": 100, "payout": 4520}])
-    assert txt == "【中穴】2-1-3 45.2倍 100円（払戻4,520円）"
+    assert txt == "【中穴】2-1-3 45.2倍"  # 組み合わせとオッズだけ（払戻額は出さない）
     import pre_picks_view
 
     assert pre_picks_view.favorite_line({"favorite_lane": 1, "favorite_prob": 0.5, "post_favorite_lane": 3}) \
@@ -258,6 +258,28 @@ def test_zero_stake_candidate_is_not_a_hit():
     tickets = [{"combo": "1-2-4", "stake": 1500}, {"combo": "1-4-3", "stake": 0}]
     assert pre_picks.ticket_result(tickets, [("1-4-3", 1650)]) == (False, 1500, 0)
     assert pre_picks.ticket_result(tickets, [("1-2-4", 1000)]) == (True, 1500, 15000)
+
+
+def test_morning_aim_tickets_saved_with_rows():
+    """朝の選定で、10レース分のオッズから中穴〜万舟狙いの買い目を作って一緒に保存する。"""
+    probs = {"2-1-3": 0.06, "3-1-2": 0.05, "5-1-2": 0.02, "1-2-3": 0.3}
+    odds = {"2-1-3": 31.0, "3-1-2": 45.0, "5-1-2": 150.0, "1-2-3": 3.0}
+    rows = [{"race_key": "20261019_01_1", "tri_probs": probs}, {"race_key": "20261019_01_2", "tri_probs": probs},
+            {"race_key": "20261019_01_3", "tri_probs": None}]
+    fetched = []
+
+    def fetch(rk):
+        fetched.append(rk)
+        if rk.endswith("_2"):
+            return {}  # まだオッズが出ていない
+        return odds
+    n = pre_picks.add_morning_aim(rows, fetch=fetch)
+    assert n == 1 and fetched == ["20261019_01_1", "20261019_01_2"]  # 確率の無いレースは取りに行かない
+    assert [t["combo"] for t in rows[0]["aim_tickets"]] == ["2-1-3", "3-1-2", "5-1-2"]
+    assert rows[0]["aim_source"] == "morning" and rows[0]["aim_odds_at"]
+    # まとめて保存できるよう、全部の行に同じ列がそろう
+    assert all(set(r) >= {"aim_tickets", "aim_method", "aim_source", "aim_odds_at", "aim_saved_at"} for r in rows)
+    assert rows[1]["aim_tickets"] is None and rows[2]["aim_tickets"] is None
 
 
 def test_jst_hhmm():

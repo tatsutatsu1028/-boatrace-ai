@@ -390,10 +390,12 @@ def save_manshu(date, cands):
             _sb("DELETE", f"manshu_chance_picks?race_date=eq.{iso}")
             if len(marks):
                 rows = manshu_rows(marks)
+                add_morning_aim(rows)
                 try:
                     _sb("POST", "manshu_chance_picks", json=rows, prefer="return=minimal")
-                except Exception:  # noqa: BLE001  新しい列（tri_probs）がまだ無いデータベースでは無しで保存する
-                    _sb("POST", "manshu_chance_picks", json=[{k: v for k, v in r.items() if k != "tri_probs"}
+                except Exception:  # noqa: BLE001  新しい列（tri_probs・aim_*）がまだ無いデータベースでは無しで保存する
+                    _sb("POST", "manshu_chance_picks", json=[{k: v for k, v in r.items()
+                                                              if k != "tri_probs" and not k.startswith("aim_")}
                                                              for r in rows], prefer="return=minimal")
                 _sb("POST", "rpc/manshu_picks_sync_post", json={"p_race_date": iso})
         except Exception as e:  # noqa: BLE001  厳選10の保存は続ける
@@ -411,6 +413,47 @@ def save_manshu(date, cands):
     except Exception as e:  # noqa: BLE001
         log(f"{date}: 万舟チャンスの記録（runs）に失敗: {type(e).__name__}")
     return int(len(marks)), manshu_error
+
+
+def fetch_odds3t(race_key):
+    """3連単オッズ {組番: オッズ}（公式サイト。polite_http で開始間隔3.4秒以上）。読めなければ空。"""
+    import polite_http
+    from official_fetcher import BASE, parse_odds3t
+
+    d, jcd, rno = race_key.split("_")
+    r = polite_http.get(f"{BASE}/odds3t?hd={d}&jcd={jcd}&rno={int(rno)}", timeout=30)
+    r.raise_for_status()
+    o = parse_odds3t(r.text)
+    return {str(c): float(v) for c, v in zip(o["combo"], o["odds"])} if len(o) else {}
+
+
+def add_morning_aim(rows, fetch=None):
+    """万舟チャンスの各レースに、朝のオッズで作った中穴〜万舟狙いの買い目を付ける（aim_*。一覧を開いたら出ている）。
+    オッズが取れない・まだ出ていないレースは付けない（画面の「オッズを取得」で作れる）。10レースで10回の取得。"""
+    import manshu
+
+    fetch = fetch or fetch_odds3t
+    done = 0
+    for r in rows:
+        # まとめて保存するので、全部の行に同じ列をそろえる（PostgREST は行ごとに列が違うと受け付けない）
+        for k in ("aim_tickets", "aim_method", "aim_source", "aim_odds_at", "aim_saved_at"):
+            r.setdefault(k, None)
+        if not r.get("tri_probs"):
+            continue
+        try:
+            odds = fetch(r["race_key"])
+        except Exception as e:  # noqa: BLE001  朝の買い目が作れなくても選定は続ける
+            log(f"朝のオッズを取れない {type(e).__name__}")
+            continue
+        tickets = manshu.aim_tickets(r["tri_probs"], odds) if odds else []
+        if not tickets:
+            continue
+        now = datetime.now(JST).isoformat(timespec="seconds")
+        r.update(aim_tickets=tickets, aim_method=manshu.aim_method_name(), aim_source="morning",
+                 aim_odds_at=now, aim_saved_at=now)
+        done += 1
+    log(f"朝の中穴〜万舟狙いの買い目 {done}/{len(rows)}レース")
+    return done
 
 
 def run_manshu(date=None):
