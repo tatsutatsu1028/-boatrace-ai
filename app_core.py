@@ -1248,7 +1248,25 @@ st.session_state.setdefault("race_context", None)
 _tab_labels = ["🎯 予想", "💴 本日の払戻", "🧠 学習データ", "⚙️ 設定", "📊 検証"]
 if IS_ADMIN:
     _tab_labels.append("🤖＋Claude予想")
-_tabs = st.tabs(_tab_labels)
+
+
+def _on_main_tab_change():
+    """管理者: 「🎯 予想」タブを押したら、一覧（展示前厳選10・万舟チャンス）を最新のデータで読み直す。"""
+    if st.session_state.get("main_tabs") == _tab_labels[0]:
+        for _f in (pre_picks_view.load_picks, pre_picks_view.load_results,
+                   manshu_view.load_marks, manshu_view.load_results):
+            _f.clear()
+
+
+# タブを押しても中身は描き直されない（Streamlit のタブは画面の中で切り替わるだけ）ので、管理者はタブを押したら
+# 描き直す（st.tabs の on_change。対応していない古い Streamlit では今までどおり）。スタッフの画面は変えない。
+_tab_kwargs = {}
+if IS_ADMIN:
+    import inspect as _inspect
+
+    if "on_change" in _inspect.signature(st.tabs).parameters:
+        _tab_kwargs = {"key": "main_tabs", "on_change": _on_main_tab_change}
+_tabs = st.tabs(_tab_labels, **_tab_kwargs)
 tab1, payout_tab, tab2, tab3, tab4 = _tabs[:5]
 
 with payout_tab:
