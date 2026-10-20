@@ -111,3 +111,36 @@ def test_claude_ok_and_rules(monkeypatch):
     _fake_anthropic(monkeypatch, bad, calls)
     out = na.write_with_claude("key", "k2", {"race": {}}, TICKETS)
     assert out["status"] == "error" and "鉄板" in out["error"]
+
+
+def _claude_body():
+    parts = {"lead": "こんにちは！今回は展示が良かった1号艇に注目です。",
+             "development": "スタートは内の3艇が揃いそうです。1マークは1号艇の先マイが有力で、2号艇の差しが続く形と見ます。"
+                            "3着は3号艇と4号艇の争いに期待します。",
+             "ticket_comment": "本線は1-2-3 を中心に、抑えで 2-1-3 も押さえます。"}
+    return na.compose(parts, TICKETS)
+
+
+def test_split_article_free_has_no_tickets():
+    free, paid = na.split_article(_claude_body(), "桐生 5R", "15:30")
+    assert free.startswith("【桐生 5R｜締切 15:30】\n\nこんにちは！")
+    assert "■ 展示後の予想展開\nスタートは内の3艇が揃いそうです。" in free
+    assert "1マーク" not in free and "1-2-3" not in free and "買い目】" not in free
+    assert free.endswith(na.PAYWALL_LEAD)
+    assert paid.startswith("■ 展示後の予想展開（続き）\n1マークは1号艇の先マイ")
+    assert "■ 買い目の考え方" in paid and "【本線買い目】\n1-2-34" in paid and "保証するものではありません" in paid
+    # 段落は空行1つで区切る（noteで段落の境目になる）
+    assert "\n\n\n" not in free and "\n\n\n" not in paid
+
+
+def test_split_article_template_and_combo_in_lead():
+    free, paid = na.split_article(na.template_article(TICKETS), "桐生 5R", "15:30")
+    assert "1-2-3" not in free and "1-2-34" not in free
+    assert paid == na.template_article(TICKETS)
+    body = "本命は 1-2-3 です。\n\n" + na.template_article(TICKETS)
+    free, paid = na.split_article(body, "桐生 5R")
+    assert "1-2-3" not in free and paid.startswith("本命は 1-2-3 です。")
+    # 予想展開が1文だけなら、無料に出さない
+    body = "見どころです。\n\n■ 展示後の予想展開\n1号艇の逃げが有力です。\n\n" + na.template_article(TICKETS)
+    free, paid = na.split_article(body)
+    assert "逃げ" not in free and paid.startswith("■ 展示後の予想展開\n1号艇の逃げ")
