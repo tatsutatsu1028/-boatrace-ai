@@ -16,7 +16,7 @@ from result_tracker import supabase_config
 
 STATUS_LABELS = {"posted": "✅ 投稿済み", "partial": "⚠️ 途中まで投稿", "failed": "❌ 失敗", "skipped": "⏸ 投稿なし"}
 RETRY_NOTE = ("やり直すときは GitHub Actions の「Threads Morning Post」を retry = true で手動実行してください"
-              "（1投稿もできなかった日だけやり直せます）。")
+              "（途中で止まった日は、締切まで30分以上ある残りの投稿だけを出し直します）。")
 
 
 def _headers(key, prefer=None):
