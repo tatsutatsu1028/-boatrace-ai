@@ -6,6 +6,8 @@
   - 「note記事用に確定」で、本文を Claude（Haiku）に書いてもらってから記事枠を確定する（全て有料300円）。
     Claude が失敗したら今までの決まった型の本文にする
   - 確定後も締切前なら、買い目・本文を保存し直せる（夜のまとめは保存した買い目で的中を判定する）
+  - 見出し画像を自動で選んで出し（note_header.py のルール）、端末に保存できる。別の画像にも変えられる。
+    確定した記事では、使った画像を note_publications.header_image に記録する
   - 予想カード画像（記事と同じ買い目・1着確率）を作って保存できる
   - note に貼る用に、本文を「無料部分」（買い目なし）と「有料部分」に分けてコピーできる。
     noteの有料ラインは段落の境目にしか置けないので、コピーは段落ごとに <p> にした形（HTML）と
@@ -27,6 +29,7 @@ import streamlit.components.v1 as components
 import claude_tab
 import claude_usage
 import note_article as na
+import note_header as nh
 import pick_card
 from race_visuals import build_visual_rows, parse_combo
 from result_tracker import load_prediction_snapshot, supabase_config
@@ -328,6 +331,9 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
                             key=f"note_paid_{ctx}_{_digest(body)}")
     _split_copy_buttons(free, paid)
 
+    # 見出し画像（自動で選ぶ・変えられる・記事ごとに記録）
+    render_header(ctx, d, date_iso, label, pub, work, body)
+
     # 予想カード画像
     with st.expander("🖼 予想カード画像", expanded=False):
         if not pick_card.has_japanese_font():
@@ -347,3 +353,59 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
             st.download_button("💾 画像を保存", data=png, file_name=f"{date_iso}_{venue}{rno}R.png",
                                mime="image/png", key=f"{card_key}_dl", use_container_width=True)
     return pub
+
+
+def _race_flags(ctx, d):
+    """(万舟チャンスのレースか, 展示前厳選のレースか)。読めなければ False。"""
+    import manshu_view
+    import pre_picks_view
+
+    manshu_chance = ctx in manshu_view.marks_by_key(d)
+    try:
+        pre_pick = any(r.get("race_key") == ctx for r in pre_picks_view.load_picks(d.isoformat()))
+    except Exception:  # noqa: BLE001
+        pre_pick = False
+    return manshu_chance, pre_pick
+
+
+def render_header(ctx, d, date_iso, label, pub, work, body):
+    """見出し画像の欄。選んだ画像を出し、保存ボタンで端末に保存する。確定した記事なら使った画像を記録する。"""
+    st.markdown("##### 🖼 見出し画像")
+    keys = nh.available()
+    if not keys:
+        st.caption("見出し画像のファイルがありません（assets/note_headers/）。")
+        return
+    try:
+        manshu_chance, pre_pick = _race_flags(ctx, d)
+    except Exception:  # noqa: BLE001
+        manshu_chance, pre_pick = False, False
+    wind, wave = nh.water(work)
+    auto, why = nh.choose(manshu_chance=manshu_chance, with_aim=nh.with_aim_in_article(body),
+                          wind=wind, wave=wave, pre_pick=pre_pick)
+    saved = (pub or {}).get("header_image")
+    current = saved if saved in keys else auto
+    choice = st.selectbox(
+        "見出し画像", keys, index=keys.index(current),
+        format_func=lambda k: nh.HEADERS[k].label + ("（自動で選んだ画像）" if k == auto else ""),
+        key=f"note_header_{ctx}")
+    st.caption(f"自動で選んだ画像: {nh.HEADERS[auto].label}（{why}）"
+               + ("" if choice == auto else "　→ 自分で変えています"))
+    if not nh.HEADERS["manshu"].exists():
+        st.caption("「万舟チャンス」の画像はまだありません（assets/note_headers/manshu.jpg を置くと使います）。")
+    data = nh.HEADERS[choice].path.read_bytes()
+    st.image(data, use_container_width=True)
+    st.download_button("💾 見出し画像を保存", data=data, file_name=nh.file_name(choice, date_iso, label),
+                       mime="image/jpeg", key=f"note_header_dl_{ctx}_{choice}", use_container_width=True)
+    if not pub:
+        st.caption("記事枠を確定すると、使った画像を記事ごとに記録します。")
+        return
+    if saved == choice and (pub.get("header_image_auto") or auto) == auto:
+        st.caption(f"記録済み: {nh.HEADERS[choice].label}")
+        return
+    try:
+        _rpc("set_note_header_image", {"p_race_key": ctx, "p_image": choice, "p_auto": auto,
+                                       "p_reason": why[:200]})
+        st.caption(f"記録しました: {nh.HEADERS[choice].label}")
+    except Exception as e:  # noqa: BLE001
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        st.caption(f"使った画像を記録できませんでした（{type(e).__name__}{f' {status}' if status else ''}）。")
