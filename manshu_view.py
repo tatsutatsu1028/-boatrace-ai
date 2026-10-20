@@ -294,6 +294,12 @@ def aim_text(tickets):
                     for t in (tickets or []))
 
 
+def aim_error_text(r):
+    """朝の選定・取り直しで買い目を作れなかったときの文（例: 買い目を作れませんでした（オッズがまだ出ていません）・09:00）。"""
+    at = jst_hhmm(r.get("aim_tried_at"))
+    return f"買い目を作れませんでした（{r['aim_error']}）" + (f"・{at} に試した結果" if at else "")
+
+
 def aim_probs(r):
     """買い目を作る3連単の確率: 展示後に予想していればその確率、無ければ朝（展示前）の確率。"""
     if r.get("post_tri_probs"):
@@ -315,6 +321,8 @@ def _manshu_tickets_block(d, r, passed):
         if saved:
             st.caption(f"{manshu.AIM_LABEL}（締切前に最後に表示した買い目・{jst_hhmm(r.get('aim_odds_at'))} のオッズ）")
             st.markdown(aim_text(saved))
+        elif r.get("aim_error"):
+            st.caption(f"{manshu.AIM_LABEL}: {aim_error_text(r)}")
         else:
             st.caption(f"{manshu.AIM_LABEL}: 締切前に表示した買い目はありません")
         return
@@ -345,6 +353,8 @@ def _manshu_tickets_block(d, r, passed):
         else:
             st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(r.get('aim_odds_at'))} のオッズ・保存済み）")
         st.markdown(aim_text(saved))
+    elif r.get("aim_error"):
+        st.warning(f"{manshu.AIM_LABEL}: {aim_error_text(r)}　上のボタンでその時点のオッズから作り直せます。")
     elif not probs:
         st.caption(f"{manshu.AIM_LABEL}: 朝の3連単の確率が無いため作れません（次の朝から作れます）。")
     else:
