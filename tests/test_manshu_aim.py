@@ -278,8 +278,143 @@ def test_morning_aim_tickets_saved_with_rows():
     assert [t["combo"] for t in rows[0]["aim_tickets"]] == ["2-1-3", "3-1-2", "5-1-2"]
     assert rows[0]["aim_source"] == "morning" and rows[0]["aim_odds_at"]
     # まとめて保存できるよう、全部の行に同じ列がそろう
-    assert all(set(r) >= {"aim_tickets", "aim_method", "aim_source", "aim_odds_at", "aim_saved_at"} for r in rows)
+    assert all(set(r) >= set(pre_picks.AIM_COLS) for r in rows)
     assert rows[1]["aim_tickets"] is None and rows[2]["aim_tickets"] is None
+    # 作れなかったレースは黙って空にせず、理由を残す
+    assert rows[0]["aim_error"] is None
+    assert rows[1]["aim_error"] == "オッズがまだ出ていません（発売前など）"
+    assert rows[2]["aim_error"] == "朝の3連単の確率がありません"
+    assert all(r["aim_tried_at"] for r in rows)
+
+
+def test_morning_aim_records_fetch_errors():
+    """オッズの取得が失敗・不足したときも、理由を残して他のレースは続ける。"""
+    probs = {"2-1-3": 0.06}
+    rows = [{"race_key": f"20261020_01_{i}", "tri_probs": probs} for i in (1, 2, 3)]
+
+    def fetch(rk):
+        if rk.endswith("_1"):
+            raise pre_picks.NoOdds("オッズがまだそろっていません（120通り中80通り）")
+        if rk.endswith("_2"):
+            raise TimeoutError()
+        return {"2-1-3": 3.0}   # 30倍以上の組が無い
+    assert pre_picks.add_morning_aim(rows, fetch=fetch) == 0
+    assert [r["aim_error"] for r in rows] == ["オッズがまだそろっていません（120通り中80通り）",
+                                              "オッズを読めませんでした（TimeoutError）",
+                                              "オッズ30倍以上の組がありません"]
+
+
+class _Patch:
+    """pytest が無くても動くよう、monkeypatch の代わり（with の中だけ差し替える）。"""
+
+    def __init__(self):
+        self._undo = []
+
+    def setattr(self, obj, name, value):
+        self._undo.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        for obj, name, old in reversed(self._undo):
+            setattr(obj, name, old)
+
+
+def _odds_html(n):
+    """公式の3連単オッズのページの形（1着艇ごとに [2着, 3着, オッズ] の3列 × 6）。最初の n 組だけオッズあり。"""
+    import itertools
+
+    by_first = {f: [(s, t) for s, t in itertools.permutations([x for x in range(1, 7) if x != f], 2)]
+                for f in range(1, 7)}
+    rows, k = [], 0
+    for i in range(20):
+        cells = []
+        for f in range(1, 7):
+            s_, t_ = by_first[f][i]
+            idx = (f - 1) * 20 + i
+            cells += [f"<td>{s_}</td>", f"<td>{t_}</td>", f"<td>{'%.1f' % (10 + idx) if idx < n else ''}</td>"]
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    return "<table>" + "".join(rows) + "</table>"
+
+
+def test_fetch_odds_reasons():
+    """オッズのページが読めない・組がそろわないときは理由つきの NoOdds。"""
+    with _Patch() as monkeypatch:
+        _fetch_odds_reasons(monkeypatch)
+
+
+def _fetch_odds_reasons(monkeypatch):
+    import polite_http
+
+    class R:
+        def __init__(self, code, text=""):
+            self.status_code, self.text = code, text
+    for resp, msg in ((R(503), "公式サイトの応答が 503"), (R(200, "<html></html>"), "オッズがまだ出ていません（発売前など）"),
+                      (R(200, _odds_html(80)), "オッズがまだそろっていません（120通り中")):
+        monkeypatch.setattr(polite_http, "get", lambda *a, _r=resp, **k: _r)
+        try:
+            pre_picks.fetch_odds3t("20261020_16_2")
+            raise AssertionError("NoOdds にならない")
+        except pre_picks.NoOdds as e:
+            assert str(e).startswith(msg), str(e)
+    monkeypatch.setattr(polite_http, "get", lambda *a, **k: R(200, _odds_html(120)))
+    odds = pre_picks.fetch_odds3t("20261020_16_2")
+    assert len(odds) == 120 and odds["1-2-3"] == 10.0
+
+
+def test_run_aim_only_missing_and_before_deadline():
+    """task=aim: 買い目が空・締切5分より前のレースだけ取り直し、空の行だけ書き換える。"""
+    with _Patch() as monkeypatch:
+        _run_aim(monkeypatch)
+
+
+def _run_aim(monkeypatch):
+    from datetime import datetime
+
+    now = datetime(2026, 10, 20, 9, 0, tzinfo=pre_picks.JST)
+    probs = {"2-1-3": 0.06, "5-1-2": 0.02}
+    db = [{"race_key": "20261020_16_2", "race_date": "2026-10-20", "deadline": "11:23", "tri_probs": probs},
+          {"race_key": "20261020_03_2", "race_date": "2026-10-20", "deadline": "09:03", "tri_probs": probs},
+          {"race_key": "20261020_17_8", "race_date": "2026-10-20", "deadline": "13:34", "tri_probs": probs}]
+    calls = []
+
+    class Resp:
+        def __init__(self, data=None):
+            self._d = data
+
+        def json(self):
+            return self._d
+
+    def sb(method, path, **kw):
+        calls.append((method, path, kw.get("json")))
+        return Resp(db if method == "GET" else None)
+    monkeypatch.setattr(pre_picks, "_sb", sb)
+
+    class FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    monkeypatch.setattr(pre_picks, "datetime", FakeDT)
+
+    def fetch(rk):
+        if rk.endswith("_8"):
+            raise pre_picks.NoOdds("オッズがまだ出ていません（発売前など）")
+        return {"2-1-3": 40.0, "5-1-2": 200.0}
+    done, total = pre_picks.run_aim("20261020", fetch=fetch)
+    assert (done, total) == (1, 2)   # 09:03 締切のレースは対象外
+    patches = [(p, j) for m, p, j in calls if m == "PATCH"]
+    assert len(patches) == 2 and all("aim_tickets=is.null" in p for p, _ in patches)
+    assert patches[0][1]["aim_error"] is None and len(patches[0][1]["aim_tickets"]) == 2
+    assert patches[1][1]["aim_error"] == "オッズがまだ出ていません（発売前など）" and "aim_tickets" not in patches[1][1]
+
+    # 点検: 空のレースがあれば失敗にする
+    try:
+        pre_picks.run_check("20261020")
+        raise AssertionError("点検が失敗にならない")
+    except SystemExit as e:
+        assert e.code == 1
 
 
 def test_jst_hhmm():

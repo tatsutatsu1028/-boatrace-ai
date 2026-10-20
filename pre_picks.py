@@ -6,8 +6,12 @@
   python pre_picks.py run      [--date YYYYMMDD] [--force]   結果の記録 → その日の10レースの選定
   python pre_picks.py results                                 結果の記録だけ
   python pre_picks.py manshu   [--date YYYYMMDD]              万舟チャンスだけ選び直す（厳選10は変えない）
+  python pre_picks.py aim      [--date YYYYMMDD]              買い目が空の万舟チャンスだけ、今のオッズで作り直す
+  python pre_picks.py check    [--date YYYYMMDD]              万舟チャンスなのに買い目が空のレースがあれば失敗にする
 
 起動は pg_cron → pre_picks.yml（毎朝 08:05 JST。朝の過去データ収集〜08:00 の後）。
+朝の時点でオッズが取れず中穴〜万舟狙いの買い目を作れなかったレースは、08:30・09:00 に task=aim で取り直す
+（作れなかった理由は manshu_chance_picks.aim_error に残し、一覧に出す）。
 公式サイトへのアクセスは polite_http（開始間隔3.4秒以上）を通し、過去データの収集が
 動いている間は終わるまで待ってから始める。取るのは番組表（Bファイル）1つと、各レースの
 出走表ページ1つずつ（直前情報ページは取らない）。
@@ -394,6 +398,7 @@ def save_manshu(date, cands):
                 try:
                     _sb("POST", "manshu_chance_picks", json=rows, prefer="return=minimal")
                 except Exception:  # noqa: BLE001  新しい列（tri_probs・aim_*）がまだ無いデータベースでは無しで保存する
+                    log(f"{date}: 万舟チャンスを買い目なしで保存（新しい列がまだ無いデータベース）")
                     _sb("POST", "manshu_chance_picks", json=[{k: v for k, v in r.items()
                                                               if k != "tri_probs" and not k.startswith("aim_")}
                                                              for r in rows], prefer="return=minimal")
@@ -415,45 +420,147 @@ def save_manshu(date, cands):
     return int(len(marks)), manshu_error
 
 
+class NoOdds(Exception):
+    """そのレースの買い目を作れなかった理由（画面と pre_exhibition_runs にそのまま出す文）。"""
+
+
+# 朝の買い目に使うオッズの組の数の下限（120通り中）。票が入っていない組はオッズが出ない
+AIM_MIN_COMBOS = 100
+# 締切までこれより短いレースは、取り直しの対象にしない
+AIM_RETRY_LEAD_MINUTES = 5
+AIM_COLS = ("aim_tickets", "aim_method", "aim_source", "aim_odds_at", "aim_saved_at", "aim_error", "aim_tried_at")
+
+
 def fetch_odds3t(race_key):
-    """3連単オッズ {組番: オッズ}（公式サイト。polite_http で開始間隔3.4秒以上）。読めなければ空。"""
+    """3連単オッズ {組番: オッズ}（公式サイト。polite_http で開始間隔3.4秒以上）。
+    読めなければ NoOdds（理由つき）。"""
     import polite_http
     from official_fetcher import BASE, parse_odds3t
 
     d, jcd, rno = race_key.split("_")
-    r = polite_http.get(f"{BASE}/odds3t?hd={d}&jcd={jcd}&rno={int(rno)}", timeout=30)
-    r.raise_for_status()
-    o = parse_odds3t(r.text)
-    return {str(c): float(v) for c, v in zip(o["combo"], o["odds"])} if len(o) else {}
+    try:
+        r = polite_http.get(f"{BASE}/odds3t?hd={d}&jcd={jcd}&rno={int(rno)}", timeout=30)
+    except requests.RequestException as e:
+        raise NoOdds(f"公式サイトにつながりません（{type(e).__name__}）") from e
+    if r.status_code != 200:
+        raise NoOdds(f"公式サイトの応答が {r.status_code}")
+    o = parse_odds3t(r.text, min_count=AIM_MIN_COMBOS)
+    if not len(o):
+        n = o.attrs.get("read", 0)
+        raise NoOdds("オッズがまだ出ていません（発売前など）" if n == 0
+                     else f"オッズがまだそろっていません（120通り中{n}通り）")
+    return {str(c): float(v) for c, v in zip(o["combo"], o["odds"])}
+
+
+def make_aim(probs, race_key, fetch=None):
+    """1レースの中穴〜万舟狙いの買い目を作る。戻り値 (買い目, 理由)。作れなければ買い目は空で理由を返す。"""
+    import manshu
+
+    if not probs:
+        return [], "朝の3連単の確率がありません"
+    try:
+        odds = (fetch or fetch_odds3t)(race_key)
+    except NoOdds as e:
+        return [], str(e)[:200]
+    except Exception as e:  # noqa: BLE001  1レースが読めなくても他のレースは続ける
+        return [], f"オッズを読めませんでした（{type(e).__name__}）"
+    if not odds:
+        return [], "オッズがまだ出ていません（発売前など）"
+    tickets = manshu.aim_tickets(probs, odds)
+    if not tickets:
+        return [], "オッズ30倍以上の組がありません"
+    return tickets, None
+
+
+def _log_aim(label, done, total, reasons):
+    why = "・".join(f"{k} {v}件" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
+    log(f"{label} {done}/{total}レース" + (f"（作れなかった理由: {why}）" if why else ""))
 
 
 def add_morning_aim(rows, fetch=None):
     """万舟チャンスの各レースに、朝のオッズで作った中穴〜万舟狙いの買い目を付ける（aim_*。一覧を開いたら出ている）。
-    オッズが取れない・まだ出ていないレースは付けない（画面の「オッズを取得」で作れる）。10レースで10回の取得。"""
+    作れなかったレースは aim_error に理由を残す（8:30・9:00 の task=aim で取り直す）。10レースで10回の取得。"""
     import manshu
 
-    fetch = fetch or fetch_odds3t
-    done = 0
+    done, reasons = 0, {}
     for r in rows:
         # まとめて保存するので、全部の行に同じ列をそろえる（PostgREST は行ごとに列が違うと受け付けない）
-        for k in ("aim_tickets", "aim_method", "aim_source", "aim_odds_at", "aim_saved_at"):
+        for k in AIM_COLS:
             r.setdefault(k, None)
-        if not r.get("tri_probs"):
-            continue
-        try:
-            odds = fetch(r["race_key"])
-        except Exception as e:  # noqa: BLE001  朝の買い目が作れなくても選定は続ける
-            log(f"朝のオッズを取れない {type(e).__name__}")
-            continue
-        tickets = manshu.aim_tickets(r["tri_probs"], odds) if odds else []
-        if not tickets:
-            continue
         now = datetime.now(JST).isoformat(timespec="seconds")
+        tickets, why = make_aim(r.get("tri_probs"), r["race_key"], fetch)
+        r["aim_tried_at"] = now
+        if not tickets:
+            r["aim_error"] = why
+            reasons[why] = reasons.get(why, 0) + 1
+            continue
         r.update(aim_tickets=tickets, aim_method=manshu.aim_method_name(), aim_source="morning",
-                 aim_odds_at=now, aim_saved_at=now)
+                 aim_odds_at=now, aim_saved_at=now, aim_error=None)
         done += 1
-    log(f"朝の中穴〜万舟狙いの買い目 {done}/{len(rows)}レース")
+    _log_aim("朝の中穴〜万舟狙いの買い目", done, len(rows), reasons)
     return done
+
+
+def _minutes_to_deadline(r, now):
+    try:
+        dl = datetime.strptime(f"{r['race_date']} {r['deadline']}", "%Y-%m-%d %H:%M").replace(tzinfo=JST)
+    except (TypeError, ValueError):
+        return None
+    return (dl - now).total_seconds() / 60
+
+
+def missing_aim(date_iso, now=None):
+    """万舟チャンスなのに買い目が空のレース（締切が近い・過ぎたレースは除く）。"""
+    rows = _sb("GET", f"manshu_chance_picks?race_date=eq.{date_iso}&aim_tickets=is.null&result_at=is.null"
+                      "&select=*&order=pick_rank.asc").json() or []
+    now = now or datetime.now(JST)
+    out = []
+    for r in rows:
+        left = _minutes_to_deadline(r, now)
+        if left is None or left >= AIM_RETRY_LEAD_MINUTES:
+            out.append(r)
+    return out
+
+
+def run_aim(date=None, fetch=None):
+    """task=aim: 買い目が空のレースだけ、今のオッズで作り直す（8:30・9:00。厳選10・万舟チャンスの選定は変えない）。"""
+    import manshu
+
+    date = date or _today()
+    iso = f"{date[:4]}-{date[4:6]}-{date[6:]}"
+    rows = missing_aim(iso)
+    done, reasons = 0, {}
+    for r in rows:
+        probs = r.get("post_tri_probs") or r.get("tri_probs")
+        tickets, why = make_aim(probs, r["race_key"], fetch)
+        now = datetime.now(JST).isoformat(timespec="seconds")
+        patch = {"aim_tried_at": now, "aim_error": why}
+        if tickets:
+            patch.update(aim_tickets=tickets, aim_method=manshu.aim_method_name(), aim_source="morning",
+                         aim_odds_at=now, aim_saved_at=now)
+            done += 1
+        else:
+            reasons[why] = reasons.get(why, 0) + 1
+        # 画面で先に作った買い目は上書きしない（aim_tickets が空の行だけ）
+        _sb("PATCH", f"manshu_chance_picks?race_key=eq.{r['race_key']}&aim_tickets=is.null&result_at=is.null",
+            prefer="return=minimal", json=patch)
+    _log_aim(f"{date}: 買い目の取り直し", done, len(rows), reasons)
+    return done, len(rows)
+
+
+def run_check(date=None):
+    """task=check: 万舟チャンスなのに買い目が空のレースを数える（あれば終了コード1。毎日の自動点検用）。"""
+    date = date or _today()
+    iso = f"{date[:4]}-{date[4:6]}-{date[6:]}"
+    picks = _sb("GET", f"manshu_chance_picks?race_date=eq.{iso}&select=race_key").json() or []
+    rows = missing_aim(iso)
+    reasons = {}
+    for r in rows:
+        why = r.get("aim_error") or "理由の記録なし"
+        reasons[why] = reasons.get(why, 0) + 1
+    _log_aim(f"{date}: 点検 万舟チャンスなのに買い目が空のレース", len(rows), len(picks), reasons)
+    if rows:
+        raise SystemExit(1)
 
 
 def run_manshu(date=None):
@@ -602,10 +709,17 @@ def record_results(today=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("task", choices=["run", "results", "manshu"])
+    ap.add_argument("task", choices=["run", "results", "manshu", "aim", "check"])
     ap.add_argument("--date", default="")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
+    # 買い目の取り直し・点検は、結果の記録をしない（8:30・9:00 に短く動かす）
+    if a.task == "aim":
+        run_aim(a.date or None)
+        return
+    if a.task == "check":
+        run_check(a.date or None)
+        return
     failed = None
     for fn, name in ((record_results, "結果"), (record_manshu_results, "万舟チャンスの結果")):
         try:

@@ -389,8 +389,9 @@ def fetch_odds3t(date_yyyymmdd, jcd, rno):
     return parse_odds3t(html, url)
 
 
-def parse_odds3t(html, url=None):
-    """3連単オッズのページ（HTML）→ DataFrame(combo, odds)。読めた組が100未満なら空。"""
+def parse_odds3t(html, url=None, min_count=100):
+    """3連単オッズのページ（HTML）→ DataFrame(combo, odds)。読めた組が min_count 未満なら空
+    （attrs["read"] に読めた組の数を残す。発売直後の、票が入っていない組がある時間の判定に使う）。"""
     soup = BeautifulSoup(html, "lxml")
 
     best = None
@@ -454,7 +455,7 @@ def parse_odds3t(html, url=None):
 
                 seen[f"{first}-{second}-{third}"] = float(odd)
 
-    if len(seen) < 100:
+    if len(seen) < min_count:
         page_text = _norm(soup.get_text(" ", strip=True))
         pat = re.compile(
             r"(?<!\d)([1-6])\s+([1-6])\s+([1-6])\s+(\d+(?:\.\d+)?)(?!\d)"
@@ -485,10 +486,12 @@ def parse_odds3t(html, url=None):
             .reset_index(drop=True)
         )
 
-    if len(out) < 100:
+    read = len(out)
+    if len(out) < min_count:
         out = pd.DataFrame(columns=["combo", "odds"])
 
     out.attrs["source"] = url
+    out.attrs["read"] = read
     out.attrs["count"] = len(out)
 
     return out
