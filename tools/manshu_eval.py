@@ -485,24 +485,76 @@ POINTS = (5, 10, 15)
 ODDS_BANDS = [100, 200, 500, 1000, 1e9]
 
 
-def odds_strategies(tri, odds, n=ODDS_N, odds_min=ODDS_MIN, claude=None):
+# 1着から外す艇の比べ方（2026-10-20 追加）。過去約9,700レースで万舟の86.5%は1号艇以外の1着だったため、
+# 「1号艇1着を外す」を基本にし、「本命が1号艇以外のレースでは本命も1着から外す」と比べる
+EXCLUDES = {
+    "外さない（今まで）": (),
+    "1号艇1着を外す（基本）": ("1",),
+    "1号艇＋本命を1着から外す": ("1", "fav"),
+}
+
+
+def favorite_lanes(tri):
+    """race_key → 本命の艇番の文字（3連単確率を1着の艇で足して一番高い艇。manshu.favorite_lane と同じ）。"""
+    t = tri.assign(a=tri["combo"].astype(str).str[0])
+    s = t.groupby(["race_key", "a"])["prob"].sum().reset_index()
+    s["neg_lane"] = -s["a"].astype(int)
+    s = s.sort_values(["race_key", "prob", "neg_lane"], ascending=[True, False, False])
+    return s.drop_duplicates("race_key").set_index("race_key")["a"]
+
+
+def exclude_first(t, exclude, fav):
+    """t（race_key, combo を含む表）から、1着が外す艇の組を除く。"""
+    if not exclude:
+        return t
+    a = t["combo"].astype(str).str[0]
+    drop = a.isin([x for x in exclude if x != "fav"])
+    if "fav" in exclude:
+        drop |= a == t["race_key"].map(fav)
+    return t[~drop]
+
+
+def mix_tickets(t, n):
+    """本番の中穴〜万舟狙いの買い目（manshu.aim_tickets の MIX・確率順）と同じ選び方を n 点で。
+    中穴（30〜99倍）から ceil(n/2) 点・万舟（100倍以上）から残り。足りなければもう片方で埋める。"""
+    import manshu
+
+    k_mid = (n + 1) // 2
+    mix = {"中穴": k_mid, "万舟": n - k_mid}
+    rows = []
+    for rk, g in t.groupby("race_key", sort=False):
+        probs = dict(zip(g["combo"], g["prob"]))
+        odds = dict(zip(g["combo"], g["odds"]))
+        for x in manshu.aim_tickets(probs, odds, method="MIX", mix=mix, order="prob", exclude=()):
+            rows.append({"race_key": rk, "combo": x["combo"]})
+    return pd.DataFrame(rows, columns=["race_key", "combo"])
+
+
+def odds_strategies(tri, odds, n=ODDS_N, odds_min=ODDS_MIN, claude=None, excludes=None):
     """tri: race_key, combo, prob（モデルの3連単確率）/ odds: race_key, combo, odds
     claude: race_key, rank, combo（Claude が選んだ順。tools/manshu_claude_aim.py の結果）
-    → {名前: race_key, combo の表}（1レース n 点まで）"""
+    excludes: {名前: 1着から外す艇}（既定 EXCLUDES）
+    → {(選び方, 外し方): race_key, combo の表}（1レース n 点まで）"""
+    excludes = EXCLUDES if excludes is None else excludes
     t = tri.merge(odds, on=["race_key", "combo"], how="inner")
     t["outer"] = is_outer_top2(t["combo"]).to_numpy()
     t["ev"] = t["prob"] * t["odds"]
-    hi = t[t["odds"] >= odds_min]
+    fav = favorite_lanes(tri)
     out = {}
-    out["A 確率順"] = hi.sort_values(["race_key", "prob"], ascending=[True, False]).groupby("race_key").head(n)
-    b = hi.sort_values(["race_key", "outer", "prob"], ascending=[True, False, False])
-    out["B 4〜6号艇が1〜2着の組を優先"] = b.groupby("race_key").head(n)
-    out["C 期待値順（確率×オッズ）"] = hi.sort_values(["race_key", "ev"], ascending=[True, False]).groupby("race_key").head(n)
-    if claude is not None and len(claude):
-        c = claude.sort_values(["race_key", "rank"])
-        out["D Claude"] = c.groupby("race_key").head(n)[["race_key", "combo"]]
+    for ename, ex in excludes.items():
+        te = exclude_first(t, ex, fav)
+        hi = te[te["odds"] >= odds_min]
+        out[("A 確率順", ename)] = hi.sort_values(["race_key", "prob"], ascending=[True, False]).groupby("race_key").head(n)
+        b = hi.sort_values(["race_key", "outer", "prob"], ascending=[True, False, False])
+        out[("B 4〜6号艇が1〜2着の組を優先", ename)] = b.groupby("race_key").head(n)
+        out[("C 期待値順（確率×オッズ）", ename)] = hi.sort_values(["race_key", "ev"], ascending=[True, False]).groupby(
+            "race_key").head(n)
+        out[("本番 中穴＋万舟・確率順（30倍以上）", ename)] = mix_tickets(te[te["odds"] >= 30.0], n)
+        if claude is not None and len(claude):
+            c = exclude_first(claude.sort_values(["race_key", "rank"]), ex, fav)
+            out[("D Claude", ename)] = c.groupby("race_key").head(n)[["race_key", "combo"]]
     r = t[t["combo"].str[0] != "1"].sort_values(["race_key", "prob"], ascending=[True, False])
-    out["参考 1号艇を1着から外した上位（オッズなし）"] = r.groupby("race_key").head(n)
+    out[("参考 1号艇を1着から外した上位（オッズなし）", "1号艇1着を外す（基本）")] = r.groupby("race_key").head(n)
     return out
 
 
@@ -596,9 +648,9 @@ def cmd_odds(args):
             strategies = odds_strategies(tri, odds, n=n, claude=cl)
             for sname, d in sets.items():
                 keys = set(d["race_key"]) & have
-                for tname, sel in strategies.items():
-                    r = _roi_row(sel, lab, keys, mid, version=kind, races_set=sname, tickets=tname, points=n,
-                                 races_in_set=len(d), races_with_odds=len(keys))
+                for (tname, ename), sel in strategies.items():
+                    r = _roi_row(sel, lab, keys, mid, version=kind, races_set=sname, tickets=tname, exclude=ename,
+                                 points=n, races_in_set=len(d), races_with_odds=len(keys))
                     if r:
                         rows.append(r)
         cal.append(calibration_longshots(tri, odds, lab, kind))

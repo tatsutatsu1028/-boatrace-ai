@@ -3558,7 +3558,8 @@ with tab1:
                     # 万舟チャンスの印のレース: 通常の買い目と万舟狙いの買い目を並べる（予想した時点のオッズ）
                     try:
                         manshu_view.render_aim_compare(
-                            _manshu_marks.get(ctx), final, _model_tickets, odds, is_admin=IS_ADMIN
+                            _manshu_marks.get(ctx), final, _model_tickets, odds, is_admin=IS_ADMIN,
+                            pre_exhibition=bool(result.get("pre_exhibition")),
                         )
                     except Exception as e:
                         print("[MANSHU] aim compare error:", type(e).__name__, flush=True)

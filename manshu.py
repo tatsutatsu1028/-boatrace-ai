@@ -143,7 +143,10 @@ def longshot_tickets(tri, n=LONGSHOT_N):
 #          片方の組が足りなければ、もう片方から同じ順で埋める（合計 AIM_N 点）
 #   "A":   万舟（AIM_HIGH_MIN 以上）の組の中から、確率が高い順に AIM_N 点
 #   "B":   A と同じ組の中で、4〜6号艇が1着か2着に入る組を優先（足りなければ残りで埋める）
+#   AIM_EXCLUDE_FIRST: 1着から外す艇番（既定 "1"）。過去約9,700レースで、万舟の86.5%は1号艇以外の1着
+#          （1号艇1着のレースの万舟率は4.0%）。"fav" を入れると本命（1着確率が一番高い艇）も外す（検証用）
 AIM_METHOD = "MIX"
+AIM_EXCLUDE_FIRST = ("1",)
 AIM_MIX = {"中穴": 5, "万舟": 5}
 AIM_ORDER = "prob"
 AIM_N = 10
@@ -152,16 +155,17 @@ AIM_HIGH_MIN = 100.0        # 万舟 = 100倍以上
 AIM_ODDS_MIN = AIM_HIGH_MIN  # 互換（A・B の下限）
 AIM_STAKE = 100             # 1点あたり（資金配分しない）
 AIM_LABEL = "中穴〜万舟狙いの買い目"
-AIM_NOTE = ("検証中・参考: 今の時点の3連単オッズで、中穴（30〜99倍）から5点・万舟（100倍以上）から5点を、"
-            "モデルの確率が高い順に選んでいます。儲かるとは限りません。")
+AIM_NOTE = ("検証中・参考: 1号艇の1着を外し、今の時点の3連単オッズで、中穴（30〜99倍）から5点・万舟（100倍以上）から"
+            "5点を、モデルの確率が高い順に選んでいます。儲かるとは限りません。")
 AIM_MORNING_NOTE = "朝の時点のオッズは売れ始めで当てになりません。締切前に「オッズを更新」で取り直してください。"
 
 
 def aim_method_name():
     """保存する作り方の名前（例: MIX5+5-prob）。"""
+    ex = "".join(f"-no{x}" for x in AIM_EXCLUDE_FIRST)
     if AIM_METHOD == "MIX":
-        return f"MIX{AIM_MIX['中穴']}+{AIM_MIX['万舟']}-{AIM_ORDER}"
-    return f"{AIM_METHOD}{AIM_N}"
+        return f"MIX{AIM_MIX['中穴']}+{AIM_MIX['万舟']}-{AIM_ORDER}{ex}"
+    return f"{AIM_METHOD}{AIM_N}{ex}"
 
 
 def odds_tier(odds):
@@ -185,15 +189,41 @@ def is_outer_top2(combo):
     return len(c) >= 3 and (c[0] in "456" or c[2] in "456")
 
 
-def aim_tickets(probs, odds, method=None, n=None, mix=None, order=None):
+def favorite_lane(probs):
+    """3連単確率 {組番: 確率} から本命（1着確率が一番高い艇番の文字）。無ければ None。"""
+    first = {}
+    for combo, p in (probs or {}).items():
+        try:
+            first[str(combo)[0]] = first.get(str(combo)[0], 0.0) + float(p)
+        except (TypeError, ValueError, IndexError):
+            continue
+    return max(first, key=lambda k: (first[k], -int(k))) if first else None
+
+
+def excluded_first(probs, exclude=None):
+    """1着から外す艇番の集合（"fav" は本命の艇番に置き換える）。"""
+    exclude = AIM_EXCLUDE_FIRST if exclude is None else exclude
+    out = {str(x) for x in exclude if x != "fav"}
+    if "fav" in exclude:
+        fav = favorite_lane(probs)
+        if fav:
+            out.add(fav)
+    return out
+
+
+def aim_tickets(probs, odds, method=None, n=None, mix=None, order=None, exclude=None):
     """中穴〜万舟狙いの買い目。probs: {組番: 3連単確率} / odds: {組番: オッズ}
+    exclude: 1着から外す艇番（既定 AIM_EXCLUDE_FIRST。"fav" で本命も外す。() で外さない）
     → [{combo, prob, odds, tier, stake, payout}]（tier は "中穴"/"万舟"、payout は当たったときの払戻）"""
     method = method or AIM_METHOD
     n = n or AIM_N
     mix = mix or AIM_MIX
     order = order or AIM_ORDER
+    skip = excluded_first(probs, exclude)
     rows = []
     for combo, p in (probs or {}).items():
+        if str(combo)[:1] in skip:
+            continue
         o = (odds or {}).get(combo)
         try:
             o, p = float(o), float(p)
