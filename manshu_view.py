@@ -8,6 +8,9 @@
   - 予想画面: 印のレースなら注意書き（本命が来にくい傾向）。管理者には参考として穴寄りの買い目
     （1号艇を1着から外した上位10点・資金配分しない）
 
+  - 中穴〜万舟狙いの買い目（管理者だけ）: 1号艇の1着を外し、3連単オッズ30倍以上から確率順に10点。
+    朝の買い目は「仮（朝のオッズ）」。展示後に予想タブで予想すると、その時点のオッズで作り直して保存する
+
 表示は「荒れやすいレース」。「儲かる」とは書かない（検証で回収率が100%を超える根拠は無い）。
 """
 
@@ -179,19 +182,30 @@ def normal_frame(tickets, odds):
     return pd.DataFrame(rows)
 
 
+def prediction_sig(probs):
+    """予想の中身の目印（3連単確率が変われば変わる）。予想し直したかどうかの判定に使う。"""
+    import hashlib
+
+    text = ",".join(f"{k}:{v:.6f}" for k, v in sorted((probs or {}).items()))
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
 def _aim_caption(odds_at, morning=False):
     st.caption(manshu.AIM_NOTE + (f"（オッズ {jst_hhmm(odds_at)} 時点）" if odds_at else ""))
     if morning:
         st.caption(manshu.AIM_MORNING_NOTE)
 
 
-def render_aim_compare(mark, final, tickets, odds_df, is_admin=False):
-    """予想タブ: 印のレースで「通常の買い目（今のモデル）」と「万舟狙いの買い目」を並べる（管理者だけ）。"""
+def render_aim_compare(mark, final, tickets, odds_df, is_admin=False, pre_exhibition=False):
+    """予想タブ: 印のレースで「通常の買い目（今のモデル）」と「万舟狙いの買い目」を並べる（管理者だけ）。
+    展示後の予想（pre_exhibition でない）なら、オッズが無くてもその時点のオッズを取りに行き、買い目を作り直して
+    保存する（朝の仮の買い目を置き換える。朝のオッズでは30倍以上でも締切前に30倍を下回る組があるため）。"""
     if not mark or not is_admin:
         return
     from prediction import trifecta
 
     rk = mark["race_key"]
+    probs = manshu.tri_dict(trifecta(final)[["combo", "prob"]])
     odds = manshu.odds_dict(odds_df)
     at = None
     fresh = st.session_state.setdefault("manshu_pred_odds", {})
@@ -202,6 +216,17 @@ def render_aim_compare(mark, final, tickets, odds_df, is_admin=False):
             st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
     if fresh.get(rk):
         odds, at = fresh[rk]
+    if not odds and not pre_exhibition:
+        # 展示後の予想: 予想し直すたびに1回だけ、その時点のオッズを取る（画面を触るたびには取らない）
+        sig = (rk, prediction_sig(probs))
+        auto = st.session_state.setdefault("manshu_pred_auto", {})
+        if auto.get(rk, (None,))[0] != sig:
+            try:
+                auto[rk] = (sig, odds_for(rk, refresh=True))
+            except Exception as e:  # noqa: BLE001
+                st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
+                return
+        odds, at = auto[rk][1]
     if not odds:
         if not st.button("💰 オッズを取得して万舟狙いの買い目を作る", key=f"manshu_aim_pred_{rk}"):
             st.caption(f"{manshu.AIM_LABEL}はオッズが必要です（予想で「3連単オッズも取得」を入れるか、上のボタン）。")
@@ -212,7 +237,7 @@ def render_aim_compare(mark, final, tickets, odds_df, is_admin=False):
             st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
             return
     at = at or datetime.now(JST).isoformat(timespec="seconds")
-    aim = manshu.aim_tickets(manshu.tri_dict(trifecta(final)[["combo", "prob"]]), odds)
+    aim = manshu.aim_tickets(probs, odds)
     st.markdown(f"##### {manshu.ICON} 通常の買い目と{manshu.AIM_LABEL}（管理者だけ）")
     c1, c2 = st.columns(2)
     with c1:
@@ -294,6 +319,21 @@ def aim_text(tickets):
                     for t in (tickets or []))
 
 
+MORNING_TAG = "仮（朝のオッズ）"
+
+
+def aim_source_text(r):
+    """保存された買い目の作り方の説明。朝の買い目は「仮（朝のオッズ）」（展示後に予想すると作り直す）。"""
+    at = jst_hhmm(r.get("aim_odds_at"))
+    src = r.get("aim_source")
+    if src == "morning":
+        return (f"【{MORNING_TAG}】朝 {at} のオッズで作った仮の買い目です。展示後に予想タブで予想すると、"
+                "その時点のオッズで作り直します（「オッズを更新」でも取り直せます）")
+    if src == "predict":
+        return f"（予想タブで予想した {at} のオッズで作成・保存済み）"
+    return f"（{at} のオッズ・保存済み）"
+
+
 def aim_error_text(r):
     """朝の選定・取り直しで買い目を作れなかったときの文（例: 買い目を作れませんでした（オッズがまだ出ていません）・09:00）。"""
     at = jst_hhmm(r.get("aim_tried_at"))
@@ -319,7 +359,7 @@ def _manshu_tickets_block(d, r, passed):
     saved = r.get("aim_tickets") or []
     if passed:
         if saved:
-            st.caption(f"{manshu.AIM_LABEL}（締切前に最後に表示した買い目・{jst_hhmm(r.get('aim_odds_at'))} のオッズ）")
+            st.caption(f"{manshu.AIM_LABEL}（締切前に最後に保存した買い目）{aim_source_text(r)}")
             st.markdown(aim_text(saved))
         elif r.get("aim_error"):
             st.caption(f"{manshu.AIM_LABEL}: {aim_error_text(r)}")
@@ -347,11 +387,7 @@ def _manshu_tickets_block(d, r, passed):
         st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(at)} のオッズ・{which}の確率で作成）")
         st.markdown(aim_text(tickets) if tickets else "オッズ30倍以上の組がありません。")
     elif saved:
-        if r.get("aim_source") == "morning":
-            st.caption(f"{manshu.AIM_LABEL}（朝 {jst_hhmm(r.get('aim_odds_at'))} のオッズで作成。"
-                       "オッズは締切前に動くので「オッズを更新」で取り直せます）")
-        else:
-            st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(r.get('aim_odds_at'))} のオッズ・保存済み）")
+        st.caption(f"{manshu.AIM_LABEL}{aim_source_text(r)}")
         st.markdown(aim_text(saved))
     elif r.get("aim_error"):
         st.warning(f"{manshu.AIM_LABEL}: {aim_error_text(r)}　上のボタンでその時点のオッズから作り直せます。")

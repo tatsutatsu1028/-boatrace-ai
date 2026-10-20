@@ -22,16 +22,16 @@ ODDS = {"1-2-3": 4.5, "4-1-2": 150.0, "2-3-1": 120.0, "1-5-6": 300.0, "3-1-2": 9
 
 
 def test_aim_tickets_a():
-    t = manshu.aim_tickets(PROBS, ODDS, method="A")
+    t = manshu.aim_tickets(PROBS, ODDS, method="A", exclude=())
     assert [x["combo"] for x in t] == ["2-3-1", "4-1-2", "1-5-6", "5-6-4"]  # 100倍以上だけ・確率順（99.9倍は外す）
     assert t[0]["stake"] == 100 and t[0]["payout"] == 12000 and t[0]["odds"] == 120.0
 
 
 def test_aim_tickets_b_prefers_outer():
-    t = manshu.aim_tickets(PROBS, ODDS, method="B")
+    t = manshu.aim_tickets(PROBS, ODDS, method="B", exclude=())
     # 4〜6号艇が1着か2着の組（4-1-2・1-5-6・5-6-4）を先に、その中は確率順。残り（2-3-1）で埋める
     assert [x["combo"] for x in t] == ["4-1-2", "1-5-6", "5-6-4", "2-3-1"]
-    assert manshu.aim_tickets(PROBS, ODDS, method="B", n=2) == t[:2]
+    assert manshu.aim_tickets(PROBS, ODDS, method="B", n=2, exclude=()) == t[:2]
 
 
 def test_aim_tickets_mix_mid_and_high():
@@ -42,18 +42,34 @@ def test_aim_tickets_mix_mid_and_high():
     odds = {"1-2-3": 4.0, "1-3-2": 8.0, "2-1-3": 31.0, "3-1-2": 45.0, "1-2-4": 30.0, "1-4-2": 60.0,
             "4-1-2": 99.9, "5-1-2": 150.0, "6-1-2": 210.0, "2-3-1": 100.0, "4-5-6": 3000.0, "6-5-4": 2500.0,
             "5-6-4": 900.0}
-    t = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": 5, "万舟": 5}, order="prob")
+    t = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": 5, "万舟": 5}, order="prob", exclude=())
     assert [x["combo"] for x in t] == ["2-1-3", "3-1-2", "1-2-4", "1-4-2", "4-1-2",
                                        "5-1-2", "6-1-2", "2-3-1", "4-5-6", "6-5-4"]
     assert [x["tier"] for x in t] == ["中穴"] * 5 + ["万舟"] * 5  # 30倍ちょうどは中穴・100倍ちょうどは万舟
-    ev = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": 5, "万舟": 5}, order="ev")
+    ev = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": 5, "万舟": 5}, order="ev", exclude=())
     assert ev[5]["combo"] == "4-5-6"  # 万舟の中で確率×オッズが最大（0.004×3000=12）
     # 中穴が足りないときは万舟で埋める（合計10点）
     few = {k: v for k, v in odds.items() if not 30 <= v < 100 or k == "2-1-3"}
-    t2 = manshu.aim_tickets(probs, few, method="MIX", mix={"中穴": 5, "万舟": 5})
+    t2 = manshu.aim_tickets(probs, few, method="MIX", mix={"中穴": 5, "万舟": 5}, exclude=())
     assert len(t2) == 7 and [x["tier"] for x in t2].count("中穴") == 1  # 中穴1組＋万舟6組（全部）
     assert manshu.odds_tier(29.9) is None and manshu.odds_tier(30) == "中穴" and manshu.odds_tier(100) == "万舟"
-    assert manshu.aim_method_name() == "MIX5+5-prob"
+    assert manshu.aim_method_name() == "MIX5+5-prob-no1"
+
+
+def test_aim_tickets_exclude_lane1_first_by_default():
+    # 既定（本番）: 1号艇が1着の組は選ばない（1-5-6 は300倍でも外す）。2・3着の1号艇は残す
+    t = manshu.aim_tickets(PROBS, ODDS)
+    combos = [x["combo"] for x in t]
+    assert combos and all(not c.startswith("1") for c in combos)
+    assert "1-5-6" not in combos and "4-1-2" in combos
+    # 本命も外す（検証用）: 1着確率が一番高いのは 1号艇（0.21）なので結果は同じ。本命が2号艇なら2号艇も外す
+    assert manshu.aim_tickets(PROBS, ODDS, exclude=("1", "fav")) == t
+    probs2 = {**PROBS, "2-3-1": 0.30}
+    assert manshu.favorite_lane(probs2) == "2"
+    t2 = manshu.aim_tickets(probs2, ODDS, exclude=("1", "fav"))
+    assert all(x["combo"][0] not in "12" for x in t2)
+    assert manshu.excluded_first(probs2, ("1", "fav")) == {"1", "2"}
+    assert manshu.favorite_lane({}) is None
 
 
 def test_aim_tickets_missing_odds():
@@ -74,7 +90,7 @@ def test_aim_result_fields():
     aim = manshu.aim_tickets(PROBS, ODDS)
     row = {"tickets": [{"combo": "1-2-3", "stake": 2000}], "longshot_tickets": [], "aim_tickets": aim}
     out = pre_picks.manshu_result_fields(row, [("4-1-2", 15230)])
-    assert out["aim_hit"] is True and out["aim_stake"] == 500 and out["aim_return"] == 15230
+    assert out["aim_hit"] is True and out["aim_stake"] == 400 and out["aim_return"] == 15230
     assert out["is_manshu"] is True and out["main_hit"] is False
     assert "aim_hit" not in pre_picks.manshu_result_fields({"tickets": []}, [("4-1-2", 15230)])
 
@@ -430,3 +446,54 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print("ok", name)
+
+
+def test_aim_source_text_marks_morning_as_provisional():
+    import manshu_view
+
+    m = manshu_view.aim_source_text({"aim_source": "morning", "aim_odds_at": "2026-10-20T08:10:00+09:00"})
+    assert "仮（朝のオッズ）" in m and "08:10" in m
+    p = manshu_view.aim_source_text({"aim_source": "predict", "aim_odds_at": "2026-10-20T05:40:00Z"})
+    assert "予想タブで予想した 14:40" in p and "仮" not in p
+    a = manshu_view.prediction_sig({"1-2-3": 0.1, "2-1-3": 0.2})
+    assert a == manshu_view.prediction_sig({"2-1-3": 0.2, "1-2-3": 0.1}) != manshu_view.prediction_sig({"1-2-3": 0.3})
+
+
+def _aim_compare_app():
+    import pandas as pd
+    import streamlit as st
+
+    import manshu_view
+
+    calls = st.session_state.setdefault("calls", {"odds": 0, "save": []})
+
+    def fake_odds(rk, refresh=False):
+        calls["odds"] += 1
+        return {"2-1-3": 45.0, "1-2-3": 3.0, "1-3-2": 60.0, "4-1-2": 150.0}, "2026-10-20T14:40:00+09:00"
+
+    manshu_view.odds_for = fake_odds
+    manshu_view.save_aim = lambda rk, t, src, at: calls["save"].append((rk, [x["combo"] for x in t], src)) or True
+    final = pd.DataFrame({"lane": [1, 2, 3, 4, 5, 6], "p_first": [0.5, 0.2, 0.1, 0.1, 0.05, 0.05]})
+    mark = {"race_key": "20991231_01_12", "deadline": "23:59"}
+    manshu_view.render_aim_compare(mark, final, [], None, is_admin=True,
+                                   pre_exhibition=st.session_state.get("pre", False))
+
+
+def test_aim_compare_rebuilds_with_current_odds_after_exhibition():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_function(_aim_compare_app)
+    at.run()
+    assert not at.exception
+    calls = at.session_state["calls"]
+    # 展示後の予想: ボタンを押さなくても今のオッズを1回取り、1号艇1着を外した買い目を保存する
+    assert calls["odds"] == 1
+    rk, combos, src = calls["save"][-1]
+    assert src == "predict" and combos and all(not c.startswith("1") for c in combos)
+    at.run()  # 画面を触っただけ（予想は同じ）ではオッズを取り直さない
+    assert at.session_state["calls"]["odds"] == 1
+
+    pre = AppTest.from_function(_aim_compare_app)
+    pre.session_state["pre"] = True
+    pre.run()
+    assert pre.session_state["calls"]["odds"] == 0 and pre.session_state["calls"]["save"] == []
