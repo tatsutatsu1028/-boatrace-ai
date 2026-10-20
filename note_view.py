@@ -7,6 +7,9 @@
     Claude が失敗したら今までの決まった型の本文にする
   - 確定後も締切前なら、買い目・本文を保存し直せる（夜のまとめは保存した買い目で的中を判定する）
   - 予想カード画像（記事と同じ買い目・1着確率）を作って保存できる
+  - note に貼る用に、本文を「無料部分」（買い目なし）と「有料部分」に分けてコピーできる。
+    noteの有料ラインは段落の境目にしか置けないので、コピーは段落ごとに <p> にした形（HTML）と
+    空行で区切った文字にして、貼ったあとも段落が分かれたままになるようにする
 """
 
 from __future__ import annotations
@@ -124,6 +127,68 @@ def _copy_buttons(title, body):
         document.getElementById("copy-title").onclick = () => copyText(data.title);
         document.getElementById("copy-body").onclick = () => copyText(data.body);
         document.getElementById("copy-tags").onclick = () => copyText({json.dumps(na.HASHTAGS, ensure_ascii=False)});
+        </script>
+        """,
+        height=76,
+    )
+
+
+def _digest(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def _paste_html(text):
+    """空行で区切った段落 → 段落ごとの <p>（段落の中の改行は <br>）。noteに貼ると段落のまま入る。"""
+    import html
+    import re
+
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    return "".join("<p>" + "<br>".join(html.escape(ln) for ln in p.splitlines()) + "</p>" for p in paras)
+
+
+def _split_copy_buttons(free, paid):
+    payload = json.dumps({"free": [free, _paste_html(free)], "paid": [paid, _paste_html(paid)]},
+                         ensure_ascii=False).replace("</", "<\\/")
+    components.html(
+        f"""
+        <style>
+          body {{ margin:0; }}
+          .copy-row {{ display:grid; grid-template-columns:repeat(2,1fr); gap:6px; margin:2px 0 4px 0; }}
+          .copy-row button {{ min-height:44px; padding:6px 4px; cursor:pointer; font-size:13px; border-radius:10px; white-space:nowrap; }}
+          #split-status {{ font-size:13px; color:#9fe7a9; min-height:18px; text-align:center; }}
+        </style>
+        <div class="copy-row">
+          <button id="copy-free">📋 無料部分</button>
+          <button id="copy-paid">🔒 有料部分</button>
+        </div>
+        <div id="split-status"></div>
+        <script>
+        const parts = {payload};
+        const status = document.getElementById("split-status");
+        async function copyPart(name, label) {{
+          const [plain, html] = parts[name];
+          try {{
+            if (window.ClipboardItem && navigator.clipboard.write) {{
+              await navigator.clipboard.write([new ClipboardItem({{
+                "text/plain": new Blob([plain], {{type: "text/plain"}}),
+                "text/html": new Blob([html], {{type: "text/html"}}),
+              }})]);
+            }} else {{
+              await navigator.clipboard.writeText(plain);
+            }}
+            status.textContent = label + "をコピーしました";
+          }} catch (e) {{
+            try {{
+              await navigator.clipboard.writeText(plain);
+              status.textContent = label + "をコピーしました";
+            }} catch (e2) {{
+              status.textContent = "コピーできませんでした";
+            }}
+          }}
+          setTimeout(() => status.textContent = "", 1800);
+        }}
+        document.getElementById("copy-free").onclick = () => copyPart("free", "無料部分");
+        document.getElementById("copy-paid").onclick = () => copyPart("paid", "有料部分");
         </script>
         """,
         height=76,
@@ -249,6 +314,19 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
     digest = hashlib.sha1(body.encode("utf-8")).hexdigest()[:8]
     body = st.text_area("note本文（そのままコピー用）", value=body, height=420, key=f"note_body_{ctx}_{digest}")
     _copy_buttons(title, body)
+
+    # note に貼る用: 無料部分（買い目なし）と有料部分
+    free, paid = na.split_article(body, label, deadline)
+    st.markdown("##### ✂️ noteに貼る用（無料部分／有料部分）")
+    st.caption("noteでの手順: ① 無料部分を貼る → ② 改行する → ③ 有料部分を貼る → "
+               "④ 2つの境目（「ここから先は有料部分です」の下）に有料ラインを置く")
+    c1, c2 = st.columns(2)
+    with c1:
+        free = st.text_area("無料部分（買い目なし）", value=free, height=260, key=f"note_free_{ctx}_{_digest(body)}")
+    with c2:
+        paid = st.text_area("有料部分（買い目・詳しい展開）", value=paid, height=260,
+                            key=f"note_paid_{ctx}_{_digest(body)}")
+    _split_copy_buttons(free, paid)
 
     # 予想カード画像
     with st.expander("🖼 予想カード画像", expanded=False):
