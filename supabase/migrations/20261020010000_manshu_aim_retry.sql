@@ -25,6 +25,49 @@ where race_date = (now() at time zone 'Asia/Tokyo')::date
 
 revoke all on public.manshu_aim_missing from anon, authenticated;
 
+-- 画面で買い目を作ったら、作れなかった理由は消す（20261019000000_manshu_aim_tickets.sql の関数に1行足しただけ）
+create or replace function public.manshu_save_aim(
+  p_race_key text, p_tickets jsonb, p_method text, p_source text, p_odds_at timestamptz)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  pk record;
+  v_deadline timestamptz;
+begin
+  select race_date, deadline into pk from public.manshu_chance_picks where race_key = p_race_key;
+  if not found then
+    return false;
+  end if;
+  if jsonb_typeof(p_tickets) <> 'array' or jsonb_array_length(p_tickets) > 20 then
+    raise exception 'tickets must be an array of at most 20';
+  end if;
+  -- 締切後は書き換えない（結果を見てから差し替えられないように）
+  begin
+    v_deadline := (pk.race_date::text || ' ' || pk.deadline || ':00')::timestamp at time zone 'Asia/Tokyo';
+  exception when others then
+    v_deadline := null;
+  end;
+  if v_deadline is not null and now() >= v_deadline then
+    return false;
+  end if;
+  update public.manshu_chance_picks set
+    aim_tickets = p_tickets,
+    aim_method = left(p_method, 20),
+    aim_source = left(p_source, 20),
+    aim_odds_at = p_odds_at,
+    aim_saved_at = now(),
+    aim_error = null
+  where race_key = p_race_key and result_at is null;
+  return found;
+end;
+$$;
+
+revoke all on function public.manshu_save_aim(text, jsonb, text, text, timestamptz) from public;
+grant execute on function public.manshu_save_aim(text, jsonb, text, text, timestamptz) to anon, authenticated, service_role;
+
 -- 取り直し（cron の式は1つずつなので2つのジョブ）。止めるときは cron.unschedule でそれぞれ止める
 select cron.schedule(
   'trigger-manshu-aim-retry-0830',

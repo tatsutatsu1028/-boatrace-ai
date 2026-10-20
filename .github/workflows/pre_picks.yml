@@ -4,6 +4,8 @@ name: Pre-exhibition Picks
 #   task=run     : 前の日までの厳選レースの結果を記録し、その日の10レースを展示前モデルで選んで Supabase に保存する
 #   task=results : 結果の記録だけ
 #   task=manshu  : 結果の記録と、その日の「💥 万舟チャンス」だけ選び直す（厳選10は変えない）
+#   task=aim     : 中穴〜万舟狙いの買い目が空の万舟チャンスだけ、今のオッズで作り直す（08:30・09:00 JST に pg_cron から）
+#   task=check   : 万舟チャンスなのに買い目が空のレースがあれば失敗にする（点検用）
 # Supabase の pg_cron から毎朝 08:05 JST に起動する（朝の過去データ収集〜08:00 の後。
 # supabase/migrations/20261016000100_trigger_pre_picks_via_pg_cron.sql）。手動でも動かせる。
 # データ用リポジトリ（学習済みモデル・集計表・競走成績）は読むだけで、書き込まない。
@@ -12,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "run（選定＋結果）/ results（結果だけ）/ manshu（万舟チャンスだけ選び直す）"
+        description: "run（選定＋結果）/ results（結果だけ）/ manshu（万舟チャンスだけ選び直す）/ aim（空の買い目だけ作り直す）/ check（空の買い目の点検）"
         required: true
         default: "run"
       date:
