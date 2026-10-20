@@ -8,6 +8,8 @@ note の有料記事（展示後）の本文と、記事に載せる買い目。
   - 買い目の欄は Claude に書かせず、選んだ買い目からこのファイルで作って本文の後ろに付ける
     （記事・予想カード・夜のまとめの的中判定がずれないように）
   - Claude が失敗した・守るべきことを破ったときは、今までの決まった型（template_article）にする
+  - note に貼るときは本文を「無料部分」と「有料部分」に分ける（split_article）。無料部分はレース名・締切・
+    見どころ・展開の入りだけで、買い目（組番）は入れない。noteの有料ラインは段落の境目にしか置けないため
 
 Streamlit には依存しない（tests で確かめられるように）。
 """
@@ -27,7 +29,7 @@ from threads_poster import compact_combos, split_main_cover
 ARTICLE_MODEL = "claude-haiku-5-5"
 ARTICLE_TIMEOUT_SEC = 45.0
 ARTICLE_MAX_TOKENS = 6000
-ARTICLE_PROMPT_VERSION = "note-article-v1"
+ARTICLE_PROMPT_VERSION = "note-article-v2"
 SOURCES = ("model", "avg")
 SOURCE_LABELS = {"model": "モデルのみ予想", "avg": "両方の予想平均"}
 PRICE_YEN = 300
@@ -57,6 +59,8 @@ SYSTEM_PROMPT = """あなたはボートレース予想の note 記事を書く�
 - 数値を挙げるときは入力の値をそのまま使う。
 - 断定しすぎない（「〜と見ます」「〜が有力」「〜に期待」など）。「絶対」「鉄板」「確実」「間違いない」は使わない。
 - 3連単の組番（1-2-3 の形）を書くときは、渡された買い目に入っている組番だけにする。
+  組番を書いてよいのは ticket_comment だけ（lead・development は無料で読める部分に載るため、組番は書かない）。
+- development の最初の1文は、組番や本命を明かさない「展開の入り」（スタートの見立てなど）にする。
 - 買い目の一覧そのものは書かない（記事の後ろにこちらで付ける）。"""
 
 OUTPUT_SCHEMA = {
@@ -177,6 +181,58 @@ def compose(parts, tickets):
         "■ 買い目の考え方\n" + parts["ticket_comment"].strip(),
         ticket_block(tickets),
     ])
+
+
+_COMBO_RE = re.compile(r"(?<![\d-])[1-6]-[1-6]-[1-6](?![\d-])|[1-6]-[1-6]{2,}|[1-6]=[1-6]")
+_PAID_HEADS = ("■ 買い目の考え方", "【本線買い目】", "【抑え買い目】", "※")
+_DEV_HEAD = "■ 展示後の予想展開"
+PAYWALL_LEAD = "ここから先は有料部分です。展示後の詳しい予想展開と、買い目（本線・抑え）をお届けします。"
+
+
+def _has_combo(text):
+    return bool(_COMBO_RE.search(text))
+
+
+def _first_sentence(text):
+    """最初の1文と残り。1文しかないときは ("", text)（入りだけ出すと展開を全部見せてしまうため）。"""
+    m = re.search(r"[。！？!?]", text)
+    if not m or not text[m.end():].strip():
+        return "", text
+    return text[:m.end()].strip(), text[m.end():].strip()
+
+
+def split_article(body, race_label="", deadline=""):
+    """
+    本文を note に貼るための (無料部分, 有料部分) に分ける。どちらも段落を空行1つで区切った文字列。
+      無料: 【レース名｜締切】・あいさつ/見どころ・展開の入り（予想展開の最初の1文）・有料部分への案内
+      有料: 展示後の予想展開の続き・買い目の考え方・本線/抑えの買い目・注意書き
+    組番が入った段落は、見出しに関わらず有料側に回す（無料で買い目が見えないように）。
+    """
+    paras = [p.strip() for p in re.split(r"\n\s*\n", str(body or "").strip()) if p.strip()]
+    head = f"【{race_label}｜締切 {deadline}】" if race_label and deadline else (f"【{race_label}】" if race_label else "")
+    free, paid = ([head] if head else []), []
+    in_paid = False
+    for p in paras:
+        if in_paid or p.startswith(_PAID_HEADS):
+            in_paid = True
+            paid.append(p)
+        elif p.startswith(_DEV_HEAD):
+            in_paid = True
+            dev = p[len(_DEV_HEAD):].strip()
+            intro, rest = _first_sentence(dev)
+            if intro and not _has_combo(intro):
+                free.append(f"{_DEV_HEAD}\n{intro}")
+                paid.append(f"{_DEV_HEAD}（続き）\n{rest}")
+            else:
+                paid.append(p)
+        elif _has_combo(p):
+            paid.append(p)
+        else:
+            free.append(p)
+    if len(free) <= (1 if head else 0):
+        free.append("展示航走を見たうえでの予想です。")
+    free.append(PAYWALL_LEAD)
+    return "\n\n".join(free), "\n\n".join(paid)
 
 
 def write_with_claude(api_key, race_key, brief, tickets, model=ARTICLE_MODEL, force=False):
