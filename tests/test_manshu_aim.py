@@ -497,3 +497,24 @@ def test_aim_compare_rebuilds_with_current_odds_after_exhibition():
     pre.session_state["pre"] = True
     pre.run()
     assert pre.session_state["calls"]["odds"] == 0 and pre.session_state["calls"]["save"] == []
+
+
+def test_eval_excludes_lane1_and_favorite():
+    import pandas as pd
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    import manshu_eval as me
+
+    tri = pd.DataFrame({"race_key": ["r1"] * 4 + ["r2"] * 3,
+                        "combo": ["1-2-3", "2-1-3", "3-1-2", "4-5-6", "2-1-3", "1-2-3", "3-4-5"],
+                        "prob": [0.1, 0.5, 0.2, 0.2, 0.2, 0.6, 0.2]})
+    odds = tri[["race_key", "combo"]].assign(odds=[150.0, 40.0, 120.0, 300.0, 50.0, 3.0, 200.0])
+    fav = me.favorite_lanes(tri)
+    assert fav["r1"] == "2" and fav["r2"] == "1"
+    out = me.odds_strategies(tri, odds, n=10)
+    a = out[("A 確率順", "1号艇1着を外す（基本）")]
+    assert set(a["combo"]) == {"3-1-2", "4-5-6", "3-4-5"}
+    a2 = out[("A 確率順", "1号艇＋本命を1着から外す")]
+    assert set(a2.loc[a2.race_key == "r1", "combo"]) == {"3-1-2", "4-5-6"}  # r1 の本命（2号艇）も外す
+    mix = out[("本番 中穴＋万舟・確率順（30倍以上）", "1号艇1着を外す（基本）")]
+    assert set(mix.loc[mix.race_key == "r1", "combo"]) == {"2-1-3", "3-1-2", "4-5-6"}
