@@ -267,3 +267,85 @@ def test_wait_container(monkeypatch):
         raise AssertionError("例外が出ない")
     except RuntimeError as e:
         assert "bad" in str(e)
+
+
+class _Resp:
+    def __init__(self, code, data):
+        self.status_code = code
+        self._d = data
+        self.text = str(data)
+
+    def json(self):
+        return self._d
+
+
+def test_post_text_waits_finished_and_retries_publish(monkeypatch):
+    """返信は、下書きが FINISHED になってから公開する。公開の失敗は同じ下書きでやり直す。"""
+    log = []
+    statuses = iter(["IN_PROGRESS", "IN_PROGRESS", "FINISHED"])
+    publish = iter([_Resp(400, {"error": {"error_subcode": 4279009}}), _Resp(200, {"id": "post2"})])
+
+    def post(url, params=None, timeout=None):
+        if url.endswith("/threads"):
+            log.append(("create", params.get("reply_to_id")))
+            return _Resp(200, {"id": "container2"})
+        log.append(("publish", params["creation_id"]))
+        return next(publish)
+
+    def get(url, params=None, timeout=None):
+        log.append(("status", url.rsplit("/", 1)[-1]))
+        return _Resp(200, {"status": next(statuses)})
+
+    monkeypatch.setattr(tp.requests, "post", post)
+    monkeypatch.setattr(tp.requests, "get", get)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    assert tp.post_text("u", "t", "本文", reply_to_id="post1") == "post2"
+    assert log == [("create", "post1"), ("status", "container2"), ("status", "container2"),
+                   ("status", "container2"), ("publish", "container2"), ("publish", "container2")]
+
+
+def test_post_retry_waits_between_attempts(monkeypatch):
+    waits, n = [], []
+
+    def post(uid, token, text, reply_to_id=None):
+        n.append(1)
+        if len(n) < 3:
+            raise RuntimeError("boom")
+        return "ok"
+
+    monkeypatch.setattr(tm.tp, "post_text", post)
+    monkeypatch.setattr(tm.time, "sleep", waits.append)
+    assert tm._post_with_retry({"user_id": "u", "access_token": "t"}, "x", reply_to="p") == "ok"
+    assert waits == list(tm.POST_RETRY_WAITS)
+
+
+def test_retry_resumes_only_remaining_posts(monkeypatch):
+    # 2投稿目で止まった日を、残り（2・3投稿目）だけ出し直す。返信先は公開済みの1投稿目
+    db, calls = _setup(monkeypatch, fail_at=2)
+    tm.run("20261016")
+    assert db.rows[ISO]["status"] == "partial"
+    first_id = db.rows[ISO]["posts"][0]["post_id"]
+    db2, calls2 = _setup(monkeypatch)
+    db2.rows = db.rows
+    tm.run("20261016")  # retry なしでは出さない
+    assert calls2 == []
+    tm.run("20261016", retry=True)
+    row = db2.rows[ISO]
+    assert calls2 == [first_id, "id1"] and row["status"] == "posted" and row["attempts"] == 2
+    assert [p["post_id"] for p in row["posts"]] == [first_id, "id1", "id2"]
+    assert all(p["error"] is None for p in row["posts"])
+    tm.run("20261016", retry=True)
+    assert len(calls2) == 2  # 出し終わった日は出さない
+
+
+def test_retry_skips_races_near_deadline(monkeypatch):
+    db, calls = _setup(monkeypatch)
+    posts = [dict(tm._post_record(_pick(i, 0.5, dl, rno=i), f"本文{i}"))
+             for i, dl in ((1, "23:00"), (2, "09:20"), (3, "23:00"))]
+    posts[0]["post_id"] = "p1"
+    db.rows[ISO] = {"status": "partial", "posts": posts, "attempts": 1, "race_keys": []}
+    tm.run("20261016", retry=True)  # 今は 9:00。2投稿目は締切 9:20（30分未満）
+    row = db.rows[ISO]
+    assert calls == ["p1"] and row["status"] == "partial"
+    assert row["posts"][1]["post_id"] is None and "30分未満" in row["posts"][1]["error"]
+    assert row["posts"][2]["post_id"] == "id1"

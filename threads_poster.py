@@ -266,7 +266,11 @@ def _create_container(user_id, access_token, params):
     return creation_id
 
 
-def _publish(user_id, access_token, creation_id):
+# 公開が失敗したときの待ち時間（秒）。同じ下書きを公開し直すので、2回投稿にはならない
+PUBLISH_RETRY_WAITS = (5, 15, 30)
+
+
+def _publish_once(user_id, access_token, creation_id):
     r2 = requests.post(
         f"{API_BASE}/{user_id}/threads_publish",
         params={
@@ -283,6 +287,25 @@ def _publish(user_id, access_token, creation_id):
     if not post_id:
         raise RuntimeError(f"投稿IDが取得できませんでした: {r2.text[:300]}")
     return post_id
+
+
+def _publish(user_id, access_token, creation_id, waits=PUBLISH_RETRY_WAITS, sleep=None):
+    """下書き（コンテナ）が FINISHED になるのを待ってから公開し、公開済みの投稿IDを返す。
+
+    準備が終わる前に公開すると「Media Not Found（4279009）」になるため、先に状態を確かめる。
+    それでも失敗したら、間隔を空けて同じ下書きを公開し直す。
+    """
+    import time
+
+    sleep = sleep or time.sleep
+    wait_container(creation_id, access_token, sleep=sleep)
+    for wait in (*waits, None):
+        try:
+            return _publish_once(user_id, access_token, creation_id)
+        except (RuntimeError, requests.RequestException):
+            if wait is None:
+                raise
+            sleep(wait)
 
 
 def post_text(user_id, access_token, text, reply_to_id=None):
@@ -302,25 +325,34 @@ IMAGE_POLL_SEC = 3
 
 
 def wait_container(creation_id, access_token, max_sec=IMAGE_WAIT_SEC, poll_sec=IMAGE_POLL_SEC, sleep=None):
-    """画像付きの投稿コンテナが、スレッズ側で画像を読み終わる（FINISHED）まで待つ。"""
+    """投稿の下書き（コンテナ）が、スレッズ側で準備を終える（FINISHED）まで待つ。
+
+    テキストだけの投稿・返信でも、作った直後はまだ公開できないことがある。
+    """
     import time
 
     sleep = sleep or time.sleep
     waited = 0
     while True:
-        r = requests.get(
-            f"{API_BASE}/{creation_id}",
-            params={"fields": "status,error_message", "access_token": access_token},
-            timeout=TIMEOUT,
-        )
-        data = (r.json() or {}) if r.status_code < 400 else {}
-        status = str(data.get("status") or "").upper()
-        if status == "FINISHED":
+        status = ""
+        code = None
+        try:
+            r = requests.get(
+                f"{API_BASE}/{creation_id}",
+                params={"fields": "status,error_message", "access_token": access_token},
+                timeout=TIMEOUT,
+            )
+            code = r.status_code
+            data = (r.json() or {}) if r.status_code < 400 else {}
+            status = str(data.get("status") or "").upper()
+        except (requests.RequestException, ValueError):
+            data = {}
+        if status in ("FINISHED", "PUBLISHED"):
             return
         if status in ("ERROR", "EXPIRED"):
-            raise RuntimeError(f"画像を読み込めませんでした: {str(data.get('error_message') or status)[:300]}")
+            raise RuntimeError(f"投稿の下書きの準備に失敗しました: {str(data.get('error_message') or status)[:300]}")
         if waited >= max_sec:
-            raise RuntimeError(f"画像の読み込みが{max_sec}秒で終わりませんでした（{status or r.status_code}）")
+            raise RuntimeError(f"投稿の下書きの準備が{max_sec}秒で終わりませんでした（{status or code}）")
         sleep(poll_sec)
         waited += poll_sec
 
@@ -333,9 +365,7 @@ def post_image(user_id, access_token, text, image_url, reply_to_id=None):
     params = {"media_type": "IMAGE", "image_url": str(image_url), "text": text}
     if reply_to_id:
         params["reply_to_id"] = str(reply_to_id)
-    creation_id = _create_container(user_id, access_token, params)
-    wait_container(creation_id, access_token)
-    return _publish(user_id, access_token, creation_id)
+    return _publish(user_id, access_token, _create_container(user_id, access_token, params))
 
 
 _MARKS = ["◎", "○", "▲", "△", "×", "注"]

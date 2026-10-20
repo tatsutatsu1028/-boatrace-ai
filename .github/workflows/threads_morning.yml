@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       retry:
-        description: "1投稿もできなかった日をやり直す（true/false）"
+        description: "1投稿もできなかった日・途中で止まった日（残りだけ）をやり直す（true/false）"
         required: false
         default: "false"
 

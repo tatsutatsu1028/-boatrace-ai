@@ -12,7 +12,8 @@
   - アプリの設定（app_settings.threads_auto_post_enabled）が OFF なら投稿しない
   - 厳選が3レースそろわない日、厳選のデータに異常がある日は投稿しない（理由を記録する）
   - 投稿の成否・投稿したレース・買い目を threads_auto_posts に1日1行で記録する（アプリに表示）
-  - 同じ日に2回は投稿しない（--retry は、1投稿もできなかった日のやり直しだけ）
+  - 同じ日に2回は投稿しない（--retry は、1投稿もできなかった日の出し直しと、途中で止まった日の
+    残りの投稿だけの出し直し。残りは締切まで30分以上あるレースだけ出し、最後に出た投稿への返信にする）
 
 1投稿目には「本日の厳選3レース」画像（日付・会場・R・締切・本命。pick_card.render_morning_card）を付ける。
 画像は Supabase Storage の公開バケット threads-images の morning/ に置き、その公開URLをスレッズに渡す。
@@ -46,6 +47,8 @@ MIN_LEAD_MINUTES = 30
 WAIT_PICKS_MINUTES = 40
 # 投稿と投稿の間（返信の前に親の投稿が公開されるのを待つ）
 POST_INTERVAL_SEC = 5
+# 1投稿が失敗したときの、やり直しまでの待ち時間（秒）。下書きから作り直す
+POST_RETRY_WAITS = (15, 45)
 # 長期トークンはこの日数を過ぎたら延長する（期限60日）
 TOKEN_REFRESH_DAYS = 30
 TICKET_SOURCE = "model"
@@ -330,16 +333,74 @@ def _load_threads_config():
     return cfg
 
 
-def _post_with_retry(cfg, text, reply_to=None, attempts=2):
-    last = None
-    for i in range(attempts):
+def _post_with_retry(cfg, text, reply_to=None, waits=POST_RETRY_WAITS):
+    for wait in (*waits, None):
         try:
             return tp.post_text(cfg["user_id"], cfg["access_token"], text, reply_to_id=reply_to)
         except Exception as e:  # noqa: BLE001
-            last = e
-            if i + 1 < attempts:
-                time.sleep(10)
-    raise last
+            if wait is None:
+                raise
+            log(f"投稿に失敗したため{wait}秒後にやり直す: {type(e).__name__}")
+            time.sleep(wait)
+
+
+def remaining_posts(posts, now, lead=MIN_LEAD_MINUTES):
+    """途中で止まった日の出し直し: (出す投稿の番号, 締切が近くて出さない投稿の番号, 最後に出た投稿のID)。"""
+    todo, late, parent = [], [], None
+    for i, rec in enumerate(posts):
+        if rec.get("post_id"):
+            parent = rec["post_id"]
+            continue
+        dl = deadline_at(rec.get("race_key") and _key_date(rec["race_key"]), rec.get("deadline"))
+        if dl is not None and dl - now >= timedelta(minutes=lead):
+            todo.append(i)
+        else:
+            late.append(i)
+    return todo, late, parent
+
+
+def _key_date(race_key):
+    k = str(race_key)
+    return f"{k[:4]}-{k[4:6]}-{k[6:8]}"
+
+
+def _resume(iso, date, prev, attempts):
+    """途中で止まった日に、残りの投稿だけを、最後に出た投稿への返信として出し直す。"""
+    posts = [dict(p or {}) for p in (prev.get("posts") or [])]
+    keys = prev.get("race_keys") or [p.get("race_key") for p in posts]
+    todo, late, parent = remaining_posts(posts, datetime.now(JST))
+    for i in late:
+        posts[i]["error"] = f"出し直しの時点で締切まで{MIN_LEAD_MINUTES}分未満のため出さなかった"
+    if not todo:
+        _save(iso, status="partial", reason="出し直す投稿なし（締切が過ぎた・間近）", posts=posts,
+              race_keys=keys, attempts=attempts)
+        log(f"{date}: 出し直せる投稿なし（締切が近い {len(late)}件）")
+        return
+    cfg = _load_threads_config()
+    if not cfg:
+        log("失敗: スレッズ連携が未設定")
+        return
+    for i in todo:
+        posts[i]["error"] = None
+    _save(iso, status="partial", reason="出し直しを始めましたが終わっていません", posts=posts, race_keys=keys,
+          attempts=attempts)
+    for n, i in enumerate(todo):
+        if n:
+            time.sleep(POST_INTERVAL_SEC)
+        try:
+            posts[i]["post_id"] = _post_with_retry(cfg, posts[i]["text"], reply_to=parent)
+            parent = posts[i]["post_id"]
+        except Exception as e:  # noqa: BLE001
+            posts[i]["error"] = f"{type(e).__name__}: {e}"[:300]
+            _save(iso, status="partial", reason=f"出し直しの{i + 1}投稿目で失敗", posts=posts, race_keys=keys,
+                  attempts=attempts)
+            log(f"{date}: 出し直しの{i + 1}投稿目で失敗（{type(e).__name__}）")
+            return
+    done = all(p.get("post_id") for p in posts)
+    _save(iso, status="posted" if done else "partial",
+          reason=None if done else f"締切が近い{len(late)}件は出さなかった", posts=posts, race_keys=keys,
+          attempts=attempts, posted_at=datetime.now(JST).isoformat(timespec="seconds"))
+    log(f"{date}: 出し直しで{len(todo)}件を投稿（締切が近くて出さない {len(late)}件）")
 
 
 def run(date=None, retry=False, dry_run=False, writer=None):
@@ -347,15 +408,20 @@ def run(date=None, retry=False, dry_run=False, writer=None):
     date = date or now.strftime("%Y%m%d")
     iso = f"{date[:4]}-{date[4:6]}-{date[6:]}"
 
-    have = _json(_sb("GET", f"threads_auto_posts?race_date=eq.{iso}&select=status,posts,attempts"))
+    have = _json(_sb("GET", f"threads_auto_posts?race_date=eq.{iso}&select=status,posts,attempts,race_keys"))
     attempts = 1
     if have and not dry_run:
         prev = have[0]
-        any_posted = any((p or {}).get("post_id") for p in (prev.get("posts") or []))
-        if not retry or any_posted or prev.get("status") in ("posted", "partial"):
+        posts = prev.get("posts") or []
+        any_posted = any((p or {}).get("post_id") for p in posts)
+        all_posted = bool(posts) and all((p or {}).get("post_id") for p in posts)
+        if not retry or prev.get("status") == "posted" or all_posted:
             log(f"{date}: 記録済み（{prev.get('status')}）。同じ日には2回投稿しない")
             return
         attempts = int(prev.get("attempts") or 1) + 1
+        if any_posted:
+            _resume(iso, date, prev, attempts)
+            return
 
     def skip(reason):
         if dry_run:
@@ -441,7 +507,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("task", choices=["run"])
     ap.add_argument("--date", default="")
-    ap.add_argument("--retry", action="store_true", help="1投稿もできなかった日をやり直す")
+    ap.add_argument("--retry", action="store_true", help="1投稿もできなかった日・途中で止まった日をやり直す")
     ap.add_argument("--dry-run", action="store_true", help="本文を作るだけで投稿も記録もしない")
     a = ap.parse_args()
     run(a.date or None, retry=a.retry, dry_run=a.dry_run)
