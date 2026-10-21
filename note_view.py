@@ -1,8 +1,9 @@
 """
 予想タブの「📝 note記事（有料）」欄（管理者だけ）。
 
-  - 記事に載せる買い目を「モデルのみ予想」（初期値）か「両方の予想平均」から選ぶ。両方の予想平均は
-    そのレースで Claude の予想を取ったときだけ選べる
+  - 記事に載せる買い目を「モデルのみ予想」（初期値）か「両方の予想平均」か「中穴〜万舟狙いの買い目」から選ぶ。
+    両方の予想平均はそのレースで Claude の予想を取ったときだけ、中穴〜万舟狙いの買い目は万舟チャンスのレースで
+    買い目を作ってあるときだけ選べる
   - 「note記事用に確定」で、本文を Claude（Haiku）に書いてもらってから記事枠を確定する（全て有料300円）。
     Claude が失敗したら今までの決まった型の本文にする
   - 確定後も締切前なら、買い目・本文を保存し直せる（夜のまとめは保存した買い目で的中を判定する）
@@ -218,7 +219,9 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
 
     # 載せる買い目
     avg = na.avg_option(None, claude_tab.bundle(ctx)) or na.avg_option(_saved_claude_section(ctx))
-    options = ["model"] + (["avg"] if avg else [])
+    mark = _manshu_mark(ctx, d)
+    aim = na.aim_option(mark)
+    options = ["model"] + (["avg"] if avg else []) + (["aim"] if aim else [])
     current = (pub or {}).get("ticket_source") or "model"
     locked = bool(pub) and closed
     if locked:
@@ -229,8 +232,15 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
                           format_func=lambda m: na.SOURCE_LABELS[m], horizontal=True, key=f"note_source_{ctx}")
         if not avg:
             st.caption("「両方の予想平均」は、Claudeの予想を取ったレース（🧠／⚖️ のボタンで予想）だけ選べます。")
+        if mark and not aim:
+            st.caption("「中穴〜万舟狙いの買い目」は、上の万舟狙いの買い目を作ると選べます（オッズが必要）。")
+        if source == "aim":
+            st.caption("中穴〜万舟狙いの買い目（" + _aim_when(mark) + "）を「中穴」「万舟」に分けて載せ、"
+                       "本文も荒れる展開を中心に書きます。")
     if source == "avg" and avg:
         tickets, probs = avg
+    elif source == "aim" and aim:
+        tickets, probs = aim, na.p_first_map(saved_final)
     else:
         source = "model" if not locked else source
         tickets, probs = na.tickets_list(model_tickets), na.p_first_map(saved_final)
@@ -332,7 +342,7 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
     _split_copy_buttons(free, paid)
 
     # 見出し画像（自動で選ぶ・変えられる・記事ごとに記録）
-    render_header(ctx, d, date_iso, label, pub, work, body)
+    render_header(ctx, d, date_iso, label, pub, work, body, with_aim=na.is_aim(tickets))
 
     # 予想カード画像
     with st.expander("🖼 予想カード画像", expanded=False):
@@ -368,7 +378,23 @@ def _race_flags(ctx, d):
     return manshu_chance, pre_pick
 
 
-def render_header(ctx, d, date_iso, label, pub, work, body):
+def _manshu_mark(ctx, d):
+    """このレースの万舟チャンスの行（manshu_chance_picks）。印が無い・読めなければ None。"""
+    try:
+        import manshu_view
+
+        return manshu_view.marks_by_key(d).get(ctx)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _aim_when(mark):
+    import manshu_view
+
+    return manshu_view.aim_source_text(mark or {}).strip("（）")
+
+
+def render_header(ctx, d, date_iso, label, pub, work, body, with_aim=False):
     """見出し画像の欄。選んだ画像を出し、保存ボタンで端末に保存する。確定した記事なら使った画像を記録する。"""
     st.markdown("##### 🖼 見出し画像")
     keys = nh.available()
@@ -380,7 +406,7 @@ def render_header(ctx, d, date_iso, label, pub, work, body):
     except Exception:  # noqa: BLE001
         manshu_chance, pre_pick = False, False
     wind, wave = nh.water(work)
-    auto, why = nh.choose(manshu_chance=manshu_chance, with_aim=nh.with_aim_in_article(body),
+    auto, why = nh.choose(manshu_chance=manshu_chance, with_aim=with_aim or nh.with_aim_in_article(body),
                           wind=wind, wave=wave, pre_pick=pre_pick)
     saved = (pub or {}).get("header_image")
     current = saved if saved in keys else auto

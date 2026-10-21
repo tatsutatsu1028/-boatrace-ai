@@ -3597,6 +3597,19 @@ with tab1:
                     st.caption("🧵 保存された予想が無いため、スレッズ投稿は使えません。")
                 elif _threads_cfg:
                     with st.expander("🧵 スレッズに投稿", expanded=False):
+                        # 万舟チャンスのレース: 通常の予想の文か、中穴〜万舟狙いの文かを選ぶ
+                        # （初期値は note の記事に載せた買い目に合わせる）
+                        _threads_style = "normal"
+                        if _manshu_marks.get(ctx):
+                            _style_opts = ["normal", "aim"]
+                            _threads_style = st.radio(
+                                "スレッズの文章",
+                                _style_opts,
+                                index=1 if (_existing_pub or {}).get("ticket_source") == "aim" else 0,
+                                format_func=lambda m: {"normal": "通常の予想", "aim": "中穴〜万舟狙い"}[m],
+                                horizontal=True,
+                                key=f"threads_style_{ctx}",
+                            )
                         _default_text = threads_build_post_text(
                             race_date=d.strftime("%-m/%-d") if hasattr(d, "strftime") else str(d),
                             venue=VENUES[jcd],
@@ -3606,6 +3619,7 @@ with tab1:
                             deadline=(deadlines or {}).get(rno),
                             # note は全て有料。記事にしていないレースも有料記事の案内の型にする
                             publication_type=str((_existing_pub or {}).get("publication_type") or "PAID"),
+                            style=_threads_style,
                         )
 
                         _posted_key = f"threads_posted_{ctx}"
@@ -3619,7 +3633,7 @@ with tab1:
                             "投稿内容（送信前に編集できます）",
                             value=_default_text,
                             height=240,
-                            key=f"threads_text_v2_{ctx}",
+                            key=f"threads_text_v2_{ctx}_{_threads_style}",
                         )
                         _len = len(_text)
                         if _len > THREADS_TEXT_LIMIT:
