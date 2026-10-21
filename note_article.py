@@ -1,8 +1,10 @@
 """
 note の有料記事（展示後）の本文と、記事に載せる買い目。
 
-  - 載せる買い目は「モデルのみ予想」（初期値）か「両方の予想平均」。両方の予想平均は、
-    そのレースで Claude の予想を取ったとき（保存済み予想の "claude" に avg_tickets があるとき）だけ選べる
+  - 載せる買い目は「モデルのみ予想」（初期値）か「両方の予想平均」か「中穴〜万舟狙いの買い目」。両方の予想平均は、
+    そのレースで Claude の予想を取ったとき（保存済み予想の "claude" に avg_tickets があるとき）だけ、
+    中穴〜万舟狙いの買い目は万舟チャンスのレースで買い目を作ってあるとき（manshu_chance_picks.aim_tickets）だけ選べる。
+    中穴〜万舟狙いの買い目は本線・抑えではなく「中穴」「万舟」に分けて載せ、本文も荒れる展開を中心に書く
   - 本文は Claude（Haiku）が、選んだ買い目と展示後の予想展開をフレンドリーに書く
     （write_with_claude）。データに無いことは書かない・断定しすぎない（「絶対」「鉄板」は使わない）
   - 買い目の欄は Claude に書かせず、選んだ買い目からこのファイルで作って本文の後ろに付ける
@@ -29,9 +31,12 @@ from threads_poster import compact_combos, split_main_cover
 ARTICLE_MODEL = "claude-haiku-5-5"
 ARTICLE_TIMEOUT_SEC = 45.0
 ARTICLE_MAX_TOKENS = 6000
-ARTICLE_PROMPT_VERSION = "note-article-v2"
-SOURCES = ("model", "avg")
-SOURCE_LABELS = {"model": "モデルのみ予想", "avg": "両方の予想平均"}
+ARTICLE_PROMPT_VERSION = "note-article-v3"
+SOURCES = ("model", "avg", "aim")
+SOURCE_LABELS = {"model": "モデルのみ予想", "avg": "両方の予想平均", "aim": "中穴〜万舟狙いの買い目"}
+AIM_GROUPS = {"中穴": "中穴（オッズ30〜99倍）", "万舟": "万舟（オッズ100倍以上）"}
+AIM_NOTE = ("※中穴〜万舟狙いの買い目は、1号艇の1着を外し、3連単オッズ30倍以上の組からモデルの確率が高い順に"
+            "選んだ高配当狙いの買い目です。当たる確率は低めです。オッズは締切まで動きます。")
 PRICE_YEN = 300
 HASHTAGS = "#ボートレース #競艇 #展示 #予想"
 BANNED_WORDS = ("絶対", "鉄板", "確実", "間違いな", "100%", "１００％", "必ず当た", "勝ち確")
@@ -61,7 +66,13 @@ SYSTEM_PROMPT = """あなたはボートレース予想の note 記事を書く�
 - 3連単の組番（1-2-3 の形）を書くときは、渡された買い目に入っている組番だけにする。
   組番を書いてよいのは ticket_comment だけ（lead・development は無料で読める部分に載るため、組番は書かない）。
 - development の最初の1文は、組番や本命を明かさない「展開の入り」（スタートの見立てなど）にする。
-- 買い目の一覧そのものは書かない（記事の後ろにこちらで付ける）。"""
+- 買い目の一覧そのものは書かない（記事の後ろにこちらで付ける）。
+
+予想の種類が「中穴〜万舟狙いの買い目」のとき:
+- 載せる買い目は本線・抑えではなく、中穴（オッズ30〜99倍）と万舟（オッズ100倍以上）の組。どれも1号艇の1着を外している。
+- development は、1号艇以外が1着になる荒れる展開（スタートの遅れ・まくり・差しなど、データから言えること）を中心に書く。
+- ticket_comment では、中穴と万舟をどう狙うか（荒れる筋の考え方）を書く。「本線」「抑え」という言葉は使わない。
+- 当たりやすいとは書かない（高配当狙いで当たる確率は低めであることに触れてよい）。"""
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -110,8 +121,34 @@ def avg_option(section, session_bundle=None):
     return None
 
 
+def aim_option(mark):
+    """「中穴〜万舟狙いの買い目」 [{combo, group: "中穴"/"万舟"}]。mark は万舟チャンスの行（manshu_chance_picks）。
+    買い目を作っていなければ None。"""
+    rows = (mark or {}).get("aim_tickets") or []
+    out = [{"combo": str(t["combo"]).strip(), "group": t.get("tier") if t.get("tier") in AIM_GROUPS else "万舟"}
+           for t in rows if str(t.get("combo") or "").strip()]
+    return out or None
+
+
+def is_aim(tickets):
+    """中穴〜万舟狙いの買い目か（区分が中穴・万舟だけ）。"""
+    t = tickets_list(tickets)
+    return bool(t) and all(x["group"] in AIM_GROUPS for x in t)
+
+
+def aim_groups(tickets):
+    """中穴〜万舟狙いの買い目 → (中穴の組番, 万舟の組番)。"""
+    t = tickets_list(tickets)
+    return [x["combo"] for x in t if x["group"] == "中穴"], [x["combo"] for x in t if x["group"] == "万舟"]
+
+
 def ticket_block(tickets):
-    """記事の後ろに付ける買い目の欄（今までの記事と同じ型）。"""
+    """記事の後ろに付ける買い目の欄（今までの記事と同じ型。中穴〜万舟狙いの買い目は中穴・万舟に分ける）。"""
+    if is_aim(tickets):
+        mid, high = aim_groups(tickets)
+        lines = [f"【{AIM_GROUPS['中穴']}】"] + (compact_combos(mid) or ["なし"])
+        lines += ["", f"【{AIM_GROUPS['万舟']}】"] + (compact_combos(high) or ["なし"])
+        return "\n".join(lines + ["", AIM_NOTE, ""] + DISCLAIMER)
     main, cover = split_main_cover(tickets)
     lines = ["【本線買い目】"] + (compact_combos(main) or ["なし"])
     lines += ["", "【抑え買い目】"] + (compact_combos(cover) or ["なし"])
@@ -153,11 +190,16 @@ def build_brief(work, final, tickets, p_first, visual_rows, race_label, deadline
         if r is not None:
             b["想定ST"] = round(float(r["st"]), 2)
     order = [r["lane"] for r in sorted(visual_rows or [], key=lambda x: x["turn_rank"])]
-    main, cover = split_main_cover(tickets)
     brief.pop("model_version", None)
     brief["race"]["締切"] = deadline or None
     brief["1マークの想定の並び"] = "-".join(str(x) for x in order) if order else None
-    brief["載せる買い目"] = {"本線": main, "抑え": cover, "予想の種類": SOURCE_LABELS.get(source, source)}
+    if is_aim(tickets):
+        mid, high = aim_groups(tickets)
+        brief["載せる買い目"] = {AIM_GROUPS["中穴"]: mid, AIM_GROUPS["万舟"]: high,
+                             "予想の種類": SOURCE_LABELS["aim"]}
+    else:
+        main, cover = split_main_cover(tickets)
+        brief["載せる買い目"] = {"本線": main, "抑え": cover, "予想の種類": SOURCE_LABELS.get(source, source)}
     return brief
 
 
@@ -184,9 +226,10 @@ def compose(parts, tickets):
 
 
 _COMBO_RE = re.compile(r"(?<![\d-])[1-6]-[1-6]-[1-6](?![\d-])|[1-6]-[1-6]{2,}|[1-6]=[1-6]")
-_PAID_HEADS = ("■ 買い目の考え方", "【本線買い目】", "【抑え買い目】", "※")
+_PAID_HEADS = ("■ 買い目の考え方", "【本線買い目】", "【抑え買い目】", "【中穴", "【万舟", "※")
 _DEV_HEAD = "■ 展示後の予想展開"
 PAYWALL_LEAD = "ここから先は有料部分です。展示後の詳しい予想展開と、買い目（本線・抑え）をお届けします。"
+PAYWALL_LEAD_AIM = "ここから先は有料部分です。荒れる展開の読みと、中穴〜万舟狙いの買い目をお届けします。"
 
 
 def _has_combo(text):
@@ -231,7 +274,7 @@ def split_article(body, race_label="", deadline=""):
             free.append(p)
     if len(free) <= (1 if head else 0):
         free.append("展示航走を見たうえでの予想です。")
-    free.append(PAYWALL_LEAD)
+    free.append(PAYWALL_LEAD_AIM if any(p.startswith(("【中穴", "【万舟")) for p in paid) else PAYWALL_LEAD)
     return "\n\n".join(free), "\n\n".join(paid)
 
 

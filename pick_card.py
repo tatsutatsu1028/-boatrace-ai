@@ -83,15 +83,25 @@ def render_card(venue, race_no, deadline, race_date, tickets, p_first, visual_ro
         lane = max(p_first, key=lambda k: p_first[k])
         names = {int(r["lane"]): r.get("name") for r in (visual_rows or [])}
         favorite = (lane, names.get(lane) or "")
-    if favorite:
+    rows = tickets.to_dict("records") if hasattr(tickets, "to_dict") else list(tickets or [])
+    aim = bool(rows) and all(str(t.get("group")) in ("中穴", "万舟") for t in rows)
+    if aim:
+        # 中穴〜万舟狙いの買い目: 本命（1号艇のことが多い）は1着から外しているので、本命の行の代わりに狙いを書く
+        d.text((70, 178), "中穴〜万舟狙い（1号艇の1着を外す）", font=f_mid, fill=INK)
+    elif favorite:
         d.text((70, 178), f"◎本命 {favorite[0]}号艇 {favorite[1] or ''}".rstrip(), font=f_mid, fill=INK)
 
     # 買い目（多いときは MAX_TICKET_LINES 行まで出して残りの数を書く）
-    main, cover = (compact_combos(x) for x in split_main_cover(tickets))
+    if aim:
+        labels = ("中穴", "万舟")
+        main, cover = (compact_combos([str(t["combo"]) for t in rows if t.get("group") == g]) for g in labels)
+    else:
+        labels = ("本線", "抑え")
+        main, cover = (compact_combos(x) for x in split_main_cover(tickets))
     lines = max(1, min(MAX_TICKET_LINES, max(len(main), len(cover))))
     y = 262
     d.rounded_rectangle([40, y, W - 40, y + 86 + lines * 54], radius=24, fill=PANEL)
-    for col_x, label, combos in ((70, "本線", main), (W // 2 + 10, "抑え", cover)):
+    for col_x, label, combos in ((70, labels[0], main), (W // 2 + 10, labels[1], cover)):
         d.text((col_x, y + 22), label, font=f_mid, fill=ACCENT)
         cy = y + 74
         for c in (combos or ["なし"])[:MAX_TICKET_LINES]:

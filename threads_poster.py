@@ -516,8 +516,12 @@ def build_post_text(
     deadline=None,
     publication_type="FREE",
     note_url="https://note.com/tenji_kara",
+    style="normal",
 ):
-    """「今日も展示から。」用Threads下書き。投稿前にアプリ上で編集できる。"""
+    """「今日も展示から。」用Threads下書き。投稿前にアプリ上で編集できる。
+
+    style="aim": 万舟チャンスのレースで、中穴〜万舟狙いの買い目を案内する文（本命・相手は書かない）。
+    """
     venue = _clean(venue)
     try:
         rno = f"{int(race_no)}R"
@@ -540,7 +544,17 @@ def build_post_text(
     title = f"【{venue} {rno}｜展示後予想】"
     link = str(note_url or "").strip()
 
-    if kind == "PAID":
+    if style == "aim":
+        title = f"【{venue} {rno}｜万舟チャンス】"
+        parts = [
+            "💥 " + title,
+            "展示データ反映完了。",
+            "荒れやすいレースと判定しました。",
+            "1号艇の1着を外した\n中穴〜万舟狙いの3連単をまとめました。",
+        ]
+        parts.append("続きはプロフィールのnoteから☝️" if kind == "PAID"
+                     else "買い目はnoteに公開しました。\nプロフィールのリンクからどうぞ☝️")
+    elif kind == "PAID":
         parts = [
             "🔒 " + title,
             "展示データ反映完了。",
