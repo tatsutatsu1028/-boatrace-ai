@@ -5,6 +5,7 @@
   - レース一覧: 印のレースのRカードに 💥
   - 予想タブの日付の下: その日の印のレースの一覧（このレースを開く）。管理者には結果の成績も出す
   - 展示前厳選10: 万舟チャンスにも入っているレースに印
+  - 一覧・予想画面の本命: 「本命 1号艇 43%」。展示後に予想していれば展示後の1着確率、無ければ朝の1着確率
   - 予想画面: 印のレースなら注意書き（本命が来にくい傾向）。管理者には参考として穴寄りの買い目
     （1号艇を1着から外した上位10点・資金配分しない）
 
@@ -46,6 +47,13 @@ def load_results():
         return _get(q.format(_RESULT_COLS + ",aim_hit,aim_stake,aim_return"))
     except Exception:  # noqa: BLE001  万舟狙いの列がまだ無いデータベース
         return _get(q.format(_RESULT_COLS))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_compare():
+    """確定オッズで作った朝版・展示後版の買い目の結果（manshu_compare.py が毎晩書く）。"""
+    return _get("manshu_aim_compare?select=race_date,is_manshu,pre_hit,pre_stake,pre_return,post_hit,post_stake,"
+                "post_return&order=race_date.asc&limit=10000")
 
 
 MIGRATION = "supabase/migrations/20261018000000_create_manshu_chance_picks.sql"
@@ -270,6 +278,19 @@ def cancelled_jcds(d):
 # ---------------------------------------------------------------
 # 表示
 # ---------------------------------------------------------------
+def favorite_text(r):
+    """本命と1着確率（例: 本命 1号艇 43%（展示後の予想））。展示後に予想していれば展示後、無ければ朝の確率。"""
+    fav = manshu.favorite_now(r or {})
+    if not fav:
+        return None
+    lane, p, which = fav
+    text = f"本命 {lane}号艇" + (f" {p:.0%}" if p is not None else "") + f"（{which}の予想）"
+    morning = (r or {}).get("favorite_lane")
+    if which == "展示後" and morning is not None and int(morning) != lane:
+        text += f"　朝は {int(morning)}号艇"
+    return text
+
+
 def render_race_note(mark, final=None, model_info=None, is_admin=False):
     """予想画面: 印のレースの注意書き（管理者には render_aim_compare で万舟狙いの買い目を並べる）。"""
     if not mark:
@@ -280,6 +301,10 @@ def render_race_note(mark, final=None, model_info=None, is_admin=False):
     if post.get("prob") is not None:
         text += f" → 展示後 {float(post['prob']):.0%}"
     text += f"（全レースの平均 約{manshu.BASE_RATE:.0%}）"
+    # 今表示している予想の展示後の3連単確率があれば、それで本命を出す（一覧への反映を待たない）
+    fav = favorite_text({**mark, "post_tri_probs": post.get("tri") or mark.get("post_tri_probs")})
+    if fav:
+        text += f"<br>{fav}"
     st.markdown(
         f'<div style="border:2px solid #ea580c;border-radius:10px;padding:8px 12px;margin:4px 0 6px 0;'
         f'background:rgba(234,88,12,0.08);font-weight:700;">{text}</div>',
@@ -300,6 +325,9 @@ def _render_mark(d, r):
         if r.get("post_manshu_prob") is not None:
             line += f" → 展示後 **{float(r['post_manshu_prob']):.0%}**"
         st.markdown(line)
+        fav = favorite_text(r)
+        if fav:
+            st.markdown(fav)
         status = r.get("result_status")
         if status == "void":
             st.caption("結果: 中止・不成立")
@@ -434,6 +462,7 @@ def _spec():
         overall=_render_summary,
         other_marks_note="🌅 展示前厳選10（当たりやすいレース）にも入っています。",
         flag_note="（万舟チャンスからは外していません）",
+        favorite_line=favorite_text,
     )
 
 
@@ -475,6 +504,36 @@ def _render_summary():
     st.caption(f"全レースの万舟率は約{manshu.BASE_RATE:.0%}（過去2年）。本線 = 展示前の本線の買い目（2,000円）、"
                "穴寄り = 1号艇を1着から外した上位10点（各100円として記録）、"
                f"{manshu.AIM_LABEL} = 画面に表示した買い目（表示したレースだけ・各100円）。中止・不成立のレースは除いています。")
+    _render_compare(today)
+
+
+def _render_compare(today):
+    """確定オッズで作った朝版と展示後版の中穴〜万舟狙いの買い目を、同じレースで並べる。"""
+    st.markdown(f"**{manshu.AIM_LABEL}: 朝版と展示後版（確定オッズ・同じレースで比較）**")
+    try:
+        rows = load_compare()
+    except Exception as e:  # noqa: BLE001  表がまだ無いデータベース
+        st.caption(f"比較を読めませんでした（{type(e).__name__}）。"
+                   "`supabase/migrations/20261022000000_manshu_aim_compare.sql` の実行が必要かもしれません。")
+        return
+    out = []
+    for label, days in (("直近7日", 7), ("直近30日", 30), ("全期間", None)):
+        sub = [r for r in rows if days is None or r["race_date"] >= (today - timedelta(days=days)).isoformat()]
+        s = manshu.compare_summary(sub)
+        if s:
+            out.append({"期間": label, **s})
+    if not out:
+        st.caption("まだありません（レースの翌日以降、事後予想の後に毎晩作ります）。")
+        return
+    t = pd.DataFrame(out)
+    for c in t.columns:
+        if c.endswith(("的中率", "回収率")):
+            t[c] = t[c].map(_pct)
+    st.dataframe(t, hide_index=True, use_container_width=True)
+    st.caption("どちらもレース後の確定3連単オッズで、今と同じ作り方（1号艇の1着を外す・中穴5点＋万舟5点・確率順・各100円）で"
+               "作った買い目です。朝版 = 朝の3連単の確率（展示前）、展示後版 = 事後予想の3連単の確率（展示・直前情報も使う）。"
+               "両方の買い目があるレースだけを数えています。万舟の的中 = 的中したうち3連単が万舟だったレースの数。"
+               "確定オッズは締切前に見られるオッズとは違うため、実際に買えた成績ではありません。")
 
 
 def render_list(d, is_admin=False):

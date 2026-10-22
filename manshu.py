@@ -407,3 +407,52 @@ def aim_summary(df):
         "万舟狙い 回収率": float(pd.to_numeric(a["aim_return"], errors="coerce").fillna(0).sum()
                              / pd.to_numeric(a["aim_stake"], errors="coerce").fillna(0).sum()),
     }
+
+
+def first_probs(tri):
+    """3連単確率 {組番: 確率} → 1着確率 {艇番: 確率}（1着の艇で足す）。"""
+    out = {}
+    for combo, p in (tri or {}).items():
+        try:
+            lane = int(str(combo)[0])
+            out[lane] = out.get(lane, 0.0) + float(p)
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
+def favorite_now(r):
+    """印のレースの今の本命 (艇番, 1着確率, "展示後"/"朝")。展示後に予想していればその確率、無ければ朝の確率。"""
+    post = first_probs(r.get("post_tri_probs"))
+    if post:
+        lane = max(post, key=lambda k: (post[k], -k))
+        return lane, post[lane], "展示後"
+    if r.get("favorite_lane") is None:
+        return None
+    lane = int(r["favorite_lane"])
+    p = r.get("favorite_prob")
+    if p is None and r.get("p_first"):
+        p = r["p_first"][lane - 1]
+    return lane, (float(p) if p is not None else None), "朝"
+
+
+def compare_summary(rows):
+    """確定オッズで作った朝版と展示後版の買い目の成績（manshu_aim_compare の行）。
+    同じレースで比べるため、両方の買い目があるレースだけを数える。"""
+    df = pd.DataFrame(rows or [])
+    if df.empty:
+        return None
+    both = df[(pd.to_numeric(df.get("pre_stake"), errors="coerce").fillna(0) > 0)
+              & (pd.to_numeric(df.get("post_stake"), errors="coerce").fillna(0) > 0)]
+    if both.empty:
+        return None
+    out = {"レース数": int(len(both))}
+    manshu_race = both["is_manshu"].fillna(False).astype(bool)
+    for prefix, label in (("pre", "朝版"), ("post", "展示後版")):
+        hit = both[f"{prefix}_hit"].fillna(False).astype(bool)
+        stake = pd.to_numeric(both[f"{prefix}_stake"], errors="coerce").fillna(0).sum()
+        ret = pd.to_numeric(both[f"{prefix}_return"], errors="coerce").fillna(0).sum()
+        out[f"{label} 的中率"] = float(hit.mean())
+        out[f"{label} 回収率"] = float(ret / stake) if stake else None
+        out[f"{label} 万舟の的中"] = int((hit & manshu_race).sum())
+    return out
