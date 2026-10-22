@@ -23,6 +23,8 @@
   hindcast_predictions  1レース1行: 1着確率・本命・買い目候補・実際の3連単・的中・モデルの版
   hindcast_inputs       1艇1行: 予想に使った入力（結果の列は入れない）
   hindcast_runs         1日1行: 予想の設定・学習データの範囲（その日の保存完了の印も兼ねる）
+新しい予想モデル（--model ml）では、「💥 万舟チャンス」の印のレースだけ3連単の全120通りの確率も
+hindcast_predictions.tri_probs に残す（manshu_compare.py が確定オッズで展示後版の買い目を作る）。
 
 対象日は --start〜--end のうち、この版の予想がまだ保存されていない日。
 直近の競走成績ファイル（K）がまだ公開されていない日は飛ばし、次の晩に回す。
@@ -377,11 +379,22 @@ def _as_int(v):
         return None
 
 
-def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration=None, ml=None):
+def chain_tri(model, feats):
+    """新モデルの3連単の全120通りの確率 {組番: 確率}（朝の展示前版・アプリの展示後版と同じ作り方）。"""
+    import ml_model as mm
+
+    tri = mm.trifecta_table(*model.predict_tables(feats))
+    return {str(c): round(float(p), 6) for c, p in zip(tri["combo"], tri["prob"])}
+
+
+def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration=None, ml=None, tri_keys=None):
     """1日分の (予想行, 入力行) を返す。
 
     ml を渡したとき（新しい予想モデル。ml_day() の結果）は、1着〜3着をそのモデルで予想し、
     買い目の作り方・保存の形は今のモデルと同じにする（model_version で区別して並べて保存）。
+
+    tri_keys（新しい予想モデルのときだけ）: 3連単の全120通りの確率も残すレース（万舟チャンスの印のレース）。
+    渡したときは全部の行に tri_probs を入れる（印でないレースは空。まとめて保存するため列をそろえる）。
 
     calibration は的中確率の表示補正（hit_calibration）。その日より前のデータだけで
     作った補正のときに限り、補正後の値を残す（後で補正後の値の当てはまりを確かめるため）。
@@ -489,6 +502,8 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
             calibrated = apply_calibration(raw_hit_prob, calibration)
             pred_rows[-1]["candidate_hit_probability_calibrated"] = _clean(calibrated)
             pred_rows[-1]["hit_calibration_id"] = calibration.get("id") if calibrated is not None else None
+        if ml is not None and tri_keys is not None:
+            pred_rows[-1]["tri_probs"] = chain_tri(model, feats) if race_key in tri_keys else None
         for rec in race.to_dict("records"):
             input_rows.append({
                 "race_key": race_key,
@@ -521,12 +536,13 @@ def _saved_dates(start, end, version_filter=None):
     from auto_random_fix import _cfg, _headers, _request
 
     url, _ = _cfg()
+    filters = version_filter or [f"eq.{HINDCAST_MODEL_VERSION}"]
     r = _request(
         "GET",
         f"{url}/rest/v1/{RUN_TABLE}",
         params=[
             ("select", "race_date"),
-            ("model_version", version_filter or f"eq.{HINDCAST_MODEL_VERSION}"),
+            *(("model_version", f) for f in filters),
             ("race_date", f"gte.{pd.Timestamp(start):%Y-%m-%d}"),
             ("race_date", f"lte.{pd.Timestamp(end):%Y-%m-%d}"),
         ],
@@ -575,7 +591,11 @@ def _code_sha():
 # ---------------------------------------------------------------
 # 新しい予想モデル（ml_model.py）での事後予想
 # ---------------------------------------------------------------
-ML_VERSION_FILTER = "like.ml-chain*"
+# 展示前モデル（ml_pre.PRE_FAMILY。展示・直前情報を使わない）は事後予想に使わない。
+# 以前は models/ml-chain-pre-*.json も版の候補に入り、2026-10-15〜17 は展示前モデルで作っていた
+# （その日は保存済みと見なさないので、次の回に展示後のモデルで作り直す）。
+PRE_PREFIX = "ml-chain-pre"
+ML_VERSION_FILTER = ["like.ml-chain*", f"not.like.{PRE_PREFIX}*"]
 
 
 def ml_versions():
@@ -586,6 +606,8 @@ def ml_versions():
     for p in sorted(data_path("models").glob("ml-chain-*.json")):
         try:
             info = _json.loads(p.read_text(encoding="utf-8"))
+            if str(info["version"]).startswith(PRE_PREFIX):
+                continue
             out[info["version"]] = str(info["info"].get("calib_to") or info["info"].get("train_to"))
         except Exception:  # noqa: BLE001
             continue
@@ -619,6 +641,27 @@ def ml_day(day, version, sources):
         "version": f"{version}+{SECOND_FAVORITE_POLICY}",
         "features": dict(tuple(f.groupby("race_key"))),
     }
+
+
+def manshu_keys(start, end):
+    """その期間の万舟チャンスの印のレース {race_key}。読めなければ None（3連単確率は残さない）。"""
+    from auto_random_fix import _cfg, _headers, _request
+
+    try:
+        url, _ = _cfg()
+        r = _request(
+            "GET",
+            f"{url}/rest/v1/manshu_chance_picks",
+            params=[("select", "race_key"),
+                    ("race_date", f"gte.{pd.Timestamp(start):%Y-%m-%d}"),
+                    ("race_date", f"lte.{pd.Timestamp(end):%Y-%m-%d}")],
+            headers=_headers(),
+            timeout=30,
+        )
+        return {str(row["race_key"]) for row in r.json() or []}
+    except Exception as e:  # noqa: BLE001  印が読めなくても事後予想は続ける
+        print(f"[HINDCAST] 万舟チャンスの印を読めない: {type(e).__name__}", flush=True)
+        return None
 
 
 def main():
@@ -663,6 +706,7 @@ def main():
 
         versions = ml_versions()
         ml_sources = mf.load_sources(_ymd(pd.Timestamp(days[0]) - pd.Timedelta(days=400)), days[-1])
+    tri_keys = manshu_keys(days[0], days[-1]) if use_ml and days and not args.dry_run else None
     print(f"[HINDCAST] 補正 id={calibration['id'] if calibration else 'なし'}", flush=True)
     print(f"[HINDCAST] 版 {'新モデル ' + args.model if use_ml else HINDCAST_MODEL_VERSION}"
           f" / 対象 {len(days)}日 / code {code_sha}", flush=True)
@@ -693,7 +737,7 @@ def main():
                 print(f"[HINDCAST] {d}: 出走表・直前情報が未取得のため次回に回す", flush=True)
                 continue
         preds, inputs, run_row = run_day(
-            d, history_full, sample_history, k, runtime, code_sha, calibration, ml=ml,
+            d, history_full, sample_history, k, runtime, code_sha, calibration, ml=ml, tri_keys=tri_keys,
         )
         if not preds:
             continue

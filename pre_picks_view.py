@@ -129,6 +129,7 @@ class ListSpec:
     overall: Callable = None        # これまでの成績を描く
     other_marks_note: str = ""      # もう一方の一覧にも入っているレースに出す文
     flag_note: str = "（厳選からは外していません）"
+    favorite_line: Callable = None  # 行 → 本命の行（無ければ favorite_line）
 
 
 def favorite_line(r):
@@ -153,7 +154,7 @@ def render_card(d, r, spec, other_marks=None, cancelled=()):
         if spec.other_marks_note and r["race_key"] in (other_marks or {}):
             st.caption(spec.other_marks_note)
         st.markdown(spec.prob_line(r))
-        fav = favorite_line(r)
+        fav = (spec.favorite_line or favorite_line)(r)
         if fav:
             st.markdown(fav)
         if r.get("post_flag"):

@@ -1254,7 +1254,7 @@ def _on_main_tab_change():
     """管理者: 「🎯 予想」タブを押したら、一覧（展示前厳選10・万舟チャンス）を最新のデータで読み直す。"""
     if st.session_state.get("main_tabs") == _tab_labels[0]:
         for _f in (pre_picks_view.load_picks, pre_picks_view.load_results,
-                   manshu_view.load_marks, manshu_view.load_results):
+                   manshu_view.load_marks, manshu_view.load_results, manshu_view.load_compare):
             _f.clear()
 
 
