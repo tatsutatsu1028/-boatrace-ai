@@ -363,6 +363,8 @@ def aim_source_text(r):
                 "その時点のオッズで作り直します（「オッズを更新」でも取り直せます）")
     if src == "predict":
         return f"（予想タブで予想した {at} のオッズで作成・保存済み）"
+    if src == "auto":
+        return f"（展示後の自動予想で {at} のオッズで作成・保存済み）"
     return f"（{at} のオッズ・保存済み）"
 
 

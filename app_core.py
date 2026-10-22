@@ -24,11 +24,11 @@ from official_fetcher import (
     fetch_venue_result_list,
 )
 from today_schedule_fetcher import fetch_today_schedule, fetch_venue_deadlines
-from prediction import train, predict, trifecta, rank_tickets, adaptive_ticket_plan, confidence, assess_favorite_risk, research_prediction_variants, second_favorite_n_for
+from prediction import train, trifecta, confidence
 from hit_calibration import apply_calibration as apply_hit_calibration
-import ml_live
 from ml_model import is_ml_final
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
+from model_only import complete_adaptive_tickets, model_only_prediction
 import claude_tab
 import claude_usage
 import manshu_view
@@ -324,40 +324,8 @@ def _auto_random_progress():
         return None
 
 
-def _complete_adaptive_tickets(tickets, tri, odds, main_points, cover_points):
-    """予定点数に足りない買い目を、未採用の確率上位から補充する。"""
-    out = tickets.copy().drop_duplicates("combo", keep="first").reset_index(drop=True)
-    pool = tri.copy().drop_duplicates("combo", keep="first")
-    pool["prob"] = pd.to_numeric(pool["prob"], errors="coerce").fillna(0.0)
-
-    if odds is not None and len(odds) and {"combo", "odds"}.issubset(odds.columns):
-        odds_unique = odds[["combo", "odds"]].drop_duplicates("combo", keep="last")
-        pool = pool.merge(odds_unique, on="combo", how="left")
-    else:
-        pool["odds"] = np.nan
-    pool["odds"] = pd.to_numeric(pool["odds"], errors="coerce")
-    pool["expected_return"] = pool["prob"] * pool["odds"]
-
-    recommended = True
-    if "recommended" in out.columns and len(out):
-        recommended = bool(out["recommended"].fillna(True).all())
-
-    for group, target in (("本線", int(main_points)), ("抑え", int(cover_points))):
-        missing = target - int(out["group"].eq(group).sum())
-        if missing <= 0:
-            continue
-        picks = (
-            pool[~pool["combo"].isin(set(out["combo"]))]
-            .sort_values("prob", ascending=False)
-            .head(missing)
-            .copy()
-        )
-        picks["group"] = group
-        if "recommended" in out.columns:
-            picks["recommended"] = recommended
-        out = pd.concat([out, picks], ignore_index=True)
-
-    return out
+# 「モデルのみ予想」の計算は model_only.py（展示後の自動予想と共通）
+_complete_adaptive_tickets = complete_adaptive_tickets
 
 
 AUTH_TTL_SECONDS = 24 * 60 * 60
@@ -2754,99 +2722,24 @@ with tab1:
                 try:
                     with st.spinner("AI解析中…"):
                         model = train(history)
-                        pre = work.copy()
-                        # 比較用の「展示反映前」は通常展示タイムだけをOFFにする。
-                        # オリジナル展示（直線・まわり足・1周）は本番予想に使わない。
-                        # 天候・場特性・今節・コース・級別・決まり手は最終予想と同条件にする。
-                        pre["exhibition_time"] = np.nan
-                        pre["original_straight"] = np.nan
-                        pre["original_turn"] = np.nan
-                        pre["original_lap"] = np.nan
-                        pre["exhibition_st"] = np.nan
-                        before = predict(
-                            model,
-                            pre,
-                            display_weight=0,
-                            weather_weight=weather_weight,
-                            venue_course_weight=venue_course_weight,
-                            original_display_scale=0.0,
+                        _mo = model_only_prediction(
+                            model, work, odds,
+                            {
+                                "display_weight": display_weight,
+                                "weather_weight": weather_weight,
+                                "venue_course_weight": venue_course_weight,
+                                "hedge_enabled": hedge_enabled,
+                                "longshot_min_prob_pct": longshot_min_prob_pct,
+                                "total_budget": total_budget,
+                                "min_bet": min_bet,
+                                "value_bias": value_bias,
+                            },
+                            load_prediction_model_setting(), d.strftime("%Y%m%d"), jcd, rno,
                         )
-                        final = predict(
-                            model,
-                            work,
-                            display_weight=display_weight,
-                            weather_weight=weather_weight,
-                            venue_course_weight=venue_course_weight,
-                            original_display_scale=0.0,
-                        )
-                        # app_settings.prediction_model が新しいモデルなら、そのモデルの予想を
-                        # 本番に使う（自動固定と同じ ml_live.production_final）。使えなかった
-                        # レース（過去のレース・集計表が古い など）は今のモデルの予想のまま。
-                        current_final = final
-                        ml_final, model_info = ml_live.production_final(
-                            load_prediction_model_setting(), work, d.strftime("%Y%m%d"), jcd, rno,
-                        )
-                        before_label = None
-                        if ml_final is not None:
-                            final = ml_final
-                            # 新しいモデルは展示前だけの予想を出せないので、今までのモデルと並べる
-                            before = current_final
-                            before_label = "今までのモデル"
-
-                        # 研究用の比較は別計算。final（本番予想）は一切変更しない。
-                        research_variants = research_prediction_variants(
-                            model,
-                            work,
-                            display_weight=display_weight,
-                            weather_weight=weather_weight,
-                            venue_course_weight=venue_course_weight,
-                        )
-                        if ml_final is not None:
-                            research_variants = {"今までのモデル": current_final, **(research_variants or {})}
-                        tri = trifecta(final)
-                        ticket_plan = adaptive_ticket_plan(final)
-                        target_points = int(ticket_plan["point_count"])
-                        main_points = min(int(ticket_plan["main_n"]), target_points)
-                        cover_points = target_points - main_points
-
-                        favorite_lane, risk_score, risk_reasons = assess_favorite_risk(work, final)
-                        hedge_lane = favorite_lane if (hedge_enabled and risk_score >= 2) else None
-
-                        tickets = rank_tickets(
-                            tri,
-                            odds,
-                            main_n=main_points,
-                            cover_n=cover_points,
-                            longshot_n=0,
-                            longshot_min_prob=float(longshot_min_prob_pct) / 100.0,
-                            hedge_lane=hedge_lane,
-                            first=final,
-                            min_second_coverage=ticket_plan["min_second_coverage"],
-                            close_third_gap=None,
-                            close_third_coverage=4,
-                            second_favorite_n=second_favorite_n_for(final),
-                        )
-                        tickets = _complete_adaptive_tickets(
-                            tickets,
-                            tri,
-                            odds,
-                            main_points=main_points,
-                            cover_points=cover_points,
-                        )
-                        if len(tickets) != target_points:
-                            raise RuntimeError(
-                                f"買い目点数の生成不整合: 予定{target_points}点 / 実際{len(tickets)}点"
-                            )
-                        tickets = allocate_stakes_smart(
-                            tickets,
-                            budget=int(total_budget),
-                            unit=100,
-                            min_bet=int(min_bet),
-                            max_longshot_share=0.15,
-                            max_ticket_share=0.35,
-                            value_bias=float(value_bias),
-                            guarantee_col="second_favorite",
-                        )
+                        before, before_label, model_info = _mo["before"], _mo["before_label"], _mo["model_info"]
+                        final, tickets, hedge_lane = _mo["final"], _mo["tickets"], _mo["hedge_lane"]
+                        risk_reasons, research_variants = _mo["risk_reasons"], _mo["research_variants"]
+                        ticket_plan = _mo["ticket_plan"]
                         st.session_state["result"] = {
                             "context": ctx,
                             "before": before,
@@ -2954,6 +2847,8 @@ with tab1:
                         _saved_label += "（過去レース・バックテスト）"
                     if _saved_meta.get("pre_exhibition"):
                         _saved_label += "【展示前】"
+                    if _saved_meta.get("collector_name") == "auto_post":
+                        _saved_label += "（展示後の自動予想）"
                 if _save_status in {"inserted", "updated"}:
                     st.success(
                         "📌 この予想を保存しました。"

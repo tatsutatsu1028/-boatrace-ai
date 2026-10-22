@@ -108,6 +108,24 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 締切20分後以降に `auto_result_collect.py` の最後で1回ずつ読む。一覧では、結果待ちは「結果待ち」、中止の会場は「中止」と出す。
 - データベース: `supabase/migrations/20261019000000_manshu_aim_tickets.sql`（SQL Editor で実行する）
 
+## 🤖 展示後の自動予想（厳選10・万舟チャンス）
+その日の「🌅 展示前厳選10」と「💥 万舟チャンス」のレース（重複は1回）を、締切の20〜10分前に自動で予想します（`auto_post_predict.py`）。
+5分おき（JST 8:00〜22:55。pg_cron → `auto_post_predict.yml`）に動きます。
+
+- 締切は朝に保存している当日の締切時刻（`daily_schedule.deadlines`）。中止の会場は見送り
+- 締切20〜10分前で展示タイムが6艇そろっていれば予想する。そろっていなければ5分後にもう一度。10分前を過ぎてもそろわなければ見送り、理由を残す
+- 予想は予想タブの「🤖 モデルのみ予想」と同じ計算（`model_only.py`。アプリも同じ関数を使う）で、同じ関数（`save_latest_prediction_snapshot`）で保存する。
+  一覧の展示後の欄は今までのトリガーが書く。Claude の予想は使わない
+- 1レース1回だけ。展示後の予想が保存済み（手動・自動固定）ならスキップ。展示前に保存された予想は上書きする
+- 印: `collector_name = auto_post`（自動固定の `auto_random` とは別。自動固定の件数・`auto_result_collect.py` には数えない）。
+  結果は手動の予想と同じくオッズ追跡が `prediction_results` に1レース1行で記録する（collector_name も `auto_post`）
+- 万舟チャンスのレースは、展示後の3連単の確率とその時点のオッズで中穴〜万舟狙いの買い目を作り直して保存する（`aim_source = auto`）
+- 記録: `auto_post_log`（1レース1行。状態・理由・確かめた回数・万舟狙いの買い目）。毎晩 23:10 JST に task=report が
+  対象レース数・予想できた数・予想済みでスキップ・見送り（理由ごと）をログに出す
+- 何時に動くか: `python auto_post_predict.py plan --date YYYYMMDD`（保存しない。手元では会場名つき）
+- データベース: `supabase/migrations/20261025000000_auto_post_predict.sql`
+- 止めるとき: `select cron.unschedule('trigger-auto-post-predict');`（夜の集計は `trigger-auto-post-report`）
+
 ## 🧵 スレッズ・note の投稿（管理者だけ）
 ### 朝の無料3レース（スレッズの自動投稿）
 毎朝 09:00 JST（pg_cron → `threads_morning.yml`）に、その日の「🌅 展示前厳選10」から、投稿時刻から30分以上先に
