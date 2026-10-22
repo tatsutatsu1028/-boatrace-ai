@@ -456,3 +456,44 @@ def compare_summary(rows):
         out[f"{label} 回収率"] = float(ret / stake) if stake else None
         out[f"{label} 万舟の的中"] = int((hit & manshu_race).sum())
     return out
+
+
+VARIANT_NAMES = {"A": "A 確率順 中穴5＋万舟5（今）", "B": "B 期待値順 中穴5＋万舟5",
+                 "C": "C 確率順 中穴3＋万舟7", "D": "D 期待値順 中穴3＋万舟7"}
+VARIANT_SKIP_P1 = 0.5       # 見送りあり: その版の1号艇の1着確率がこれ以上のレースは買わない
+
+
+def variant_summary(rows):
+    """作り方ごとの成績（manshu_aim_compare.variants）。朝版・展示後版の両方が作れたレースだけで比べる。
+    見送りありは、そのうちその版の1号艇の1着確率が VARIANT_SKIP_P1 以上のレースを買わない。"""
+    both = []
+    for r in rows or []:
+        v = r.get("variants") or {}
+        pre, post = v.get("pre") or {}, v.get("post") or {}
+        if all(s and not s.get("error") and all(k in s for k in VARIANT_NAMES) for s in (pre, post)):
+            both.append((r, v))
+    if not both:
+        return []
+    out = []
+    for side, side_label in (("pre", "朝版"), ("post", "展示後版")):
+        for skip in (False, True):
+            for name, label in VARIANT_NAMES.items():
+                races = hits = manshu_hits = stake = ret = 0
+                prob_sum = 0.0
+                for r, v in both:
+                    s = v[side]
+                    if skip and float(s.get("p1") or 0) >= VARIANT_SKIP_P1:
+                        continue
+                    x = s[name]
+                    races += 1
+                    stake += int(x.get("stake") or 0)
+                    ret += int(x.get("return") or 0)
+                    prob_sum += float(x.get("prob_sum") or 0)
+                    if x.get("hit"):
+                        hits += 1
+                        manshu_hits += bool(r.get("is_manshu"))
+                out.append({"版": side_label, "見送り": "あり" if skip else "なし", "作り方": label,
+                            "レース数": races, "的中数": hits, "的中率": hits / races if races else None,
+                            "回収率": ret / stake if stake else None, "万舟の的中": manshu_hits,
+                            "確率の合計": round(prob_sum, 2)})
+    return out
