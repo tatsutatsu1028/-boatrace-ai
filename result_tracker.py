@@ -2200,6 +2200,49 @@ ANALYSIS_VIEWS = {
 }
 
 
+CLAUDE_COMPARE_COLUMNS = [
+    "race_key", "race_date", "predicted_first_hit", "candidate_hit", "total_stake", "payout",
+    *claude_reader.RESULT_COLUMNS,
+]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_claude_results():
+    """Claude の予想があるレース（claude_model あり）の、モデルのみ・Claudeのみ・両方の平均の当たり外れ。
+    読めなければ空の表（Claude の列が無い DB も含む）。"""
+    if not _use_supabase():
+        return pd.DataFrame(columns=CLAUDE_COMPARE_COLUMNS)
+    try:
+        url, _ = _supabase_config()
+        r = requests.get(
+            f"{url}/rest/v1/{SUPABASE_TABLE}",
+            params={"select": ",".join(CLAUDE_COMPARE_COLUMNS), "claude_model": "not.is.null",
+                    "order": "race_date.desc", "limit": "10000"},
+            headers=_headers(),
+            timeout=20,
+        )
+        r.raise_for_status()
+        return _normalize_df(pd.DataFrame(r.json() or []), CLAUDE_COMPARE_COLUMNS)
+    except Exception as e:
+        print("[RESULT_TRACKER] claude results load error:", type(e).__name__, str(e), flush=True)
+        return pd.DataFrame(columns=CLAUDE_COMPARE_COLUMNS)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_hindcast_daily():
+    """全レースの事後予想を1日・モデルごとにまとめたビュー（hindcast_model_daily）の全行。
+    ビューがまだ無い・読めないときは例外（呼び出し側で SQL の実行が必要かもしれないと出す）。"""
+    url, _ = _supabase_config()
+    r = requests.get(
+        f"{url}/rest/v1/hindcast_model_daily",
+        params={"select": "*", "order": "race_date.asc", "limit": "10000"},
+        headers=_headers(),
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json() or []
+
+
 def load_analysis_view(kind):
     """
     Supabase上のPhase 4分析ビューをDataFrameで取得する。

@@ -17,14 +17,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
 import manshu
-from pre_picks_view import _deadline_passed, _get, _open_race, _pct, _yen
+from pre_picks_view import PERIODS, _deadline_passed, _get, _open_race, _pct, _yen, in_period, period_rows
 from result_tracker import _supabase_config
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -492,13 +492,7 @@ def _render_summary():
         st.caption("結果の出たレースはまだありません（レースが終わるとその日のうちに記録します）。")
         return
     today = datetime.now(JST).date()
-    out = []
-    for label, days in (("直近7日", 7), ("直近30日", 30), ("全期間", None)):
-        sub = [r for r in rows if days is None or r["race_date"] >= (today - timedelta(days=days)).isoformat()]
-        s = manshu.summarize(sub)
-        if s:
-            out.append({"期間": label, **s})
-    t = pd.DataFrame(out)
+    t = pd.DataFrame(period_rows(rows, today, manshu.summarize))
     for c in t.columns:
         if c.startswith(("万舟率",)) or c.endswith(("的中率", "回収率")):
             t[c] = t[c].map(_pct)
@@ -511,7 +505,34 @@ def _render_summary():
     _render_compare(today)
 
 
-def _render_compare(today):
+def render_validation(today, normal_rate=None):
+    """検証タブ: 選んだレースの万舟率（普段の万舟率と並べて）と、中穴〜万舟狙いの朝版・展示後版の比較。
+    集計は予想タブの成績と同じ関数（manshu.summarize・compare_summary・variant_summary）。
+    normal_rate: 日付の集合 → その日の全レースの万舟率（分からなければ None）"""
+    try:
+        rows = load_results()
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"成績を読めませんでした: {type(e).__name__}")
+        return
+    if not rows:
+        st.caption("結果の出たレースはまだありません（レースが終わるとその日のうちに記録します）。")
+    else:
+        out = []
+        for label, days in PERIODS:
+            sub = in_period(rows, days, today)
+            s = manshu.summarize(sub)
+            if not s:
+                continue
+            base = normal_rate({str(r["race_date"]) for r in sub}) if normal_rate else None
+            out.append({"期間": label, "レース数": s["レース数"], "万舟率": _pct(s["万舟率"]),
+                        "全レースの万舟率": _pct(base), "3連単の配当の中央値": _yen(s["3連単の配当の中央値"])})
+        st.dataframe(pd.DataFrame(out), hide_index=True, use_container_width=True)
+        st.caption("全レースの万舟率 = 選んだレースがあった日の全レース（事後予想で結果の出たレース）。"
+                   f"過去2年の全レースでは約{manshu.BASE_RATE:.0%}。中止・不成立のレースは除いています。")
+    _render_compare(today, key="validation_manshu_variant_period")
+
+
+def _render_compare(today, key="manshu_variant_period"):
     """確定オッズで作った朝版と展示後版の中穴〜万舟狙いの買い目を、同じレースで並べる。"""
     st.markdown(f"**{manshu.AIM_LABEL}: 朝版と展示後版（確定オッズ・同じレースで比較）**")
     try:
@@ -520,12 +541,7 @@ def _render_compare(today):
         st.caption(f"比較を読めませんでした（{type(e).__name__}）。"
                    "`supabase/migrations/20261022000000_manshu_aim_compare.sql` の実行が必要かもしれません。")
         return
-    out = []
-    for label, days in (("直近7日", 7), ("直近30日", 30), ("全期間", None)):
-        sub = [r for r in rows if days is None or r["race_date"] >= (today - timedelta(days=days)).isoformat()]
-        s = manshu.compare_summary(sub)
-        if s:
-            out.append({"期間": label, **s})
+    out = period_rows(rows, today, manshu.compare_summary)
     if not out:
         st.caption("まだありません（レースの翌日以降、事後予想の後に毎晩作ります）。")
         return
@@ -538,15 +554,14 @@ def _render_compare(today):
                "作った買い目です。朝版 = 朝の3連単の確率（展示前）、展示後版 = 事後予想の3連単の確率（展示・直前情報も使う）。"
                "両方の買い目があるレースだけを数えています。万舟の的中 = 的中したうち3連単が万舟だったレースの数。"
                "確定オッズは締切前に見られるオッズとは違うため、実際に買えた成績ではありません。")
-    _render_variants(rows, today)
+    _render_variants(rows, today, key)
 
 
-def _render_variants(rows, today):
+def _render_variants(rows, today, key="manshu_variant_period"):
     """作り方ごと（A〜D・見送りあり/なし）の成績を、朝版・展示後版で並べる（検証だけ）。"""
     st.markdown(f"**{manshu.AIM_LABEL}: 作り方の比較（確定オッズ・同じレースで比較・検証用）**")
-    period = st.radio("期間", ("全期間", "直近30日", "直近7日"), horizontal=True, key="manshu_variant_period")
-    days = {"直近7日": 7, "直近30日": 30}.get(period)
-    sub = [r for r in rows if days is None or r["race_date"] >= (today - timedelta(days=days)).isoformat()]
+    period = st.radio("期間", ("全期間", "直近30日", "直近7日"), horizontal=True, key=key)
+    sub = in_period(rows, {"直近7日": 7, "直近30日": 30}.get(period), today)
     out = manshu.variant_summary(sub)
     if not out:
         st.caption("まだありません（レースの翌日以降、事後予想の後に毎晩作ります。"

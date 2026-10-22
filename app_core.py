@@ -36,6 +36,7 @@ import pre_picks_view
 import note_view
 import threads_auto_view
 import daily_review
+import validation_view
 from race_visuals import (
     ANIMATION_HEIGHT,
     build_visual_rows,
@@ -49,25 +50,16 @@ from original_exhibition_ocr import extract_original_exhibition, OCR_AVAILABLE
 from result_tracker import (
     load_results,
     load_results_full,
-    load_research_payloads,
-    load_ticket_payloads,
     load_result_detail,
     ResultsLoadError,
     load_analysis_view,
     delete_result,
-    metrics as validation_metrics,
-    calibration_table,
-    hit_probability_calibration_table,
     load_hit_calibration,
-    STAKE_PERIODS,
-    filter_by_stake_period,
     MODEL_PERIODS,
     filter_by_model,
     load_prediction_model_switches,
     model_period_comparison,
-    load_stake_policy_switched_at,
     load_prediction_model_setting,
-    stake_period_comparison,
     load_settings,
     save_settings,
     odds_tracking_available,
@@ -657,163 +649,6 @@ def ensure_columns(df, defaults):
         if c not in out.columns:
             out[c] = default
     return out
-
-def _virtual_ticket_rows(raw):
-    """保存済みtickets_jsonを安全にlist[dict]へ戻す。"""
-    if raw is None:
-        return []
-
-    try:
-        if pd.isna(raw):
-            return []
-    except Exception:
-        pass
-
-    try:
-        parsed = json.loads(str(raw))
-    except Exception:
-        return []
-
-    if not isinstance(parsed, list):
-        return []
-
-    return [item for item in parsed if isinstance(item, dict)]
-
-
-def _virtual_backtest(results_df, min_p1_prob=None, groups=None):
-    """
-    保存済みの固定買い目から「見送るレース／買わない区分」を差し引いた場合の
-    仮想成績を再計算する。
-
-    重要:
-    - 新しい買い目を追加したり、購入額を再配分したりはしない。
-    - 保存済み買い目の一部だけを残す研究なので、未来情報を使わない。
-    - 的中買い目を残した場合の払戻は保存済みの実受取額をそのまま使う。
-    """
-    if results_df is None or len(results_df) == 0:
-        return {
-            "対象R": 0,
-            "購入点数": 0,
-            "的中R": 0,
-            "的中率": np.nan,
-            "投資": 0,
-            "払戻": 0,
-            "収支": 0,
-            "回収率": np.nan,
-        }
-
-    allowed_groups = None if groups is None else {str(g) for g in groups}
-
-    races = 0
-    ticket_count = 0
-    hit_races = 0
-    total_stake = 0
-    total_payout = 0
-
-    for _, row in results_df.iterrows():
-        try:
-            p1_prob = float(row.get("p1_prob"))
-        except Exception:
-            p1_prob = np.nan
-
-        if min_p1_prob is not None:
-            if not np.isfinite(p1_prob) or p1_prob < float(min_p1_prob):
-                continue
-
-        tickets = _virtual_ticket_rows(row.get("tickets_json", ""))
-        selected = []
-
-        for item in tickets:
-            if allowed_groups is not None and str(item.get("group", "")) not in allowed_groups:
-                continue
-
-            try:
-                stake = int(float(item.get("stake", 0) or 0))
-            except Exception:
-                stake = 0
-
-            if stake <= 0:
-                continue
-
-            selected.append((item, stake))
-
-        stake_sum = sum(stake for _, stake in selected)
-        if stake_sum <= 0:
-            continue
-
-        races += 1
-        ticket_count += len(selected)
-        total_stake += stake_sum
-
-        actual_combo = str(row.get("trifecta_actual", "")).strip().lstrip("'")
-        selected_hit = any(
-            str(item.get("combo", "")).strip().lstrip("'") == actual_combo
-            for item, _ in selected
-        )
-
-        if selected_hit:
-            hit_races += 1
-            try:
-                race_payout = int(float(row.get("payout", 0) or 0))
-            except Exception:
-                race_payout = 0
-            total_payout += max(race_payout, 0)
-
-    profit = total_payout - total_stake
-    hit_rate = hit_races / races if races else np.nan
-    recovery = total_payout / total_stake if total_stake else np.nan
-
-    return {
-        "対象R": int(races),
-        "購入点数": int(ticket_count),
-        "的中R": int(hit_races),
-        "的中率": hit_rate,
-        "投資": int(total_stake),
-        "払戻": int(total_payout),
-        "収支": int(profit),
-        "回収率": recovery,
-    }
-
-
-def _virtual_backtest_table(results_df):
-    """代表的な仮想購入ルールを同条件で比較する。"""
-    rules = [
-        ("現行", None, None),
-        ("本命70%以上", 0.70, None),
-        ("本命75%以上", 0.75, None),
-        ("本命80%以上", 0.80, None),
-        ("本命85%以上", 0.85, None),
-        ("本線のみ", None, {"本線"}),
-        ("抑えなし", None, {"本線", "穴"}),
-        ("80%以上＋本線のみ", 0.80, {"本線"}),
-        ("85%以上＋本線のみ", 0.85, {"本線"}),
-    ]
-
-    rows = []
-    for label, threshold, groups in rules:
-        result = _virtual_backtest(
-            results_df,
-            min_p1_prob=threshold,
-            groups=groups,
-        )
-        result["仮想ルール"] = label
-        rows.append(result)
-
-    out = pd.DataFrame(rows)
-    return out[
-        [
-            "仮想ルール",
-            "対象R",
-            "購入点数",
-            "的中R",
-            "的中率",
-            "投資",
-            "払戻",
-            "収支",
-            "回収率",
-        ]
-    ]
-
 
 def race_key(d, jcd, rno):
     return f"{d.strftime('%Y%m%d')}_{jcd}_{int(rno)}"
@@ -1867,7 +1702,7 @@ if not IS_ADMIN:
 
 
 with tab4:
-    st.subheader("📊 予想検証")
+    st.subheader("📊 検証")
     if not IS_ADMIN:
         st.caption("🔒 収集スタッフは検証画面を閲覧のみで利用します。")
     results_load_error = None
@@ -1876,112 +1711,6 @@ with tab4:
     except ResultsLoadError as e:
         results_df = None
         results_load_error = str(e)
-    st.markdown("### 📈 AI成績分析")
-
-    # Supabaseの分析ビューをまとめて表示
-    analysis_views = [
-        ("📊 総合", "summary"),
-        ("🎯 1号艇予測確率帯", "p1_prob"),
-        ("🎫 買い目区分", "ticket_group"),
-        ("💰 期待値帯", "expected_return"),
-    ]
-
-    analysis_tabs = st.tabs([label for label, _ in analysis_views])
-
-    for analysis_tab, (label, view_name) in zip(analysis_tabs, analysis_views):
-        with analysis_tab:
-            analysis_df = load_analysis_view(view_name)
-
-            if analysis_df.empty:
-                st.info(f"{label} の分析データはまだありません。")
-            else:
-                st.dataframe(
-                    analysis_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-    if results_df is not None:
-        # 2026-10 に「1着確率差40ポイント未満は賭け金0円」をやめ、全レースへ
-        # 資金を配分する方式に切り替えた。成績は切り替え前後で分けて見る。
-        st.markdown("### 🔀 資金配分の切り替え前後")
-        switched_at = load_stake_policy_switched_at(results_df)
-        st.caption(
-            f"切り替え日時: {switched_at}（JST）" if switched_at
-            else "切り替え後の検証データはまだありません。"
-        )
-        stake_compare = stake_period_comparison(results_df)
-        for _c in ("1着的中率", "買い目的中率", "的中確率・補正前(平均)", "回収率"):
-            stake_compare[_c] = pd.to_numeric(stake_compare[_c], errors="coerce") * 100
-        st.dataframe(
-            stake_compare,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "1着的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                "買い目的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                "的中確率・補正前(平均)": st.column_config.NumberColumn(format="%.1f%%"),
-                "投資": st.column_config.NumberColumn(format="%d円"),
-                "払戻": st.column_config.NumberColumn(format="%d円"),
-                "収支": st.column_config.NumberColumn(format="%+d円"),
-                "回収率": st.column_config.NumberColumn(format="%.1f%%"),
-            },
-        )
-        st.caption(
-            "切り替え前は非推奨レースの投資額が0円のため、投資・払戻・回収率は推奨レースだけの成績です。"
-            "前後の判定は固定時に保存した資金配分方針で行うため、切り替え当日のレースも正しく分かれます。"
-        )
-        stake_period = st.radio(
-            "以下の集計期間",
-            STAKE_PERIODS,
-            horizontal=True,
-            key="stake_period",
-        )
-        results_df = filter_by_stake_period(results_df, stake_period)
-
-        # 2026-10 に本番の予想を新しいモデル（ml-chain）に切り替えた。成績は予想に使った
-        # モデル（固定時に保存した版）で分けて見る。app_settings.prediction_model を
-        # current に戻したときも、その記録が下の表に残る。
-        st.markdown("### 🔀 予想モデルの切り替え前後")
-        _switches = load_prediction_model_switches()
-        if len(_switches):
-            st.caption("切り替えの記録（JST・新しい順）")
-            st.dataframe(_switches, use_container_width=True, hide_index=True)
-        else:
-            st.caption("予想モデルの切り替えの記録はまだありません。")
-        model_compare = model_period_comparison(results_df)
-        for _c in ("1着的中率", "買い目的中率", "表示した的中確率(平均)", "表示と実際の差", "回収率"):
-            model_compare[_c] = pd.to_numeric(model_compare[_c], errors="coerce") * 100
-        st.dataframe(
-            model_compare,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "1着的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                "買い目的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                "表示した的中確率(平均)": st.column_config.NumberColumn(format="%.1f%%"),
-                "表示と実際の差": st.column_config.NumberColumn(format="%+.1fpt"),
-                "投資": st.column_config.NumberColumn(format="%d円"),
-                "払戻": st.column_config.NumberColumn(format="%d円"),
-                "収支": st.column_config.NumberColumn(format="%+d円"),
-                "回収率": st.column_config.NumberColumn(format="%.1f%%"),
-            },
-        )
-        st.caption(
-            "前後の判定は固定時に保存したモデルの版で行うため、切り替え当日のレースや、"
-            "新しいモデルで予想できず今までのモデルで予想したレースも正しく分かれます。"
-        )
-        model_period = st.radio(
-            "以下の集計の予想モデル",
-            MODEL_PERIODS,
-            horizontal=True,
-            key="model_period",
-        )
-        results_df = filter_by_model(results_df, model_period)
-    else:
-        stake_period = STAKE_PERIODS[0]
-
-    vm = validation_metrics(results_df) if results_df is not None else None
-
     if results_load_error is not None:
         st.error(
             "⚠️ 検証データをSupabaseから取得できませんでした。"
@@ -1989,392 +1718,66 @@ with tab4:
             "しばらく待ってから画面を再読み込みしてください。"
         )
         st.caption(f"エラー内容: {results_load_error}")
-    elif vm["races"] == 0:
-        st.info("まだ検証データがありません。AI予想後に実着順と払戻を登録すると、ここへ蓄積されます。")
-    else:
-        m1, m2 = st.columns(2)
-        with m1:
-            st.metric("検証レース数", f"{vm['races']}R")
-            st.metric(
-                "1着トップ予想 的中率",
-                f"{vm['first_hit_rate']*100:.1f}%" if pd.notna(vm["first_hit_rate"]) else "-"
-            )
-            st.metric(
-                "予想候補 的中率（資金配分なし）",
-                f"{vm['candidate_hit_rate']*100:.1f}%" if pd.notna(vm["candidate_hit_rate"]) else "-"
-            )
-        with m2:
-            st.metric("累計収支", f"{vm['profit']:+,}円")
-            st.metric(
-                "回収率",
-                f"{vm['roi']*100:.1f}%" if pd.notna(vm["roi"]) else "-"
-            )
-            st.metric(
-                "簡易Brier score",
-                f"{vm['brier_first']:.3f}" if pd.notna(vm["brier_first"]) else "-"
-            )
 
-        st.caption("Brier score は小さいほど、予測確率と実際の結果のズレが小さい指標です。")
+    # 1〜7: 要約（本番モデル）・事後予想・展示前厳選10・万舟チャンス・予想ボタン別（管理者だけ）・
+    # 2番手候補（N=2）・表示した的中確率と実際（validation_view.py）
+    validation_view.render(results_df, is_admin=IS_ADMIN)
 
-        st.markdown("#### 🎯 買い目点数別の予想精度")
-        pc1, pc2, pc3 = st.columns(3)
-        for column, label, container in (
-            ("hit_within_8_rate", "8点内", pc1),
-            ("hit_within_9_rate", "9点内", pc2),
-            ("hit_within_10_rate", "10点内", pc3),
-        ):
-            value = vm.get(column, np.nan)
-            with container:
-                st.metric(
-                    label,
-                    f"{value*100:.1f}%" if pd.notna(value) else "-",
-                )
-        st.caption(
-            "投資額に関係なく、固定時の候補上位に実結果が含まれた割合です。"
-            "回収率は別のシミュレーション指標として扱います。"
-        )
+    st.markdown("### 📚 その他")
+    with st.expander("🎯 1号艇の予測確率帯・🎫 買い目区分", expanded=False):
+        for label, view_name in (("🎯 1号艇予測確率帯", "p1_prob"), ("🎫 買い目区分", "ticket_group")):
+            st.markdown(f"**{label}**")
+            analysis_df = load_analysis_view(view_name)
+            if analysis_df.empty:
+                st.caption(f"{label} の分析データはまだありません。")
+            else:
+                st.dataframe(analysis_df, use_container_width=True, hide_index=True)
+        st.caption("保存済みの全レース（予想モデルに関係なく）の集計です。")
 
-        st.markdown("#### 1着予測の確率校正")
-        cal = calibration_table(results_df)
-        st.dataframe(cal, use_container_width=True, hide_index=True)
-
-        st.markdown("#### 🎯 表示した的中確率と実際の的中率")
-        _hit_cal_config = {
-            "平均確率": st.column_config.NumberColumn(format="%.1f%%"),
-            "実際の的中率": st.column_config.NumberColumn(format="%.1f%%"),
-            "差": st.column_config.NumberColumn(format="%+.1fpt"),
-        }
-        st.markdown("##### 補正後（画面に表示した値）")
-        hit_cal_after = hit_probability_calibration_table(
-            results_df, column="hit_probability_calibrated"
-        )
-        if hit_cal_after.empty:
-            st.info("補正後の的中確率を表示したレースの結果はまだありません（補正を入れた後のレースから集計します）。")
-        else:
+    if results_df is not None:
+        # 2026-10 に本番の予想を新しいモデル（ml-chain）に切り替えた。成績は予想に使った
+        # モデル（固定時に保存した版）で分けて見る。app_settings.prediction_model を
+        # current に戻したときも、その記録が下の表に残る。
+        with st.expander("🔀 予想モデルの切り替え前後", expanded=False):
+            _switches = load_prediction_model_switches()
+            if len(_switches):
+                st.caption("切り替えの記録（JST・新しい順）")
+                st.dataframe(_switches, use_container_width=True, hide_index=True)
+            else:
+                st.caption("予想モデルの切り替えの記録はまだありません。")
+            model_compare = model_period_comparison(results_df)
+            for _c in ("1着的中率", "買い目的中率", "表示した的中確率(平均)", "表示と実際の差", "回収率"):
+                model_compare[_c] = pd.to_numeric(model_compare[_c], errors="coerce") * 100
             st.dataframe(
-                hit_cal_after, use_container_width=True, hide_index=True,
-                column_config=_hit_cal_config,
-            )
-        st.markdown("##### 補正前（各買い目の3連単確率の合計）")
-        hit_cal = hit_probability_calibration_table(results_df)
-        if hit_cal.empty:
-            st.info("的中確率を保存したレースの結果はまだありません（切り替え後のレースから集計します）。")
-        else:
-            st.dataframe(
-                hit_cal, use_container_width=True, hide_index=True,
-                column_config=_hit_cal_config,
-            )
-        st.caption(
-            "固定時の「この買い目の的中確率」と、買い目のどれかが実際に当たった割合です。"
-            "画面には、補正前の値（3連単確率の合計）を全レースの事後予想の実績で補正した値を表示しています。"
-            "差がプラスなら表示より当たっている、マイナスなら表示ほど当たっていません。"
-        )
-
-        st.markdown("#### 🧪 仮想バックテスト")
-        st.caption(
-            "保存済みの固定予想を使い、『そのレースを見送っていたら／一部の買い目区分を買わなかったら』"
-            "を再計算します。実際の予想ロジック・設定・保存データは変更しません。"
-        )
-
-        # 仮想バックテストには全レースの tickets_json（全件で約2MB）が必要なため、
-        # 一覧には含めず、表示を選んだ時だけ追加取得する。
-        show_virtual_backtest = st.checkbox(
-            "🧪 仮想バックテストを表示（買い目データを追加で読み込みます）",
-            value=False,
-            key="show_virtual_backtest",
-        )
-        backtest_df = None
-        if show_virtual_backtest:
-            try:
-                backtest_df = results_df.merge(
-                    load_ticket_payloads(), on="race_key", how="left"
-                )
-            except ResultsLoadError as e:
-                st.error(f"⚠️ 仮想バックテスト用の買い目データを取得できませんでした。（{e}）")
-
-        if backtest_df is not None:
-            virtual_compare = _virtual_backtest_table(backtest_df)
-            virtual_show = virtual_compare.copy()
-            virtual_show["的中率"] = (
-                pd.to_numeric(virtual_show["的中率"], errors="coerce") * 100
-            )
-            virtual_show["回収率"] = (
-                pd.to_numeric(virtual_show["回収率"], errors="coerce") * 100
-            )
-
-            st.dataframe(
-                virtual_show,
+                model_compare,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                    "回収率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "1着的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "買い目的中率": st.column_config.NumberColumn(format="%.1f%%"),
+                    "表示した的中確率(平均)": st.column_config.NumberColumn(format="%.1f%%"),
+                    "表示と実際の差": st.column_config.NumberColumn(format="%+.1fpt"),
                     "投資": st.column_config.NumberColumn(format="%d円"),
                     "払戻": st.column_config.NumberColumn(format="%d円"),
                     "収支": st.column_config.NumberColumn(format="%+d円"),
+                    "回収率": st.column_config.NumberColumn(format="%.1f%%"),
                 },
             )
-
-            with st.expander("🔬 条件を変えて試す", expanded=False):
-                custom_prob_pct = st.slider(
-                    "AI本命確率の最低ライン",
-                    min_value=0,
-                    max_value=90,
-                    value=80,
-                    step=5,
-                    format="%d%%",
-                    key="virtual_bt_min_prob",
-                )
-                custom_groups = st.multiselect(
-                    "残す買い目区分",
-                    ["本線", "抑え", "穴"],
-                    default=["本線"],
-                    key="virtual_bt_groups",
-                )
-
-                if custom_groups:
-                    custom_bt = _virtual_backtest(
-                        backtest_df,
-                        min_p1_prob=custom_prob_pct / 100.0 if custom_prob_pct > 0 else None,
-                        groups=set(custom_groups),
-                    )
-
-                    bc1, bc2 = st.columns(2)
-                    with bc1:
-                        st.metric("対象レース", f"{custom_bt['対象R']}R")
-                        st.metric("的中レース", f"{custom_bt['的中R']}R")
-                        st.metric(
-                            "的中率",
-                            f"{custom_bt['的中率']*100:.1f}%"
-                            if pd.notna(custom_bt["的中率"])
-                            else "-",
-                        )
-                    with bc2:
-                        st.metric("仮想収支", f"{custom_bt['収支']:+,}円")
-                        st.metric(
-                            "仮想回収率",
-                            f"{custom_bt['回収率']*100:.1f}%"
-                            if pd.notna(custom_bt["回収率"])
-                            else "-",
-                        )
-                        st.metric("仮想投資", f"{custom_bt['投資']:,}円")
-                else:
-                    st.info("少なくとも1つの買い目区分を選んでください。")
-
-        st.caption(
-            "※ この仮想バックテストは『保存済み買い目を削る／レースを見送る』比較専用です。"
-            "未購入だった新規買い目の追加や、購入額の再配分までは再現しません。"
-        )
-
-        st.markdown("#### 保存済みレース")
-
-        show_cols = [
-            "race_date","venue","race_no","trifecta_actual","p1_lane","p1_prob",
-            "hit_probability_calibrated","hit_probability",
-            "candidate_count","candidate_hit","candidate_hit_rank",
-            "total_stake","payout","profit","roi"
-        ]
-        show_cols = [c for c in show_cols if c in results_df.columns]
-        show = results_df[show_cols].copy()
-
-        show = show.rename(columns={
-            "race_date":"日付",
-            "venue":"場",
-            "race_no":"R",
-            "trifecta_actual":"実3連単",
-            "p1_lane":"AI本命",
-            "p1_prob":"本命確率",
-            "hit_probability_calibrated":"表示的中確率",
-            "hit_probability":"的中確率(補正前)",
-            "candidate_count":"候補点数",
-            "candidate_hit":"予想的中",
-            "candidate_hit_rank":"的中順位",
-            "total_stake":"購入",
-            "payout":"払戻",
-            "profit":"収支",
-            "roi":"回収倍率",
-        })
-
-        _preferred_show_cols = [
-            "日付", "場", "R", "実3連単", "AI本命", "本命確率",
-            "表示的中確率", "的中確率(補正前)", "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
-        ]
-        show = show[[c for c in _preferred_show_cols if c in show.columns]]
-
-        st.dataframe(
-            show.sort_values(["日付","場","R"], ascending=False),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        # 買い目詳細(tickets_json)・6艇予測詳細(lane_probs_json)は全件で十数MBになるため、
-        # 必要な時だけ追加取得してCSVへ含める。
-        csv_include_lane_probs = st.checkbox(
-            "CSVに買い目詳細・6艇予測詳細も含める（Supabaseの転送量が大きくなります）",
-            value=False,
-            key="csv_include_lane_probs",
-        )
-        csv_export_results = results_df.copy()
-        if csv_include_lane_probs:
-            try:
-                csv_export_results = filter_by_stake_period(
-                    load_results_full(), stake_period
-                ).copy()
-            except ResultsLoadError as e:
-                st.error(f"⚠️ 詳細データを取得できなかったため、詳細列なしのCSVになります。（{e}）")
-        for _c in ("trifecta_actual", "top_ticket"):
-            if _c in csv_export_results.columns:
-                # combo表記("3-1-4"等)をExcelが日付だと誤解釈するのを防ぐ
-                csv_export_results[_c] = "'" + csv_export_results[_c].astype(str)
-
-        csv_export_results = csv_export_results.rename(columns={
-            "saved_at": "保存日時",
-            "race_date": "日付",
-            "venue": "場",
-            "race_no": "R",
-            "race_key": "レースキー",
-            "first_actual": "実1着",
-            "second_actual": "実2着",
-            "third_actual": "実3着",
-            "trifecta_actual": "実3連単",
-            "p1_lane": "AI本命艇",
-            "p1_prob": "本命確率",
-            "top_ticket": "本命買い目",
-            "top_ticket_prob": "本命買い目確率",
-            "top_ticket_odds": "本命買い目オッズ",
-            "top_ticket_stake": "本命買い目購入額",
-            "total_stake": "購入合計",
-            "payout": "払戻",
-            "profit": "収支",
-            "roi": "回収倍率",
-            "hit_top_ticket": "本命的中",
-            "hit_any_ticket": "いずれか的中",
-            "candidate_count": "候補点数",
-            "candidate_hit": "予想候補的中",
-            "candidate_hit_rank": "的中順位",
-            "hit_within_8": "8点内的中",
-            "hit_within_9": "9点内的中",
-            "hit_within_10": "10点内的中",
-            "predicted_first_hit": "1着予想的中",
-            "tickets_json": "買い目詳細",
-            "lane_probs_json": "6艇予測詳細",
-        })
-
-        csv_results = csv_export_results.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "📥 検証履歴CSV保存",
-            csv_results,
-            file_name="prediction_results.csv",
-            mime="text/csv",
-        )
-
-        # -------------------------------------------------
-        # 研究用：補正を1段ずつ足したときの長期成績比較
-        # -------------------------------------------------
-        # 補正別比較には全レースの lane_probs_json が必要で、全件取得すると
-        # 十数MBの転送になる。画面を開くたびに取得しないよう、表示を選んだ時だけ読む。
-        show_research_compare = st.checkbox(
-            "🧪 研究用・補正別の長期比較を表示（Supabaseの転送量が大きくなります）",
-            value=False,
-            key="show_research_compare",
-        )
-        research_source = pd.DataFrame(columns=["first_actual", "lane_probs_json"])
-        if show_research_compare:
-            try:
-                research_source = load_research_payloads()
-            except ResultsLoadError as e:
-                st.error(f"⚠️ 補正別比較データを取得できませんでした。（{e}）")
-                show_research_compare = False
-
-        research_rows = []
-        for _, _rr in research_source.iterrows():
-            raw = _rr.get("lane_probs_json", "")
-            if not raw or pd.isna(raw):
-                continue
-
-            try:
-                parsed = json.loads(raw)
-            except Exception:
-                continue
-
-            if not isinstance(parsed, dict):
-                continue
-
-            variants_saved = parsed.get("research", {})
-            if not isinstance(variants_saved, dict) or not variants_saved:
-                continue
-
-            try:
-                actual_first = int(_rr.get("first_actual"))
-            except Exception:
-                continue
-
-            for label, lanes in variants_saved.items():
-                if not isinstance(lanes, list) or not lanes:
-                    continue
-
-                probs = {}
-                for item in lanes:
-                    try:
-                        lane_no = int(item.get("lane"))
-                        prob = float(item.get("p_first"))
-                    except Exception:
-                        continue
-                    if 1 <= lane_no <= 6 and np.isfinite(prob):
-                        probs[lane_no] = prob
-
-                if len(probs) < 2:
-                    continue
-
-                top_lane = max(probs, key=probs.get)
-                actual_prob = probs.get(actual_first, np.nan)
-                brier6 = np.mean([
-                    (probs.get(lane, 0.0) - (1.0 if lane == actual_first else 0.0)) ** 2
-                    for lane in range(1, 7)
-                ])
-
-                research_rows.append({
-                    "方式": label,
-                    "本命的中": int(top_lane == actual_first),
-                    "6艇Brier": float(brier6),
-                    "実1着確率": actual_prob,
-                })
-
-        if research_rows:
-            research_df = pd.DataFrame(research_rows)
-            research_summary = (
-                research_df.groupby("方式", sort=False)
-                .agg(
-                    検証R=("本命的中", "size"),
-                    本命的中率=("本命的中", "mean"),
-                    六艇Brier=("6艇Brier", "mean"),
-                    実1着平均確率=("実1着確率", "mean"),
-                )
-                .reset_index()
-            )
-            research_summary["本命的中率"] = (research_summary["本命的中率"] * 100).round(1)
-            research_summary["六艇Brier"] = research_summary["六艇Brier"].round(4)
-            research_summary["実1着平均確率"] = (research_summary["実1着平均確率"] * 100).round(1)
-
-            st.markdown("#### 🧪 研究用・補正別の長期比較")
             st.caption(
-                "本番予想は『現行全部入り』のまま固定。ここは各補正を段階的に足した研究結果だけを比較します。"
-                "6艇Brierは小さいほど良好です。"
+                "前後の判定は固定時に保存したモデルの版で行うため、切り替え当日のレースや、"
+                "新しいモデルで予想できず今までのモデルで予想したレースも正しく分かれます。"
             )
-            st.dataframe(
-                research_summary,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "本命的中率": st.column_config.NumberColumn(format="%.1f%%"),
-                    "実1着平均確率": st.column_config.NumberColumn(format="%.1f%%"),
-                },
-            )
-        elif show_research_compare:
-            st.info(
-                "🧪 補正別比較データはまだありません。研究比較機能追加後に保存したレースから自動で蓄積されます。"
-            )
+        model_period = st.radio(
+            "以下（1レース詳細・保存済みレース）の予想モデル",
+            MODEL_PERIODS,
+            horizontal=True,
+            key="model_period",
+        )
+        results_df = filter_by_model(results_df, model_period)
 
+    if results_df is not None and len(results_df) == 0:
+        st.info("まだ検証データがありません。AI予想後に実着順と払戻を登録すると、ここへ蓄積されます。")
+    elif results_df is not None:
         st.markdown("#### 🔍 1レース詳細比較")
         st.caption("保存済みレースを選ぶと、AI予想（6艇の確率・買い目）と実際の結果を並べて確認できます。")
 
@@ -2524,6 +1927,106 @@ with tab4:
             elif sel_detail:
                 st.caption("このレースは購入した買い目の記録がありません。")
 
+        with st.expander("🗂️ 保存済みレース一覧・CSV保存", expanded=False):
+            show_cols = [
+                "race_date","venue","race_no","trifecta_actual","p1_lane","p1_prob",
+                "hit_probability_calibrated","hit_probability",
+                "candidate_count","candidate_hit","candidate_hit_rank",
+                "total_stake","payout","profit","roi"
+            ]
+            show_cols = [c for c in show_cols if c in results_df.columns]
+            show = results_df[show_cols].copy()
+
+            show = show.rename(columns={
+                "race_date":"日付",
+                "venue":"場",
+                "race_no":"R",
+                "trifecta_actual":"実3連単",
+                "p1_lane":"AI本命",
+                "p1_prob":"本命確率",
+                "hit_probability_calibrated":"表示的中確率",
+                "hit_probability":"的中確率(補正前)",
+                "candidate_count":"候補点数",
+                "candidate_hit":"予想的中",
+                "candidate_hit_rank":"的中順位",
+                "total_stake":"購入",
+                "payout":"払戻",
+                "profit":"収支",
+                "roi":"回収倍率",
+            })
+
+            _preferred_show_cols = [
+                "日付", "場", "R", "実3連単", "AI本命", "本命確率",
+                "表示的中確率", "的中確率(補正前)", "候補点数", "予想的中", "的中順位", "購入", "払戻", "収支", "回収倍率"
+            ]
+            show = show[[c for c in _preferred_show_cols if c in show.columns]]
+
+            st.dataframe(
+                show.sort_values(["日付","場","R"], ascending=False),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # 買い目詳細(tickets_json)・6艇予測詳細(lane_probs_json)は全件で十数MBになるため、
+            # 必要な時だけ追加取得してCSVへ含める。
+            csv_include_lane_probs = st.checkbox(
+                "CSVに買い目詳細・6艇予測詳細も含める（Supabaseの転送量が大きくなります）",
+                value=False,
+                key="csv_include_lane_probs",
+            )
+            csv_export_results = results_df.copy()
+            if csv_include_lane_probs:
+                try:
+                    csv_export_results = filter_by_model(
+                        load_results_full(), model_period
+                    ).copy()
+                except ResultsLoadError as e:
+                    st.error(f"⚠️ 詳細データを取得できなかったため、詳細列なしのCSVになります。（{e}）")
+            for _c in ("trifecta_actual", "top_ticket"):
+                if _c in csv_export_results.columns:
+                    # combo表記("3-1-4"等)をExcelが日付だと誤解釈するのを防ぐ
+                    csv_export_results[_c] = "'" + csv_export_results[_c].astype(str)
+
+            csv_export_results = csv_export_results.rename(columns={
+                "saved_at": "保存日時",
+                "race_date": "日付",
+                "venue": "場",
+                "race_no": "R",
+                "race_key": "レースキー",
+                "first_actual": "実1着",
+                "second_actual": "実2着",
+                "third_actual": "実3着",
+                "trifecta_actual": "実3連単",
+                "p1_lane": "AI本命艇",
+                "p1_prob": "本命確率",
+                "top_ticket": "本命買い目",
+                "top_ticket_prob": "本命買い目確率",
+                "top_ticket_odds": "本命買い目オッズ",
+                "top_ticket_stake": "本命買い目購入額",
+                "total_stake": "購入合計",
+                "payout": "払戻",
+                "profit": "収支",
+                "roi": "回収倍率",
+                "hit_top_ticket": "本命的中",
+                "hit_any_ticket": "いずれか的中",
+                "candidate_count": "候補点数",
+                "candidate_hit": "予想候補的中",
+                "candidate_hit_rank": "的中順位",
+                "hit_within_8": "8点内的中",
+                "hit_within_9": "9点内的中",
+                "hit_within_10": "10点内的中",
+                "predicted_first_hit": "1着予想的中",
+                "tickets_json": "買い目詳細",
+                "lane_probs_json": "6艇予測詳細",
+            })
+
+            csv_results = csv_export_results.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📥 検証履歴CSV保存",
+                csv_results,
+                file_name="prediction_results.csv",
+                mime="text/csv",
+            )
 
 
 

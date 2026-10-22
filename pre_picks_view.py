@@ -80,6 +80,38 @@ def summarize(rows):
     }
 
 
+PERIODS = (("直近7日", 7), ("直近30日", 30), ("全期間", None))
+
+
+def in_period(rows, days, today):
+    """race_date が today の days 日前以降の行（days が None なら全部）。予想タブと検証タブで同じ区切りにする。"""
+    if days is None:
+        return list(rows)
+    start = (today - timedelta(days=days)).isoformat()
+    return [r for r in rows if str(r["race_date"]) >= start]
+
+
+def period_rows(rows, today, summarize_fn, periods=PERIODS):
+    """期間ごとに summarize_fn(その期間の行) を並べた表の行（結果が無い期間は出さない）。"""
+    out = []
+    for label, days in periods:
+        s = summarize_fn(in_period(rows, days, today))
+        if s:
+            out.append({"期間": label, **s})
+    return out
+
+
+def daily_hits(rows):
+    """日別の 的中数 / レース数（使った買い目）。新しい日が上。"""
+    by_day = {}
+    for r in rows:
+        hit = used_result(r)[0]
+        n, h = by_day.get(r["race_date"], (0, 0))
+        by_day[r["race_date"]] = (n + 1, h + int(hit))
+    return [{"日付": d, "レース数": n, "的中数": h, "的中率": h / n if n else None}
+            for d, (n, h) in sorted(by_day.items(), reverse=True)]
+
+
 def _pct(v):
     return "—" if v is None or v != v else f"{v:.1%}"
 
@@ -281,14 +313,7 @@ def _render_summary():
     if not rows:
         st.caption("結果の出たレースはまだありません（レースが終わるとその日のうちに記録します）。")
         return
-    today = datetime.now(JST).date()
-    out = []
-    for label, days in (("直近7日", 7), ("直近30日", 30), ("全期間", None)):
-        sub = [r for r in rows if days is None or r["race_date"] >= (today - timedelta(days=days)).isoformat()]
-        s = summarize(sub)
-        if s:
-            out.append({"期間": label, **s})
-    t = pd.DataFrame(out)
+    t = pd.DataFrame(period_rows(rows, datetime.now(JST).date(), summarize))
     for c in t.columns:
         if c.startswith(("的中率", "回収率", "展示後")):
             t[c] = t[c].map(_pct)
