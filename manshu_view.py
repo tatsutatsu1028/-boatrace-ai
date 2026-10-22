@@ -52,8 +52,12 @@ def load_results():
 @st.cache_data(ttl=600, show_spinner=False)
 def load_compare():
     """確定オッズで作った朝版・展示後版の買い目の結果（manshu_compare.py が毎晩書く）。"""
-    return _get("manshu_aim_compare?select=race_date,is_manshu,pre_hit,pre_stake,pre_return,post_hit,post_stake,"
-                "post_return&order=race_date.asc&limit=10000")
+    q = ("manshu_aim_compare?select=race_date,is_manshu,pre_hit,pre_stake,pre_return,post_hit,post_stake,"
+         "post_return{}&order=race_date.asc&limit=10000")
+    try:
+        return _get(q.format(",variants"))
+    except Exception:  # noqa: BLE001  作り方ごとの比較の列がまだ無いデータベース
+        return _get(q.format(""))
 
 
 MIGRATION = "supabase/migrations/20261018000000_create_manshu_chance_picks.sql"
@@ -534,6 +538,29 @@ def _render_compare(today):
                "作った買い目です。朝版 = 朝の3連単の確率（展示前）、展示後版 = 事後予想の3連単の確率（展示・直前情報も使う）。"
                "両方の買い目があるレースだけを数えています。万舟の的中 = 的中したうち3連単が万舟だったレースの数。"
                "確定オッズは締切前に見られるオッズとは違うため、実際に買えた成績ではありません。")
+    _render_variants(rows, today)
+
+
+def _render_variants(rows, today):
+    """作り方ごと（A〜D・見送りあり/なし）の成績を、朝版・展示後版で並べる（検証だけ）。"""
+    st.markdown(f"**{manshu.AIM_LABEL}: 作り方の比較（確定オッズ・同じレースで比較・検証用）**")
+    period = st.radio("期間", ("全期間", "直近30日", "直近7日"), horizontal=True, key="manshu_variant_period")
+    days = {"直近7日": 7, "直近30日": 30}.get(period)
+    sub = [r for r in rows if days is None or r["race_date"] >= (today - timedelta(days=days)).isoformat()]
+    out = manshu.variant_summary(sub)
+    if not out:
+        st.caption("まだありません（レースの翌日以降、事後予想の後に毎晩作ります。"
+                   "`supabase/migrations/20261023000000_manshu_aim_variants.sql` の実行が必要かもしれません）。")
+        return
+    t = pd.DataFrame(out)
+    for c in ("的中率", "回収率"):
+        t[c] = t[c].map(_pct)
+    st.dataframe(t, hide_index=True, use_container_width=True)
+    st.caption("どれも1号艇の1着を外す・確定3連単オッズ30倍以上・計10点・各100円。期待値順 = 確率×オッズの高い順。"
+               "片方の組が足りなければもう片方で埋めます。朝版・展示後版の両方が作れたレースだけを数えています。"
+               f"見送りあり = その版の確率で1号艇の1着確率が{manshu.VARIANT_SKIP_P1:.0%}以上のレースは買わない"
+               "（レース数は買ったレースの数）。確率の合計 = 買い目の確率の合計（当たるはずの本数。的中数と比べる）。"
+               "画面・本番の買い目は A のままです。")
 
 
 def render_list(d, is_admin=False):
