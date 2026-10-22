@@ -461,6 +461,8 @@ def _build_result_record(
         "venue": str(VENUES.get(str(jcd).zfill(2), str(jcd).zfill(2))),
         "race_no": int(rno),
         "race_key": _race_key(race_date, jcd, rno),
+        # 予想を保存した人・仕組み（展示後の自動予想は auto_post）。手動保存（result_tracker）と同じく固定予想から写す
+        "collector_name": str(snapshot.get("collector_name") or "owner"),
         "first_actual": first_actual,
         "second_actual": second_actual,
         "third_actual": third_actual,

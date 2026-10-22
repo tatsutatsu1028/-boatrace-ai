@@ -1,0 +1,60 @@
+name: Auto Post-exhibition Predict
+
+# 展示後の自動予想（auto_post_predict.py）。その日の「🌅 展示前厳選10」と「💥 万舟チャンス」のレースを、
+# 締切20〜10分前に展示タイムが6艇そろっていれば「モデルのみ予想」と同じ予想で保存する。
+#   task=run    : 5分おき（JST 8:00〜22:55）
+#   task=report : 夜（JST 23:10）にその日の対象・予想できた数・見送った数（理由つき）
+#   task=plan   : どのレースが何時に動くか（保存しない。手動で確かめる用）
+# 起動は Supabase の pg_cron から workflow_dispatch で行う
+# （supabase/migrations/20261025000000_auto_post_predict.sql）。schedule は置かない（二重起動を避ける）。
+# 重複して起動しても、保存済みのレースは auto_post_log と保存済みの予想を見てスキップする。
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "run（予想）/ report（夜の集計）/ plan（何時に動くか）"
+        required: true
+        default: "run"
+      date:
+        description: "対象の日 (YYYYMMDD)。空なら今日（JST）"
+        required: false
+        default: ""
+
+jobs:
+  auto-post-predict:
+    runs-on: ubuntu-latest
+    # 次の起動（5分後）を大きく超えて居座らない
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 学習済みモデル・集計表・学習データは非公開のデータ用リポジトリ（自動固定と同じ）
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ログは誰でも見られるため、会場名・確率・買い目は出さない（締切時刻・件数・理由・合否だけ）
+      - name: Run
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+        run: |
+          ARGS="${{ inputs.task || 'run' }}"
+          if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi
+          python auto_post_predict.py $ARGS

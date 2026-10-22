@@ -92,7 +92,7 @@ def build_table(snaps, results, venue_names=None):
     for s in snaps.itertuples():
         jcd = str(s.race_key).split("_")[1] if "_" in str(s.race_key) else ""
         venue = (venue_names or {}).get(jcd) or s.venue
-        kind = "自動" if str(s.collector_name or "") == "auto_random" else "手動"
+        kind = {"auto_random": "自動", "auto_post": "自動（展示後）"}.get(str(s.collector_name or ""), "手動")
         row = {"レース": f"{venue} {int(s.race_no)}R", "予想": kind}
         r = res.loc[s.race_key] if len(res) and s.race_key in res.index else None
         if r is None:
