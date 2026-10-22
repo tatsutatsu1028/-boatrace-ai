@@ -480,6 +480,12 @@ def _build_result_record(
         "predicted_first_hit": bool(predicted_first_hit),
         "hit_probability": hit_probability,
         "stake_policy": stake_policy,
+        # 予想に使ったモデルの版（auto_result_collect と同じ。新しい固定予想は payload に、古いものは各艇の行にある）
+        "model_version": (
+            str(payload.get("model_version") or "").strip()
+            or next((str(r.get("model_version")) for r in final
+                     if isinstance(r, dict) and r.get("model_version")), None)
+        ),
         **calibrated_fields,
         # Claude の読みがある予想だけ: モデル＋Claude の買い目の当たり外れ
         **claude_reader.result_fields(
