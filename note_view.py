@@ -209,9 +209,13 @@ def _write_claude(ctx, api_key, model, work, final, tickets, probs, rows, label,
     return res
 
 
-def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_key="", model=None):
-    """note記事の欄。確定済みの記事（note_publications の行）を返す（無ければ None）。"""
-    st.markdown("#### 📝 note記事（有料）")
+def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_key="", model=None, key_prefix="",
+           default_source=None, heading=True):
+    """note記事の欄。確定済みの記事（note_publications の行）を返す（無ければ None）。
+    key_prefix: 同じレースを一覧と予想タブで同時に出すときのボタンの key の頭（中身・保存の形は同じ）
+    default_source: まだ記事にしていないレースで最初に選んでおく買い目（例: 万舟チャンスの一覧は "aim"）"""
+    if heading:
+        st.markdown("#### 📝 note記事（有料）")
     date_iso = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
     label = f"{venue} {rno}R"
     pub = load_publication(ctx)
@@ -222,14 +226,15 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
     mark = _manshu_mark(ctx, d)
     aim = na.aim_option(mark)
     options = ["model"] + (["avg"] if avg else []) + (["aim"] if aim else [])
-    current = (pub or {}).get("ticket_source") or "model"
+    current = (pub or {}).get("ticket_source") or default_source or "model"
     locked = bool(pub) and closed
     if locked:
         source = current
         st.caption(f"記事に載せた買い目: {na.SOURCE_LABELS.get(source, source)}（締切後のため変えません）")
     else:
         source = st.radio("記事に載せる買い目", options, index=options.index(current) if current in options else 0,
-                          format_func=lambda m: na.SOURCE_LABELS[m], horizontal=True, key=f"note_source_{ctx}")
+                          format_func=lambda m: na.SOURCE_LABELS[m], horizontal=True,
+                          key=f"{key_prefix}note_source_{ctx}")
         if not avg:
             st.caption("「両方の予想平均」は、Claudeの予想を取ったレース（🧠／⚖️ のボタンで予想）だけ選べます。")
         if mark and not aim:
@@ -266,13 +271,17 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
         st.warning(f"Claudeで本文を作れなかったため、決まった型の本文にしています（{res.get('error')}）。")
 
     if pub:
-        st.success(f"🔒 本日{int(pub.get('sequence_no') or 0)}本目 → 有料予想 {int(pub.get('price') or 0)}円（確定済み）"
+        at = posted_at_text(pub)
+        st.success(f"🔒 本日{int(pub.get('sequence_no') or 0)}本目 → 有料予想 {int(pub.get('price') or 0)}円（確定済み{at}）"
                    if pub.get("publication_type") == "PAID" else
-                   f"✅ 本日{int(pub.get('sequence_no') or 0)}本目 → 無料予想（確定済み・以前のルール）")
+                   f"✅ 本日{int(pub.get('sequence_no') or 0)}本目 → 無料予想（確定済み{at}・以前のルール）")
         changed = (not saved_same) or (writer == "claude" and body != pub.get("article_text"))
         if not closed and changed:
             st.info("記事の買い目・本文が、確定したときと違います。夜のまとめの的中判定にも使うので保存し直してください。")
-            if st.button("💾 記事の買い目・本文を保存し直す", key=f"note_update_{ctx}"):
+            sure = st.checkbox(f"確定済み{posted_at_text(pub)}の記事です。買い目・本文を書き換える",
+                               key=f"{key_prefix}note_update_ok_{ctx}")
+            if st.button("💾 記事の買い目・本文を保存し直す", key=f"{key_prefix}note_update_{ctx}",
+                         disabled=not sure):
                 try:
                     _rpc("update_note_publication_article", {
                         "p_race_key": ctx, "p_ticket_source": source, "p_article_tickets": tickets,
@@ -286,7 +295,7 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
     else:
         st.caption("まだ記事枠は確定していません。noteは全て有料（300円）として記録します。"
                    "確定するときに、本文をClaudeが書きます（失敗したときは決まった型）。")
-        if st.button("📝 note記事用に確定（有料）", key=f"reserve_note_{ctx}", disabled=closed):
+        if st.button("📝 note記事用に確定（有料）", key=f"{key_prefix}reserve_note_{ctx}", disabled=closed):
             if not res and api_key:
                 res = _write_claude(ctx, api_key, model, work, final_used, tickets, probs, rows, label, deadline,
                                     source)
@@ -313,7 +322,7 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
             st.caption("締切後のため、記事枠は確定できません。")
 
     if not locked and api_key and st.button("🧠 Claudeで本文を作り直す" if res else "🧠 Claudeで本文を作る",
-                                            key=f"note_claude_btn_{ctx}_{source}"):
+                                            key=f"{key_prefix}note_claude_btn_{ctx}_{source}"):
         _write_claude(ctx, api_key, model, work, final_used, tickets, probs, rows, label, deadline, source,
                       force=bool(res))
         st.rerun()
@@ -323,9 +332,11 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
     elif writer == "template":
         st.caption("本文: 決まった型")
 
-    title = st.text_input("noteタイトル", value=na.article_title(venue, rno, deadline), key=f"note_title_{ctx}")
+    title = st.text_input("noteタイトル", value=na.article_title(venue, rno, deadline),
+                          key=f"{key_prefix}note_title_{ctx}")
     digest = hashlib.sha1(body.encode("utf-8")).hexdigest()[:8]
-    body = st.text_area("note本文（そのままコピー用）", value=body, height=420, key=f"note_body_{ctx}_{digest}")
+    body = st.text_area("note本文（そのままコピー用）", value=body, height=420,
+                        key=f"{key_prefix}note_body_{ctx}_{digest}")
     _copy_buttons(title, body)
 
     # note に貼る用: 無料部分（買い目なし）と有料部分
@@ -335,14 +346,15 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
                "④ 2つの境目（「ここから先は有料部分です」の下）に有料ラインを置く")
     c1, c2 = st.columns(2)
     with c1:
-        free = st.text_area("無料部分（買い目なし）", value=free, height=260, key=f"note_free_{ctx}_{_digest(body)}")
+        free = st.text_area("無料部分（買い目なし）", value=free, height=260,
+                            key=f"{key_prefix}note_free_{ctx}_{_digest(body)}")
     with c2:
         paid = st.text_area("有料部分（買い目・詳しい展開）", value=paid, height=260,
-                            key=f"note_paid_{ctx}_{_digest(body)}")
+                            key=f"{key_prefix}note_paid_{ctx}_{_digest(body)}")
     _split_copy_buttons(free, paid)
 
     # 見出し画像（自動で選ぶ・変えられる・記事ごとに記録）
-    render_header(ctx, d, date_iso, label, pub, work, body, with_aim=na.is_aim(tickets))
+    render_header(ctx, d, date_iso, label, pub, work, body, with_aim=na.is_aim(tickets), key_prefix=key_prefix)
 
     # 予想カード画像
     with st.expander("🖼 予想カード画像", expanded=False):
@@ -353,7 +365,7 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
             lane = max(probs, key=lambda k: probs[k])
             fav = (lane, next((r["name"] for r in rows if r["lane"] == lane), ""))
         card_key = f"note_card_{ctx}_{source}_{hashlib.sha1(json.dumps(tickets).encode()).hexdigest()[:8]}"
-        if st.button("🖼 カード画像を作る", key=f"{card_key}_btn"):
+        if st.button("🖼 カード画像を作る", key=f"{key_prefix}{card_key}_btn"):
             st.session_state[card_key] = pick_card.render_card(
                 venue, rno, deadline, d.strftime("%Y/%m/%d") if hasattr(d, "strftime") else date_iso,
                 tickets, probs, rows, na.SOURCE_LABELS.get(source, ""), favorite=fav)
@@ -361,8 +373,26 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
         if png:
             st.image(png, use_container_width=True)
             st.download_button("💾 画像を保存", data=png, file_name=f"{date_iso}_{venue}{rno}R.png",
-                               mime="image/png", key=f"{card_key}_dl", use_container_width=True)
+                               mime="image/png", key=f"{key_prefix}{card_key}_dl", use_container_width=True)
     return pub
+
+
+def posted_at_text(pub):
+    """確定した時刻（例: 「・10:12」）。読めなければ空。"""
+    import race_posts
+
+    at = race_posts.jst_hhmm((pub or {}).get("created_at"))
+    return f"・{at}" if at else ""
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_day_publications(date_iso):
+    """その日に確定した記事（一覧の「確定済み（時刻）」に使う）。読めなければ空。"""
+    try:
+        return _get(f"note_publications?publication_date=eq.{date_iso}&select=race_key,created_at,ticket_source,"
+                    "sequence_no,publication_type")
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _race_flags(ctx, d):
@@ -394,7 +424,7 @@ def _aim_when(mark):
     return manshu_view.aim_source_text(mark or {}).strip("（）")
 
 
-def render_header(ctx, d, date_iso, label, pub, work, body, with_aim=False):
+def render_header(ctx, d, date_iso, label, pub, work, body, with_aim=False, key_prefix=""):
     """見出し画像の欄。選んだ画像を出し、保存ボタンで端末に保存する。確定した記事なら使った画像を記録する。"""
     st.markdown("##### 🖼 見出し画像")
     keys = nh.available()
@@ -413,7 +443,7 @@ def render_header(ctx, d, date_iso, label, pub, work, body, with_aim=False):
     choice = st.selectbox(
         "見出し画像", keys, index=keys.index(current),
         format_func=lambda k: nh.HEADERS[k].label + ("（自動で選んだ画像）" if k == auto else ""),
-        key=f"note_header_{ctx}")
+        key=f"{key_prefix}note_header_{ctx}")
     st.caption(f"自動で選んだ画像: {nh.HEADERS[auto].label}（{why}）"
                + ("" if choice == auto else "　→ 自分で変えています"))
     if not nh.HEADERS["manshu"].exists():
@@ -421,7 +451,7 @@ def render_header(ctx, d, date_iso, label, pub, work, body, with_aim=False):
     data = nh.HEADERS[choice].path.read_bytes()
     st.image(data, use_container_width=True)
     st.download_button("💾 見出し画像を保存", data=data, file_name=nh.file_name(choice, date_iso, label),
-                       mime="image/jpeg", key=f"note_header_dl_{ctx}_{choice}", use_container_width=True)
+                       mime="image/jpeg", key=f"{key_prefix}note_header_dl_{ctx}_{choice}", use_container_width=True)
     if not pub:
         st.caption("記事枠を確定すると、使った画像を記事ごとに記録します。")
         return

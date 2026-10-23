@@ -3,9 +3,10 @@
 
 毎朝 pre_picks.py が展示前モデルで選んだ10レース（Supabase の pre_exhibition_picks）を、
 会場・レース番号・締切・的中確率・本命・買い目で並べる。「このレースを開く」で予想タブの
-下の欄にそのレースを読み込む。展示後にそのレースを予想すると（アプリか自動固定）、買い目は
-今の新モデル（展示後）の予想に差し替わり、本命が変わった・的中確率が10ポイント以上下がった
-レースには印が付く（外さない）。結果（的中・払戻）はレースが終わるとその日のうちに書き込まれ（list_results.py）、
+下の欄にそのレースを読み込む。各レースの「📝 note記事」「🧵 スレッズ投稿」で、予想タブと同じ欄を
+そのレースの中に開ける（publish_panel.py。「💥 万舟チャンス」の一覧も同じ）。
+展示後にそのレースを予想すると（アプリか自動固定）、買い目は今の新モデル（展示後）の予想に差し替わり、
+本命が変わった・的中確率が10ポイント以上下がったレースには印が付く（外さない）。結果（的中・払戻）はレースが終わるとその日のうちに書き込まれ（list_results.py）、
 各レースと一覧の最後（その日の集計）に出る。翌朝のまとめての記録は取りこぼしの保険。
 
 表示は「当たりやすいレース」。回収率が上がることを示すものではないので、そうは書かない。
@@ -198,6 +199,13 @@ def render_card(d, r, spec, other_marks=None, cancelled=()):
             st.markdown(line)
         st.button("🎯 このレースを開く", key=f"{spec.key}_open_{r['race_key']}", on_click=_open_race,
                   args=(r["jcd"], r["race_no"]), use_container_width=True)
+        # 管理者の一覧だけ: note記事・スレッズ投稿（中身は予想タブと同じ欄。publish_panel.py）
+        try:
+            import publish_panel
+
+            publish_panel.render(d, r, spec.key)
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"note記事・スレッズ投稿の欄を表示できませんでした: {type(e).__name__}")
 
 
 def result_state(d, r, cancelled=()):

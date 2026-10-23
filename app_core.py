@@ -34,6 +34,8 @@ import claude_usage
 import manshu_view
 import pre_picks_view
 import note_view
+import race_posts
+import threads_view
 import threads_auto_view
 import daily_review
 import validation_view
@@ -70,7 +72,6 @@ from result_tracker import (
     load_prediction_snapshot_meta,
     build_snapshot_payload_json,
     save_latest_prediction_snapshot,
-    restore_snapshot_frames,
     supabase_config,
     supabase_service_config,
     fetch_daily_schedule_supabase,
@@ -988,12 +989,9 @@ def _saved_prediction_frames(ctx, result):
     if cached and cached[0] == cache_key:
         return cached[1], cached[2]
 
-    snapshot = load_prediction_snapshot(ctx)
-    final_df, tickets_df, _ = restore_snapshot_frames(snapshot)
-    if final_df is None or tickets_df is None or not len(final_df) or not len(tickets_df):
+    final_df, tickets_df, _ = race_posts.frames_from_snapshot(load_prediction_snapshot(ctx))
+    if final_df is None:
         return None, None
-    if "stake" in tickets_df.columns:
-        tickets_df["stake"] = pd.to_numeric(tickets_df["stake"], errors="coerce").fillna(0).astype(int)
     cache[ctx] = (cache_key, final_df, tickets_df)
     return final_df, tickets_df
 
@@ -2995,71 +2993,14 @@ with tab1:
                     st.caption("🧵 保存された予想が無いため、スレッズ投稿は使えません。")
                 elif _threads_cfg:
                     with st.expander("🧵 スレッズに投稿", expanded=False):
-                        # 万舟チャンスのレース: 通常の予想の文か、中穴〜万舟狙いの文かを選ぶ
+                        # 文章・投稿済みの記録・二重投稿の確認は threads_view.py（一覧の投稿ボタンと共通）。
+                        # 万舟チャンスのレースは、通常の予想の文か中穴〜万舟狙いの文かを選ぶ
                         # （初期値は note の記事に載せた買い目に合わせる）
-                        _threads_style = "normal"
-                        if _manshu_marks.get(ctx):
-                            _style_opts = ["normal", "aim"]
-                            _threads_style = st.radio(
-                                "スレッズの文章",
-                                _style_opts,
-                                index=1 if (_existing_pub or {}).get("ticket_source") == "aim" else 0,
-                                format_func=lambda m: {"normal": "通常の予想", "aim": "中穴〜万舟狙い"}[m],
-                                horizontal=True,
-                                key=f"threads_style_{ctx}",
-                            )
-                        _default_text = threads_build_post_text(
-                            race_date=d.strftime("%-m/%-d") if hasattr(d, "strftime") else str(d),
-                            venue=VENUES[jcd],
-                            race_no=rno,
-                            final=_saved_final,
-                            tickets=_saved_tickets,
-                            deadline=(deadlines or {}).get(rno),
-                            # note は全て有料。記事にしていないレースも有料記事の案内の型にする
-                            publication_type=str((_existing_pub or {}).get("publication_type") or "PAID"),
-                            style=_threads_style,
+                        threads_view.render(
+                            ctx, d, VENUES[jcd], rno, (deadlines or {}).get(rno), _saved_final, _saved_tickets,
+                            _existing_pub, _threads_cfg, is_manshu=bool(_manshu_marks.get(ctx)),
+                            screen="predict", prediction="保存された最新の予想",
                         )
-
-                        _posted_key = f"threads_posted_{ctx}"
-                        if st.session_state.get(_posted_key):
-                            st.success(
-                                "✅ このレースは投稿済みです。"
-                                f" 投稿ID: {st.session_state[_posted_key]}"
-                            )
-
-                        _text = st.text_area(
-                            "投稿内容（送信前に編集できます）",
-                            value=_default_text,
-                            height=240,
-                            key=f"threads_text_v2_{ctx}_{_threads_style}",
-                        )
-                        _len = len(_text)
-                        if _len > THREADS_TEXT_LIMIT:
-                            st.error(f"{_len} / {THREADS_TEXT_LIMIT}文字（超過しています）")
-                        else:
-                            st.caption(f"{_len} / {THREADS_TEXT_LIMIT}文字")
-
-                        if st.button(
-                            "🧵 この内容でスレッズに投稿",
-                            key=f"post_threads_{ctx}",
-                            disabled=_len > THREADS_TEXT_LIMIT,
-                        ):
-                            try:
-                                _post_id = threads_post_text(
-                                    _threads_cfg["user_id"],
-                                    _threads_cfg["access_token"],
-                                    _text,
-                                )
-                                st.session_state[_posted_key] = _post_id
-                                st.success(f"投稿しました。（投稿ID: {_post_id}）")
-                                st.rerun()
-                            except Exception as e:
-                                st.error("スレッズへの投稿に失敗しました。")
-                                st.code(str(e))
-                                st.caption(
-                                    "トークンが失効している可能性があります。"
-                                    "設定タブから再登録してください。"
-                                )
 
                 _before_label = result.get("before_label")
                 merged = final.merge(before[["lane","p_first"]], on="lane", how="left", suffixes=("_after","_before"))
