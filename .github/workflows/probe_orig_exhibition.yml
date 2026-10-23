@@ -10,7 +10,7 @@ on:
     paths: [docs/data_investigation/probe/run_orig.sh]
 
 concurrency:
-  group: probe-orig
+  group: probe-orig-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:

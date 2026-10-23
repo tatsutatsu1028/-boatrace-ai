@@ -355,11 +355,52 @@ def render():
         br.close()
 
 
+def bcpast():
+    """BOATCAST の過去分がいつまで残っているかを月単位で絞り込む。"""
+    res = {}
+    t = now()
+    for back in list(range(330, 800, 30)):
+        d = (t - timedelta(days=back)).strftime("%Y%m%d")
+        vs = open_venues(d)
+        rec = {}
+        for jcd in [v for v in vs if v != "03"][:2]:
+            r = get(BC.format(jcd=jcd, d=d, rr="06"))
+            rec[jcd] = None if r is None else r.status_code
+        res[d] = rec
+        print("[BCPAST]", d, rec, flush=True)
+    (OUT / "boatcast_past.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def jsgrep():
+    """共通CMSの直前情報ページが読む JS から ajax の URL とパラメータを拾う。"""
+    res = {}
+    for f in sorted((OUT / "html").glob("*_f*.html")):
+        jcd = f.name[:2]
+        html = f.read_text(encoding="utf-8", errors="ignore")
+        base = re.search(r"<!-- (\S+) -->", html).group(1)
+        soup = BeautifulSoup(html, "lxml")
+        found = set(re.findall(r"[\w/\-.]*ajax[\w/\-.]*\.php[^'\"\s]*", html))
+        for s in soup.find_all("script", src=True):
+            src = requests.compat.urljoin(base, s["src"])
+            if re.search(r"yosou|cyokuzen|chokuzen|race", src) and not re.search(r"jquery|google", src):
+                r = get(src)
+                if r is not None and r.status_code == 200:
+                    for m in re.finditer(r"[\w/\-.]*ajax[\w/\-.]*\.php", r.text):
+                        found.add(m.group(0))
+                        found.add(r.text[max(0, m.start() - 200): m.end() + 300].replace("\n", " "))
+        res.setdefault(jcd, {})[f.name] = sorted(found)[:20]
+    (OUT / "jsgrep.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "boatcast":
         boatcast()
     elif cmd == "monitor":
         monitor(sys.argv[2])
+    elif cmd == "bcpast":
+        bcpast()
+    elif cmd == "jsgrep":
+        jsgrep()
     elif cmd == "render":
         render()
