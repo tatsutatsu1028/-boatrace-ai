@@ -41,3 +41,13 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python track_odds.py
+
+      # スレッズの朝の自動投稿で出した3レースの結果を、朝の投稿への返信として投稿する（threads_results.py）。
+      # 結果確定（上の Track odds）のあとに動く。ON/OFF はアプリの設定。記録は Supabase の threads_result_posts。
+      # 同じレースは1回だけ（行を取ってから投稿する）。ログは件数・合否だけ。
+      - name: Threads result posts
+        if: ${{ !cancelled() }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python threads_results.py run
