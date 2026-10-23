@@ -8,3 +8,4 @@ history_full.csv
 data/
 _data/
 .streamlit/secrets.toml
+docs/data_investigation/probe/out_orig/

@@ -1,0 +1,50 @@
+name: Probe original exhibition (temporary)
+
+# 調査用の一時ワークフロー。調査ブランチへの push でのみ動き、
+# docs/data_investigation/probe/run_orig.sh に書いたコマンドを実行する。
+# 取得したページ（公式データ）は公開リポジトリに置かず、非公開のデータ用
+# リポジトリの reports/orig_exhibition_probe/ にだけ保存する。調査後に削除する。
+on:
+  push:
+    branches: [claude/boat-race-exhibition-data-survey-93lorx]
+    paths: [docs/data_investigation/probe/run_orig.sh]
+
+concurrency:
+  group: probe-orig
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    permissions:
+      contents: read
+    env:
+      PROBE_OUT: ${{ github.workspace }}/_data/reports/orig_exhibition_probe
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+          sparse-checkout: |
+            reports/orig_exhibition_probe
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Probe
+        run: bash docs/data_investigation/probe/run_orig.sh
+      - name: Commit results (private data repo)
+        if: always()
+        working-directory: _data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/orig_exhibition_probe
+          git diff --staged --quiet && { echo "変更なし"; exit 0; }
+          git commit -q -m "probe: オリジナル展示の調査結果（一時）"
+          for i in 1 2 3; do git pull -q --rebase && git push -q && break; sleep 5; done
