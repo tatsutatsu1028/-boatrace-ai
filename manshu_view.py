@@ -404,18 +404,7 @@ def _manshu_tickets_block(d, r, passed):
     shown = st.session_state.setdefault("manshu_aim_list", {})
     label = "🔄 オッズを更新" if (shown.get(rk) or saved) else "💰 オッズを取得して買い目を作る"
     if probs and st.button(label, key=f"manshu_aim_refresh_{rk}"):
-        try:
-            odds, at = odds_for(rk, refresh=True)
-        except Exception as e:  # noqa: BLE001
-            st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
-            odds, at = {}, None
-        if odds:
-            tickets = manshu.aim_tickets(probs, odds)
-            shown[rk] = (tickets, at, which)
-            if tickets and save_aim(rk, tickets, "list", at) is False:
-                st.caption("（買い目の保存に失敗しました）")
-        elif at is not None:
-            st.caption("オッズがまだ出ていません（発売前など）。")
+        rebuild_aim(r)
     if rk in shown:
         tickets, at, which = shown[rk]
         st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(at)} のオッズ・{which}の確率で作成）")
@@ -431,6 +420,30 @@ def _manshu_tickets_block(d, r, passed):
         st.caption(f"{manshu.AIM_LABEL}: まだ作っていません（上のボタンでその時点のオッズから作ります）。")
     st.caption(manshu.AIM_NOTE + " " + manshu.AIM_MORNING_NOTE
                + " 当たり外れは、締切前に最後に表示した買い目で判定します。")
+
+
+def rebuild_aim(r):
+    """その時点のオッズで中穴〜万舟狙いの買い目を作り直して保存する（一覧の「オッズを更新」と、
+    一覧の note記事・スレッズ投稿の欄で共通）。作れたら True。結果は一覧の表示（manshu_aim_list）にも入れる。"""
+    rk = r["race_key"]
+    probs, which = aim_probs(r)
+    if not probs:
+        st.caption(f"{manshu.AIM_LABEL}: 3連単の確率が無いため作れません。")
+        return False
+    try:
+        odds, at = odds_for(rk, refresh=True)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
+        return False
+    if not odds:
+        st.caption("オッズがまだ出ていません（発売前など）。")
+        return False
+    tickets = manshu.aim_tickets(probs, odds)
+    st.session_state.setdefault("manshu_aim_list", {})[rk] = (tickets, at, which)
+    if tickets and save_aim(rk, tickets, "list", at) is False:
+        st.caption("（買い目の保存に失敗しました）")
+        return False
+    return bool(tickets)
 
 
 def aim_result(r):
