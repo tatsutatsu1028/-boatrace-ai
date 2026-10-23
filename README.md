@@ -144,6 +144,25 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
   後で Claude の文章にするときは `threads_morning.build_texts` に writer を渡す（失敗したらその投稿だけ決まった型）
 - 止めるとき: アプリで OFF、または `select cron.unschedule('trigger-threads-morning');`
 
+### 朝の無料3レースの結果（スレッズの自動投稿）
+朝に出した3レースの結果を、オッズ追跡（`track_odds.yml`・5分おき）の結果確定のあとのステップで投稿します（`threads_results.py`）。
+
+- 各レースの結果が分かったら、そのレースを載せた朝の投稿への返信で「会場・R・3連単の着順・配当」と、的中なら「的中」と当たった買い目、
+  外れなら「不的中」を投稿する（外れも必ず出す）。中止・返還のレースは「中止」「返還」と書く。購入金額・収支は載せない
+- 3レースとも結果が分かったら、1投稿目への返信で「本日の厳選3レースの結果まとめ」（○レース中○レース的中）を投稿する
+- 結果は「🌅 展示前厳選10」の結果の列（`list_results.py` がその日のうちに書く）。締切から40分たっても無いレースだけ、
+  公式の結果ページを15分おきに読む（結果が出ていれば一覧にも書く。中止・返還もここで分かる。会場の中止は `daily_schedule` も見る）
+- ON/OFF: 設定タブの「🌅 朝の無料3レース」→「結果の自動投稿」（`app_settings.threads_result_post_enabled`。初期値 OFF）。
+  朝の自動投稿も ON で、朝の3投稿が全部出た日（`threads_auto_posts.status = posted`）だけ投稿する
+- 記録: `threads_result_posts`（1日に最大4行。レースごと3行 + まとめ1行。いつ・どのレース・成否・本文）。設定タブの記録に出る。
+  同じレース・まとめは1回だけ（行を取ってから投稿する）。失敗は次の回にやり直し、3回失敗したら止めて理由を残す。
+  投稿の途中で止まった行は、二重投稿を防ぐため出し直さない
+- 文章は `threads_results.build_race_text` / `build_summary_text` の決まった型。後で Claude の文章にするときは
+  `threads_results.run` に writer(race_date, kind, data) を渡す（失敗・空・長すぎるときは決まった型）
+- 試し（投稿も記録もしない）: `python threads_results.py run --date YYYYMMDD --dry-run`（どの時刻にどんな文章が出るか。
+  朝の投稿が出ていない日は、9:00 に選ばれたはずの3レースで試す）
+- データベース: `supabase/migrations/20261027000000_threads_result_posts.sql`
+
 ### note（全て有料・展示後）
 予想タブの「📝 note記事（有料）」欄（`note_view.py`）。
 
