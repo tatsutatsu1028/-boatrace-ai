@@ -1,10 +1,10 @@
 set -x
 cd docs/data_investigation/probe
 TZ=Asia/Tokyo date
-python probe_orig_exhibition.py today
-d=$(TZ=Asia/Tokyo date +%Y%m%d)
-cat > /tmp/bc.json <<J
-{"bc": ["https://race.boatcast.jp/", "https://race.boatcast.jp/txt/01/bc_oriten_${d}_01_01.txt", "https://race.boatcast.jp/txt/20/bc_oriten_${d}_20_01.txt", "https://race.boatcast.jp/txt/24/bc_oriten_${d}_24_01.txt"]}
-J
-python probe_orig_exhibition.py fetch /tmp/bc.json
-python probe_orig_exhibition.py discover
+pip install -q playwright && python -m playwright install --with-deps chromium > /dev/null
+python probe_orig2.py monitor 2300 > monitor.log 2>&1 &
+MON=$!
+python probe_orig2.py boatcast
+python probe_orig2.py render
+wait $MON
+grep MON monitor.log | tail -40
