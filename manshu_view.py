@@ -586,11 +586,20 @@ def _render_variants(rows, today, key="manshu_variant_period"):
     for c in ("的中率", "回収率"):
         t[c] = t[c].map(_pct)
     st.dataframe(t, hide_index=True, use_container_width=True)
-    st.caption("どれも1号艇の1着を外す・確定3連単オッズ30倍以上・計10点・各100円。期待値順 = 確率×オッズの高い順。"
-               "片方の組が足りなければもう片方で埋めます。朝版・展示後版の両方が作れたレースだけを数えています。"
+    st.caption("A〜D: 1号艇の1着を外す・確定3連単オッズ30倍以上・計10点・各100円。期待値順 = 確率×オッズの高い順。"
+               "片方の組が足りなければもう片方で埋めます。"
+               "E〜I: 1着を「1号艇以外で1着確率が高い上位2艇」に固定し、その2艇が1着の組から確率順に選ぶ（各100円。"
+               "E・F・G はオッズの条件なし、H・I は確定オッズ30倍以上だけ。足りなければ点数が減ります）。"
+               "朝版・展示後版の両方が作れたレースだけを数えています。"
                f"見送りあり = その版の確率で1号艇の1着確率が{manshu.VARIANT_SKIP_P1:.0%}以上のレースは買わない"
                "（レース数は買ったレースの数）。確率の合計 = 買い目の確率の合計（当たるはずの本数。的中数と比べる）。"
                "画面・本番の買い目は A のままです。")
+    top2 = pd.DataFrame(manshu.top2_summary(sub))
+    if not top2.empty:
+        top2["割合"] = top2["割合"].map(_pct)
+        st.markdown("**E〜I: 1着に選んだ2艇のどちらかが実際に1着になった割合**")
+        st.dataframe(top2, hide_index=True, use_container_width=True)
+        st.caption("2艇 = その版の確率で、1号艇以外で1着確率が高い上位2艇。上の表と同じレースで数えています。")
 
 
 def render_list(d, is_admin=False):

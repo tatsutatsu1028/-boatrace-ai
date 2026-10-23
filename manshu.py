@@ -459,19 +459,74 @@ def compare_summary(rows):
 
 
 VARIANT_NAMES = {"A": "A 確率順 中穴5＋万舟5（今）", "B": "B 期待値順 中穴5＋万舟5",
-                 "C": "C 確率順 中穴3＋万舟7", "D": "D 期待値順 中穴3＋万舟7"}
+                 "C": "C 確率順 中穴3＋万舟7", "D": "D 期待値順 中穴3＋万舟7",
+                 "E": "E 1着2艇 確率順10点", "F": "F 1着2艇 確率順15点", "G": "G 1着2艇 確率順20点",
+                 "H": "H 1着2艇 30倍以上 確率順10点", "I": "I 1着2艇 30倍以上 確率順20点"}
 VARIANT_SKIP_P1 = 0.5       # 見送りあり: その版の1号艇の1着確率がこれ以上のレースは買わない
+# 1着を絞る作り方 {名前: (点数, オッズの下限 or None)}。1着は1号艇以外で1着確率が高い上位2艇（top2_lanes）
+TOP2_VARIANTS = {"E": (10, None), "F": (15, None), "G": (20, None), "H": (10, AIM_MID_MIN), "I": (20, AIM_MID_MIN)}
 
 
-def variant_summary(rows):
-    """作り方ごとの成績（manshu_aim_compare.variants）。朝版・展示後版の両方が作れたレースだけで比べる。
-    見送りありは、そのうちその版の1号艇の1着確率が VARIANT_SKIP_P1 以上のレースを買わない。"""
+def top2_lanes(probs, exclude=("1",)):
+    """1着から外す艇（既定 1号艇）以外で、1着確率が高い上位2艇の艇番 [a, b]（同じ確率なら内側）。"""
+    first = first_probs(probs)
+    lanes = [k for k in first if str(k) not in {str(x) for x in exclude}]
+    return sorted(lanes, key=lambda k: (-first[k], k))[:2]
+
+
+def top2_tickets(probs, odds, n, odds_min=None, lanes=None):
+    """1着を lanes（既定 top2_lanes）に固定し、その組の中から3連単の確率が高い順に n 点（各 AIM_STAKE 円）。
+    odds_min: オッズの下限（None なら条件なし）。確定オッズが無い組（欠場など）は買えないので外す。
+    → [{combo, prob, odds, tier, stake, payout}]（tier は "中穴"/"万舟"、30倍未満は "30倍未満"）"""
+    lanes = {str(x) for x in (top2_lanes(probs) if lanes is None else lanes)}
+    rows = []
+    for combo, p in (probs or {}).items():
+        if str(combo)[:1] not in lanes:
+            continue
+        try:
+            o, p = float((odds or {}).get(combo)), float(p)
+        except (TypeError, ValueError):
+            continue
+        if p != p or o != o or (odds_min is not None and o < odds_min):
+            continue
+        rows.append((combo, p, o))
+    rows.sort(key=lambda r: (-r[1], r[0]))
+    return [{"combo": c, "prob": round(p, 5), "odds": o, "tier": odds_tier(o) or "30倍未満", "stake": AIM_STAKE,
+             "payout": int(round(o * AIM_STAKE))} for c, p, o in rows[:n]]
+
+
+def _variant_races(rows):
+    """朝版・展示後版の両方で、全部の作り方がそろったレース [(行, variants)]。"""
     both = []
     for r in rows or []:
         v = r.get("variants") or {}
         pre, post = v.get("pre") or {}, v.get("post") or {}
         if all(s and not s.get("error") and all(k in s for k in VARIANT_NAMES) for s in (pre, post)):
             both.append((r, v))
+    return both
+
+
+def _skipped(s, skip):
+    return skip and float(s.get("p1") or 0) >= VARIANT_SKIP_P1
+
+
+def top2_summary(rows):
+    """1着に選んだ2艇（E〜I の1着）のどちらかが実際に1着になった割合。variant_summary と同じレースで数える。"""
+    both = _variant_races(rows)
+    out = []
+    for side, side_label in (("pre", "朝版"), ("post", "展示後版")) if both else ():
+        for skip in (False, True):
+            races = [v[side] for _, v in both if not _skipped(v[side], skip)]
+            won = sum(bool(s.get("top2_hit")) for s in races)
+            out.append({"版": side_label, "見送り": "あり" if skip else "なし", "レース数": len(races),
+                        "2艇のどちらかが1着": won, "割合": won / len(races) if races else None})
+    return out
+
+
+def variant_summary(rows):
+    """作り方ごとの成績（manshu_aim_compare.variants）。朝版・展示後版の両方が作れたレースだけで比べる。
+    見送りありは、そのうちその版の1号艇の1着確率が VARIANT_SKIP_P1 以上のレースを買わない。"""
+    both = _variant_races(rows)
     if not both:
         return []
     out = []
@@ -482,7 +537,7 @@ def variant_summary(rows):
                 prob_sum = 0.0
                 for r, v in both:
                     s = v[side]
-                    if skip and float(s.get("p1") or 0) >= VARIANT_SKIP_P1:
+                    if _skipped(s, skip):
                         continue
                     x = s[name]
                     races += 1

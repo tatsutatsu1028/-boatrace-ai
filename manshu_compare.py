@@ -11,7 +11,11 @@
 オッズ30倍以上・計10点・各100円で
   A: 確率順・中穴5点＋万舟5点（今の作り方） / B: 期待値順（確率×オッズ）・中穴5点＋万舟5点
   C: 確率順・中穴3点＋万舟7点            / D: 期待値順・中穴3点＋万舟7点
-を作り、variants（成績・1号艇の1着確率）と variant_tickets（買い目）に残す。
+を作る。あわせて1着を絞る作り方（1着 = 1号艇以外で1着確率が高い上位2艇。その2艇が1着の組の中から
+3連単の確率順・各100円）として
+  E: 10点 / F: 15点 / G: 20点（オッズの条件なし） / H: 10点 / I: 20点（オッズ30倍以上だけ）
+を作る。どれも variants（成績・1号艇の1着確率・1着に選んだ2艇と、そのどちらかが1着になったか）と
+variant_tickets（買い目）に残す。
 「1号艇の1着確率が50%以上なら見送る」版は、variants の p1（その版の確率で見た1号艇の1着確率）で集計時に絞る
 （manshu.variant_summary）。
 
@@ -42,6 +46,7 @@ MISSING_PRE = "朝の3連単の確率がありません"
 MISSING_POST = "事後予想の3連単の確率がまだありません"
 # 比べる作り方 {名前: (並べ方, 中穴の点数, 万舟の点数)}。どれも1号艇1着を外す・30倍以上・計10点・各100円
 VARIANTS = {"A": ("prob", 5, 5), "B": ("ev", 5, 5), "C": ("prob", 3, 7), "D": ("ev", 3, 7)}
+# 1着を絞る作り方 E〜I は manshu.TOP2_VARIANTS
 
 
 def log(*a):
@@ -79,17 +84,24 @@ def side_fields(prefix, probs, odds, pays, missing):
 
 def variant_side(probs, odds, pays, missing):
     """片方（朝版 / 展示後版）の作り方ごとの成績と買い目。
-    → ({"p1", "error", 作り方: {hit, stake, return, prob_sum}}, {作り方: 買い目})"""
+    → ({"p1", "error", "top2"（1着に選んだ2艇）, "top2_hit"（そのどちらかが1着か）,
+         作り方: {hit, stake, return, prob_sum}}, {作り方: 買い目})"""
     import manshu
     from pre_picks import ticket_result
 
     if not probs:
         return {"error": missing}, {}
-    stats = {"p1": round(manshu.first_probs(probs).get(1, 0.0), 5), "error": None}
-    tickets = {}
+    top2 = manshu.top2_lanes(probs)
+    stats = {"p1": round(manshu.first_probs(probs).get(1, 0.0), 5), "error": None, "top2": top2,
+             "top2_hit": any(str(c)[:1] in {str(x) for x in top2} for c, _ in pays)}
+    made = {}
     for name, (order, mid, high) in VARIANTS.items():
-        t = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": mid, "万舟": high}, order=order,
-                               exclude=("1",))
+        made[name] = manshu.aim_tickets(probs, odds, method="MIX", mix={"中穴": mid, "万舟": high}, order=order,
+                                        exclude=("1",))
+    for name, (n, odds_min) in manshu.TOP2_VARIANTS.items():
+        made[name] = manshu.top2_tickets(probs, odds, n, odds_min, lanes=top2)
+    tickets = {}
+    for name, t in made.items():
         hit, stake, ret = ticket_result(t, pays)
         stats[name] = {"hit": bool(hit), "stake": int(stake or 0), "return": int(ret or 0),
                        "prob_sum": round(sum(x["prob"] for x in t), 5)}
@@ -131,11 +143,15 @@ def compare_row(pick, odds, post, pays, variants=True):
 def done(row, variants=True):
     """もう作り直さなくてよい行（確定オッズがあり、展示後版の買い目まで作れた行）。
     variants: 作り方ごとの比較もそろっていることを求める（無ければ確定オッズは取り直さずに作り直す）。"""
+    import manshu
+
     ok = bool(row and row.get("final_odds") and (row.get("post_tickets") or row.get("post_error")
                                                    not in (None, MISSING_POST)))
     if ok and variants:
         post = (row.get("variants") or {}).get("post") or {}
         ok = bool(post) and post.get("error") != MISSING_POST
+        if ok and not post.get("error"):  # 後から足した作り方（E〜I）が無ければ作り直す
+            ok = all(k in post for k in [*VARIANTS, *manshu.TOP2_VARIANTS, "top2_hit"])
     return ok
 
 

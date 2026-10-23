@@ -108,12 +108,15 @@ def test_variants_orders_and_mix():
     # 作り方ごとの比較が無い行は、確定オッズがあっても作り直す
     old = {"final_odds": odds, "post_tickets": [{"combo": "4-1-2"}]}
     assert not manshu_compare.done(old) and manshu_compare.done(old, variants=False)
-    assert manshu_compare.done({**old, "variants": {"post": {"p1": 0.3}}})
+    full = {"p1": 0.3, "top2_hit": False, **{k: {} for k in manshu.VARIANT_NAMES}}
+    assert manshu_compare.done({**old, "variants": {"post": full}})
+    # E〜I が無い（A〜D だけの）行も作り直す
+    assert not manshu_compare.done({**old, "variants": {"post": {k: v for k, v in full.items() if k < "E"}}})
 
 
-def _vside(p1, hit_a, prob=0.1, ret=15000):
-    s = {"p1": p1, "error": None}
-    for n in "ABCD":
+def _vside(p1, hit_a, prob=0.1, ret=15000, top2_hit=False):
+    s = {"p1": p1, "error": None, "top2": [2, 3], "top2_hit": top2_hit}
+    for n in manshu.VARIANT_NAMES:
         hit = hit_a and n == "A"
         s[n] = {"hit": hit, "stake": 1000, "return": ret if hit else 0, "prob_sum": prob}
     return s
@@ -130,7 +133,7 @@ def test_variant_summary_same_races_and_skip():
         {"race_date": "2026-10-21", "is_manshu": True},
     ]
     out = {(r["版"], r["見送り"], r["作り方"][0]): r for r in manshu.variant_summary(rows)}
-    assert len(out) == 16
+    assert len(out) == 2 * 2 * len(manshu.VARIANT_NAMES)
     a = out[("朝版", "なし", "A")]
     assert (a["レース数"], a["的中数"], a["的中率"], a["回収率"], a["万舟の的中"], a["確率の合計"]) == (2, 1, 0.5, 7.5, 1, 0.2)
     a = out[("朝版", "あり", "A")]  # 1号艇0.6のレースを見送る
@@ -139,6 +142,58 @@ def test_variant_summary_same_races_and_skip():
     assert (a["レース数"], a["的中数"], a["回収率"], a["万舟の的中"]) == (1, 1, 15.0, 1)
     assert out[("展示後版", "なし", "B")]["的中数"] == 0
     assert manshu.variant_summary(rows[2:]) == []
+    # A〜D だけの古い行は、作り直すまで数えない
+    old = {"race_date": "2026-10-20", "is_manshu": True,
+           "variants": {s: {k: v for k, v in _vside(0.2, True).items() if k not in "EFGHI"} for s in ("pre", "post")}}
+    assert manshu.variant_summary([old]) == []
+
+
+def test_top2_variants():
+    odds = _odds()
+    odds.update({"3-2-4": 8.0, "3-4-2": 12.0})  # 30倍未満の組
+    first = {1: 0.40, 2: 0.10, 3: 0.25, 4: 0.20, 5: 0.03, 6: 0.02}
+    probs = {}
+    for k in odds:
+        rest = [x for x in range(1, 7) if x != int(k[0])]
+        probs[k] = first[int(k[0])] / 20 * (1 - 0.1 * rest.index(int(k[2])) - 0.01 * rest.index(int(k[4])))
+    assert manshu.top2_lanes(probs) == [3, 4]
+    assert manshu.top2_lanes(_tri({1: 0.4, 2: 0.2, 5: 0.2, 3: 0.2})) == [2, 3]  # 同じ確率なら内側
+    row = manshu_compare.compare_row({"race_key": "r", "race_date": "2026-10-20", "tri_probs": probs}, odds,
+                                     ("ml-chain-v2-x+p", probs), [("4-1-2", 9000)])
+    v, t = row["variants"]["pre"], row["variant_tickets"]["pre"]
+    assert v["top2"] == [3, 4] and v["top2_hit"] is True
+    for name, n in {"E": 10, "F": 15, "G": 20, "H": 10, "I": 20}.items():
+        tk = t[name]
+        assert len(tk) == n and {x["combo"][0] for x in tk} <= {"3", "4"}
+        assert [x["prob"] for x in tk] == sorted((x["prob"] for x in tk), reverse=True)
+        assert v[name]["stake"] == 100 * n and v[name]["prob_sum"] == round(sum(x["prob"] for x in tk), 5)
+    # オッズの条件なしは30倍未満も買う、H・I は30倍以上だけ
+    assert {x["combo"]: x["tier"] for x in t["G"]}["3-2-4"] == "30倍未満"
+    assert all(x["odds"] >= 30 for x in t["H"] + t["I"])
+    assert [x["combo"] for x in t["H"]] == [x["combo"] for x in t["G"] if x["odds"] >= 30][:10]
+    # E は G の上位10点
+    assert t["E"] == t["G"][:10]
+    assert v["G"]["hit"] is True and v["G"]["return"] == 9000
+    # 実際の1着が2艇以外なら外れ
+    row = manshu_compare.compare_row({"race_key": "r", "race_date": "2026-10-20", "tri_probs": probs}, odds,
+                                     None, [("1-3-4", 1200)])
+    assert row["variants"]["pre"]["top2_hit"] is False and row["variants"]["pre"]["G"]["hit"] is False
+
+
+def test_top2_summary():
+    rows = [
+        {"race_date": "2026-10-20", "is_manshu": True,
+         "variants": {"pre": _vside(0.6, True, top2_hit=True), "post": _vside(0.3, True, top2_hit=True)}},
+        {"race_date": "2026-10-20", "is_manshu": False,
+         "variants": {"pre": _vside(0.2, False), "post": _vside(0.55, False, top2_hit=True)}},
+        {"race_date": "2026-10-21", "is_manshu": True,
+         "variants": {"pre": _vside(0.2, True, top2_hit=True), "post": {"error": manshu_compare.MISSING_POST}}},
+    ]
+    out = {(r["版"], r["見送り"]): r for r in manshu.top2_summary(rows)}
+    assert (out[("朝版", "なし")]["レース数"], out[("朝版", "なし")]["2艇のどちらかが1着"]) == (2, 1)
+    assert (out[("朝版", "あり")]["レース数"], out[("朝版", "あり")]["割合"]) == (1, 0.0)
+    assert out[("展示後版", "なし")]["割合"] == 1.0 and out[("展示後版", "あり")]["レース数"] == 1
+    assert manshu.top2_summary(rows[2:]) == []
 
 
 def test_compare_summary_counts_only_races_with_both():
@@ -211,6 +266,7 @@ def test_run_fetches_odds_once_and_retries_missing():
     assert r["final_odds"] == odds and r["pre_stake"] == 1000 and r["post_stake"] == 1000
     assert r["trifecta_actual"] == "2-1-3" and r["is_manshu"] is False
     assert r["variants"]["pre"]["A"]["stake"] == 1000 and r["variants"]["post"]["D"]["stake"] == 1000
+    assert r["variants"]["pre"]["G"]["stake"] == 2000 and r["variants"]["post"]["F"]["stake"] == 1500
     # 済んだ行（03_01）も作り方ごとの比較が無いので、保存済みの確定オッズで作り直す（取り直さない）
     assert by["20261020_03_01"]["final_odds"] == odds and "variants" in by["20261020_03_01"]
 
