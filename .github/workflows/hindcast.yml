@@ -14,6 +14,7 @@ name: Hindcast
 # 事後予想の後に、万舟チャンスの印のレースの確定3連単オッズを公式サイトから取り、朝版と展示後版の
 # 中穴〜万舟狙いの買い目を作って結果を記録する（manshu_compare.py。1日10レース・開始間隔3.4秒以上）。
 # あわせて作り方の比較（A〜D: 確率順/期待値順 × 中穴5＋万舟5/中穴3＋万舟7。検証だけ）も同じオッズで作る。
+# 続けて「1号艇が負けた場合の着順」専用モデルの確率でも作り方A・Eを作り、今のモデルと並べる（upset_compare.py。検証だけ）。
 #
 # 最後に「この買い目の的中確率」の表示補正（hit_calibration.py）を、
 # 今の版の補正が無いか、前回から7日たっていれば作り直す（週1回）。
@@ -99,6 +100,16 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
         run: python manshu_compare.py
+
+      # 「1号艇が負けた場合の着順」専用モデル（ml_upset.py）の検証（本番は変えない）。万舟チャンスの印のレースの
+      # 専用モデルで置き換えた3連単確率を保存し、上の確定オッズで今のモデルと専用モデルの作り方A・Eを並べる。
+      - name: Upset model on manshu chance races (verification only)
+        if: ${{ !cancelled() }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+        run: python upset_compare.py
 
       # 事後予想が途中で止まっても、保存済みの分で補正は作れるので続けて動かす。
       - name: Rebuild hit probability calibration (weekly)

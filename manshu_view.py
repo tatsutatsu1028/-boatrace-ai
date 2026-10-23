@@ -545,6 +545,9 @@ def render_validation(today, normal_rate=None):
         st.caption("全レースの万舟率 = 選んだレースがあった日の全レース（事後予想で結果の出たレース）。"
                    f"過去2年の全レースでは約{manshu.BASE_RATE:.0%}。中止・不成立のレースは除いています。")
     _render_compare(today, key="validation_manshu_variant_period")
+    import upset_view  # 1号艇が負けた場合の専用モデルの検証（検証だけ）
+
+    upset_view.render(today)
 
 
 def _render_compare(today, key="manshu_variant_period"):

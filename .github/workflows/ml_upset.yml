@@ -1,0 +1,74 @@
+name: ML Upset Model
+
+# 「1号艇が負けた場合の着順」専用モデル（ml_upset.py。検証中・本番の予想には使っていない）の学習。
+#   task=train: 2年分のうち1号艇が負けたレースで、展示後の版と展示前の版を学習し、
+#               models/ml-upset-v1-lgb-2y-<基準日>.joblib / models/upset_latest.json と
+#               models/ml-upset-pre-v1-lgb-2y-<基準日>.joblib / models/upset_pre_latest.json を書く
+# 保存先は非公開のデータ用リポジトリ（models/）。本番の新モデルのファイル（latest.json・pre_latest.json・
+# ml-chain-*・ml_state.pkl.gz）には触れない（コミットするのは ml-upset-* と upset_*latest.json だけ）。
+# 毎晩の検証（hindcast.yml の upset_compare.py）は、その日より前に学習した版のうちいちばん新しいものを使う。
+# 起動は手動（workflow_dispatch）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: "基準日 (YYYYMMDD)。空なら今日（JST）。学習はこの日の28日前まで、温度はその後の28日"
+        required: false
+        default: ""
+
+concurrency:
+  group: ml-upset
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout data (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml pandas==3.0.6 numpy==2.4.6 scikit-learn scipy joblib lhafile lightgbm
+
+      # ログは誰でも見られるため、件数・日付・所要時間だけを出す。
+      - name: Train
+        env:
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+        run: |
+          ARGS="train"
+          if [ -n "${{ inputs.as_of }}" ]; then ARGS="$ARGS --as-of ${{ inputs.as_of }}"; fi
+          python ml_upset.py $ARGS
+
+      - name: Commit to data repository
+        working-directory: _data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add models/ml-upset-* models/upset_latest.json models/upset_pre_latest.json
+          git diff --staged --quiet && { echo "変更なし"; exit 0; }
+          git commit -q -m "ml upset model: train"
+          for i in 1 2 3 4 5; do
+            if git pull -q --rebase && git push -q; then echo "push完了"; exit 0; fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((i * 10))
+          done
+          echo "pushに失敗"; exit 1
