@@ -140,7 +140,8 @@ def lap_count(text):
 SITE_PAGES = {
     "12": "https://www.boatrace-suminoe.jp/asp/kyogi/12/sp/yoso05{rr}.htm",
     "04": "https://www.heiwajima.gr.jp/asp/kyogi/04/pc/yoso05{rr}.htm",
-    "24": "https://omurakyotei.jp/yosou/chokuzen.php?day={d}&race={rr}",
+    "15": "https://www.marugameboat.jp/asp/kyogi/15/sp/yoso05{rr}.htm",
+    "16": "https://www.kojimaboat.jp/asp/kyogi/16/sp/yoso05{rr}.htm",
 }
 
 
@@ -371,6 +372,88 @@ def bcpast():
     (OUT / "boatcast_past.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def coverage(days=3):
+    """直近の開催日について、全場・全レースの bc_oriten が揃っているかを数える。"""
+    res = {}
+    t = now()
+    for back in range(1, days + 1):
+        d = (t - timedelta(days=back)).strftime("%Y%m%d")
+        for jcd in open_venues(d):
+            rec = {}
+            for rno in range(1, 13):
+                r = get(BC.format(jcd=jcd, d=d, rr=f"{rno:02d}"))
+                p = parse_bc(r.text) if r is not None and r.status_code == 200 else {}
+                rec[rno] = [None if r is None else r.status_code, p.get("n_filled"), p.get("n_rows")]
+            res[f"{d}_{jcd}"] = rec
+            print("[COV]", d, jcd, [v[1] for v in rec.values()], flush=True)
+    (OUT / "boatcast_coverage.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def sitecheck():
+    """開催中の場のサイト（PC・スマホのトップと直前情報ページ）を描画し、
+    オリジナル展示の欄が文字（HTML）か画像かを確かめる。"""
+    from playwright.sync_api import sync_playwright
+
+    hd = now().strftime("%Y%m%d")
+    vs = open_venues(hd)
+    extra = {
+        "07": ["https://www.gamagori-kyotei.com/asp/gamagori/kyogi/kyogihtml/index.htm"],
+        "24": ["https://omurakyotei.jp/yosou/chokuzen.php", "https://omurakyotei.jp/yosou/pitreport.php"],
+        "17": ["https://www.boatrace-miyajima.com/racecard.html"],
+        "02": ["https://www.boatrace-toda.jp/race/shusso_list.html"],
+    }
+    res = {}
+    with sync_playwright() as p:
+        br = p.chromium.launch()
+        for jcd in vs:
+            top = VENUE_TOP[jcd]
+            urls = [top, top + "sp/", top + "sp/index.php?page=yosou-cyokuzen", top + "modules/yosou/?mode=cyokuzen"] + extra.get(jcd, [])
+            if jcd in ("04", "12", "15", "16"):
+                urls += [f"{top}asp/kyogi/{jcd}/pc/yoso0501.htm", f"{top}asp/kyogi/{jcd}/sp/yoso0501.htm"]
+            out = []
+            for i, u in enumerate(urls):
+                mobile = "/sp/" in u
+                ctx = br.new_context(user_agent=UA["User-Agent"] + (" Mobile iPhone" if mobile else ""), is_mobile=mobile,
+                                     viewport={"width": 390, "height": 844} if mobile else {"width": 1280, "height": 900}, locale="ja-JP")
+                page = ctx.new_page()
+                reqs = []
+                page.on("request", lambda rq: reqs.append(rq.url) if rq.resource_type in ("xhr", "fetch") and not NET_SKIP.search(rq.url) else None)
+                time.sleep(WAIT)
+                try:
+                    page.goto(u, wait_until="networkidle", timeout=40000)
+                except Exception:
+                    page.wait_for_timeout(3000)
+                try:
+                    txt = norm(page.inner_text("body"))
+                except Exception:
+                    txt = ""
+                # 「オリジナル展示」見出しの近くにある要素が表か画像か
+                info = page.evaluate("""() => {
+                    const hs = [...document.querySelectorAll('body *')].filter(e => e.children.length < 3 && /オリジナル展示|まわり足|回り足/.test(e.textContent || '') && (e.textContent||'').length < 40);
+                    return hs.slice(0, 4).map(h => { let c = h; for (let k = 0; k < 5 && c; k++) { if (c.querySelector && (c.querySelector('table') || c.querySelector('img'))) break; c = c.parentElement; }
+                      return {head: (h.textContent||'').trim().slice(0, 40), tables: c ? c.querySelectorAll('table').length : 0,
+                              imgs: c ? [...c.querySelectorAll('img')].map(i => i.src).slice(0, 5) : [], canvas: c ? c.querySelectorAll('canvas').length : 0,
+                              text: c ? (c.innerText||'').replace(/\\s+/g, ' ').slice(0, 600) : ''}; });
+                }""")
+                rec = {"url": u, "final": page.url, "laps": lap_count(txt), "info": info,
+                       "net": [r for r in reqs if not re.search(r"microad|analytics", r)][:20],
+                       "ctx": around(txt, "オリジナル展示", 200, 2) + around(txt, "まわり足", 200, 1) + around(txt, "回り足", 200, 1)}
+                if rec["laps"] >= 3 or info:
+                    tag = f"{jcd}_s{i}"
+                    try:
+                        page.screenshot(path=str(OUT / "shots" / f"{tag}.png"), full_page=True)
+                    except Exception:
+                        pass
+                    (OUT / "html" / f"s{tag}.html").write_text(f"<!-- {page.url} -->\n" + page.content(), encoding="utf-8")
+                    rec["saved"] = tag
+                out.append(rec)
+                ctx.close()
+            res[jcd] = out
+            print("[SITE]", jcd, [(o["final"][-50:], o["laps"], len(o["info"])) for o in out], flush=True)
+            (OUT / f"sitecheck_{hd}.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+        br.close()
+
+
 def jsgrep():
     """共通CMSの直前情報ページが読む JS から ajax の URL とパラメータを拾う。"""
     res = {}
@@ -400,6 +483,10 @@ if __name__ == "__main__":
         monitor(sys.argv[2])
     elif cmd == "bcpast":
         bcpast()
+    elif cmd == "coverage":
+        coverage()
+    elif cmd == "sitecheck":
+        sitecheck()
     elif cmd == "jsgrep":
         jsgrep()
     elif cmd == "render":
