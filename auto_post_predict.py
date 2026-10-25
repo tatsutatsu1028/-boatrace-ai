@@ -14,7 +14,9 @@
     自動固定の1日の件数・結果の自動記録には数えない）。保存するとトリガーが一覧の展示後の欄（post_*）を書く
   - 万舟チャンスのレースは、展示後の3連単の確率とその時点のオッズで中穴〜万舟狙いの買い目を作り直して
     保存する（予想タブの「展示後に作り直す」と同じ。aim_source = auto）
-  - Claude の予想は使わない（費用がかかるので手動のまま）
+  - 保存する予想に Claude の予想は使わない（手動のまま）。ただし万舟チャンスのレースだけ、買い目を作り直すのと
+    同じタイミングで「モデルのみ／Claudeのみ／両方の予想平均」の3種の比較を記録する（manshu_source.py。
+    展示後の予想が保存済みでスキップしたレースも記録する。Claude の費用は1日の上限あり）
 
 ログは誰でも見られるので、会場名・確率・買い目は出さない（件数・締切時刻・理由・合否だけ）。
 レースごとの記録は Supabase の auto_post_log にある。
@@ -273,6 +275,7 @@ def predict_race(ctx, t, race, odds):
     params = {k: r[k] for k in ("display_weight", "weather_weight", "venue_course_weight", "hedge_enabled",
                                 "longshot_min_prob_pct", "total_budget", "min_bet", "value_bias")}
     res = model_only_prediction(ctx.model, work, odds, params, ctx.settings, date8, t["jcd"], t["race_no"])
+    res["work"] = work
     # AI総合信頼度(A/B/C)は confidence() が final に記録する（アプリと同じく保存の前に1回）
     try:
         confidence(res["final"], work)
@@ -344,6 +347,52 @@ def rebuild_aim(t, final, odds):
     return f"作り直して保存（{len(aim)}点）" if ok else "保存されませんでした（締切後・結果記録済み）"
 
 
+def saved_claude_section(race_key):
+    """保存済みの予想にある Claude の読み（手動で取ったもの）。無ければ None。"""
+    import json
+
+    rows = _sb("GET", f"prediction_snapshots?race_key=eq.{race_key}&select=payload_json&limit=1").json() or []
+    try:
+        return (json.loads((rows[0] if rows else {}).get("payload_json") or "{}") or {}).get("claude")
+    except (TypeError, ValueError):
+        return None
+
+
+def compare_sources(ctx, t, final=None, work=None, odds=None):
+    """万舟チャンス: 予想3種（モデルのみ／Claudeのみ／両方の予想平均）の比較を記録する（manshu_source.py）。
+    final が無い（展示後の予想が保存済みでスキップした）ときは、ここで展示とオッズを読んで予想し直す。
+    失敗しても自動予想は止めない。戻り値は記録用の短い文。"""
+    import manshu_source
+
+    try:
+        if manshu_source.recorded(_sb, t["race_key"]):
+            return "記録済み"
+        saved_section = None
+        if final is None:
+            from official_fetcher import fetch_odds3t, fetch_official_race
+
+            date8 = t["race_key"][:8]
+            race = fetch_official_race(date8, t["jcd"], t["race_no"])
+            n = exhibition_count(race)
+            if race is None or len(race) != 6 or n != 6:
+                return f"展示タイムがそろっていないため記録しませんでした（{n}/6）"
+            try:
+                odds = fetch_odds3t(date8, t["jcd"], t["race_no"])
+            except Exception:  # noqa: BLE001
+                odds = None
+            res, _, _ = predict_race(ctx, t, race, odds)
+            final, work = res["final"], res["work"]
+            saved_section = saved_claude_section(t["race_key"])
+        return manshu_source.record(
+            _sb, t, work, final, odds,
+            api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+            read_model=os.environ.get("CLAUDE_READ_MODEL", "").strip() or None,
+            saved_section=saved_section,
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"エラー（{type(e).__name__}）"
+
+
 def handle_window(ctx, t, prev):
     """締切20〜10分前の1レース。戻り値は書いた状態。"""
     from official_fetcher import fetch_odds3t, fetch_official_race
@@ -351,7 +400,10 @@ def handle_window(ctx, t, prev):
     meta = snapshot_meta(t["race_key"])
     done = already_reason(meta)
     if done:
-        return write_log(t, prev, done[0], done[1])["status"]
+        status = write_log(t, prev, done[0], done[1])["status"]
+        if "manshu" in t["sources"]:
+            log(f"締切 {t.get('deadline')}: 予想3種の比較 {compare_sources(ctx, t)}")
+        return status
     date8 = t["race_key"][:8]
     try:
         race = fetch_official_race(date8, t["jcd"], t["race_no"])
@@ -382,6 +434,8 @@ def handle_window(ctx, t, prev):
             aim_status = rebuild_aim(t, res["final"], odds)
         except Exception as e:  # noqa: BLE001
             aim_status = f"作り直しでエラー（{type(e).__name__}）"
+        log(f"締切 {t.get('deadline')}: 予想3種の比較 "
+            f"{compare_sources(ctx, t, res['final'], res.get('work'), odds)}")
     model = (res.get("model_info") or {}).get("model_used")
     return write_log(t, prev, "done", f"予想して保存（{status}・{model}）", tried=True,
                      snapshot_status=status, aim_status=aim_status)["status"]

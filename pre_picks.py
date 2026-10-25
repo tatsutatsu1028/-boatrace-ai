@@ -683,6 +683,19 @@ def record_manshu_results(today=None):
         log(f"万舟チャンスの結果を記録 {done}レース")
 
 
+def record_source_compare_results(today=None):
+    """万舟チャンスの予想3種比較（manshu_source.py）で、その日のうちに結果を書けなかった行の保険。"""
+    import manshu_source
+
+    try:
+        done = manshu_source.record_results(_sb, today or _today())
+    except Exception as e:  # noqa: BLE001  表がまだ無い（マイグレーション前）などでも、ほかの結果の記録は失敗にしない
+        log(f"予想3種比較の結果を記録できない: {type(e).__name__}")
+        return
+    if done:
+        log(f"予想3種比較の結果を記録 {done}行")
+
+
 def record_results(today=None):
     today = today or _today()
     iso = f"{today[:4]}-{today[4:6]}-{today[6:]}"
@@ -721,7 +734,8 @@ def main():
         run_check(a.date or None)
         return
     failed = None
-    for fn, name in ((record_results, "結果"), (record_manshu_results, "万舟チャンスの結果")):
+    for fn, name in ((record_results, "結果"), (record_manshu_results, "万舟チャンスの結果"),
+                     (record_source_compare_results, "予想3種比較の結果")):
         try:
             fn()
         except Exception as e:  # noqa: BLE001  結果の記録に失敗しても、その日の選定は続ける

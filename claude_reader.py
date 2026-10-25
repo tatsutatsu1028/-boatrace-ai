@@ -206,6 +206,20 @@ def estimate_cost(model, usage):
     return {"usd": round(usd, 5), "jpy": round(usd * USD_JPY, 2)}
 
 
+def usage_row(reading, race_key, purpose="race_prediction"):
+    """claude_usage に入れる1行（実際に API を呼び、費用が分かるときだけ。それ以外は None）。"""
+    cost, usage = reading.get("cost") or {}, reading.get("usage") or {}
+    if not reading.get("called_api") or cost.get("usd") is None:
+        return None
+    return {
+        "race_key": str(race_key or ""), "purpose": purpose,
+        "model": reading.get("served_model") or reading.get("model"),
+        "usd": float(cost["usd"]), "status": reading.get("status"),
+        **{k: int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                                                 "cache_creation_input_tokens")},
+    }
+
+
 def _normalize(boats, lanes):
     """Claude の確率を艇番ごとに取り出し、合計1にする。足りない艇・負の値があれば None。"""
     p, reasons = {}, {}

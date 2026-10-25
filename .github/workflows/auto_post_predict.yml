@@ -54,6 +54,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+          # 万舟チャンスの予想3種比較（manshu_source.py）で「Claudeのみ予想」と同じ読みを取る。
+          # CLAUDE_READ_MODEL が無ければアプリと同じ既定のモデル。1日の上限は app_settings
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_READ_MODEL: ${{ secrets.CLAUDE_READ_MODEL }}
         run: |
           ARGS="${{ inputs.task || 'run' }}"
           if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi

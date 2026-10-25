@@ -23,8 +23,9 @@
   hindcast_predictions  1レース1行: 1着確率・本命・買い目候補・実際の3連単・的中・モデルの版
   hindcast_inputs       1艇1行: 予想に使った入力（結果の列は入れない）
   hindcast_runs         1日1行: 予想の設定・学習データの範囲（その日の保存完了の印も兼ねる）
-新しい予想モデル（--model ml）では、「💥 万舟チャンス」の印のレースだけ3連単の全120通りの確率も
-hindcast_predictions.tri_probs に残す（manshu_compare.py が確定オッズで展示後版の買い目を作る）。
+全レースの3連単の全120通りの確率も hindcast_predictions.tri_probs に残す（今のモデル・新しい予想モデルとも。
+manshu_compare.py が確定オッズで展示後版の買い目を作る。2026-10-25 までは新しい予想モデルの万舟チャンスの印のレースだけ）。
+本命の1着確率50〜70%のレースの3艇BOXの仮想成績は、ビュー hindcast_box3 / hindcast_box3_summary で見る。
 
 対象日は --start〜--end のうち、この版の予想がまだ保存されていない日。
 直近の競走成績ファイル（K）がまだ公開されていない日は飛ばし、次の晩に回す。
@@ -387,14 +388,19 @@ def chain_tri(model, feats):
     return {str(c): round(float(p), 6) for c, p in zip(tri["combo"], tri["prob"])}
 
 
-def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration=None, ml=None, tri_keys=None):
+def tri_probs(final):
+    """今のモデルの3連単の全120通りの確率 {組番: 確率}（買い目を選んだのと同じ trifecta(final)）。"""
+    tri = trifecta(final)
+    return {str(c): round(float(p), 6) for c, p in zip(tri["combo"], tri["prob"])}
+
+
+def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration=None, ml=None):
     """1日分の (予想行, 入力行) を返す。
 
     ml を渡したとき（新しい予想モデル。ml_day() の結果）は、1着〜3着をそのモデルで予想し、
     買い目の作り方・保存の形は今のモデルと同じにする（model_version で区別して並べて保存）。
 
-    tri_keys（新しい予想モデルのときだけ）: 3連単の全120通りの確率も残すレース（万舟チャンスの印のレース）。
-    渡したときは全部の行に tri_probs を入れる（印でないレースは空。まとめて保存するため列をそろえる）。
+    全部の行に3連単の全120通りの確率 tri_probs を残す（新しい予想モデルは chain_tri、今のモデルは trifecta(final)）。
 
     calibration は的中確率の表示補正（hit_calibration）。その日より前のデータだけで
     作った補正のときに限り、補正後の値を残す（後で補正後の値の当てはまりを確かめるため）。
@@ -502,8 +508,7 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
             calibrated = apply_calibration(raw_hit_prob, calibration)
             pred_rows[-1]["candidate_hit_probability_calibrated"] = _clean(calibrated)
             pred_rows[-1]["hit_calibration_id"] = calibration.get("id") if calibrated is not None else None
-        if ml is not None and tri_keys is not None:
-            pred_rows[-1]["tri_probs"] = chain_tri(model, feats) if race_key in tri_keys else None
+        pred_rows[-1]["tri_probs"] = chain_tri(model, feats) if ml is not None else tri_probs(final)
         for rec in race.to_dict("records"):
             input_rows.append({
                 "race_key": race_key,
@@ -643,27 +648,6 @@ def ml_day(day, version, sources):
     }
 
 
-def manshu_keys(start, end):
-    """その期間の万舟チャンスの印のレース {race_key}。読めなければ None（3連単確率は残さない）。"""
-    from auto_random_fix import _cfg, _headers, _request
-
-    try:
-        url, _ = _cfg()
-        r = _request(
-            "GET",
-            f"{url}/rest/v1/manshu_chance_picks",
-            params=[("select", "race_key"),
-                    ("race_date", f"gte.{pd.Timestamp(start):%Y-%m-%d}"),
-                    ("race_date", f"lte.{pd.Timestamp(end):%Y-%m-%d}")],
-            headers=_headers(),
-            timeout=30,
-        )
-        return {str(row["race_key"]) for row in r.json() or []}
-    except Exception as e:  # noqa: BLE001  印が読めなくても事後予想は続ける
-        print(f"[HINDCAST] 万舟チャンスの印を読めない: {type(e).__name__}", flush=True)
-        return None
-
-
 def main():
     yesterday = (datetime.now(JST) - timedelta(days=1)).strftime("%Y%m%d")
     ap = argparse.ArgumentParser()
@@ -706,7 +690,6 @@ def main():
 
         versions = ml_versions()
         ml_sources = mf.load_sources(_ymd(pd.Timestamp(days[0]) - pd.Timedelta(days=400)), days[-1])
-    tri_keys = manshu_keys(days[0], days[-1]) if use_ml and days and not args.dry_run else None
     print(f"[HINDCAST] 補正 id={calibration['id'] if calibration else 'なし'}", flush=True)
     print(f"[HINDCAST] 版 {'新モデル ' + args.model if use_ml else HINDCAST_MODEL_VERSION}"
           f" / 対象 {len(days)}日 / code {code_sha}", flush=True)
@@ -737,7 +720,7 @@ def main():
                 print(f"[HINDCAST] {d}: 出走表・直前情報が未取得のため次回に回す", flush=True)
                 continue
         preds, inputs, run_row = run_day(
-            d, history_full, sample_history, k, runtime, code_sha, calibration, ml=ml, tri_keys=tri_keys,
+            d, history_full, sample_history, k, runtime, code_sha, calibration, ml=ml,
         )
         if not preds:
             continue
