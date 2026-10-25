@@ -126,6 +126,35 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - データベース: `supabase/migrations/20261025000000_auto_post_predict.sql`
 - 止めるとき: `select cron.unschedule('trigger-auto-post-predict');`（夜の集計は `trigger-auto-post-report`）
 
+## 💥 万舟チャンスの予想3種比較（自動記録）
+万舟チャンスのレースで、中穴〜万舟の買い目を「モデルのみ」「Claudeのみ」「両方の予想平均」の3種類の確率で作り、
+毎日 Supabase の `manshu_source_compare` に1レース3行（source = model / claude / blend）で残します（`manshu_source.py`）。
+2〜3週間たったらビュー `manshu_source_summary` で比べます。
+
+- いつ: 展示後の自動予想（`auto_post_predict.py`）が万舟チャンスのレースで中穴〜万舟狙いの買い目を作り直すのと同じタイミング
+  （締切20〜10分前）。展示後の予想が保存済み（手動・自動固定）でスキップしたレースも、その時点の展示・オッズで予想し直して記録する
+- 確率: model は「モデルのみ予想」の3連単の確率。claude はこの比較専用の Claude の呼び出し（`claude_reader.read_longshots`。
+  入力は「Claudeのみ予想」と同じ `build_brief`）で、1号艇以外が1着で中穴〜万舟（オッズ30倍以上）になりそうな組と確率を
+  直接挙げてもらい、挙げた組だけを使う（モデルの確率では埋めない）。blend は組ごとに (モデル + Claude) / 2
+  （Claude が挙げなかった組の Claude の確率は 0）
+- 買い目: 3種とも本番の中穴〜万舟狙いの買い目と同じルール（`manshu.aim_tickets`。1号艇の1着を外し、中穴5点＋万舟5点を確率順）。
+  確率だけを差し替える。claude は挙げた組だけから作るので、足りなければ10点より少ないまま（`aim_count`）。
+  claude・blend の行には Claude 自身が挙げた組の点数（`claude_listed_count`）も残す
+- 費用の上限: Claude の費用は `claude_usage`（purpose = `manshu_compare`）に残し、今日（日本時間）の合計が
+  `app_settings.manshu_compare_claude_daily_usd`（設定タブ。初期値 3ドル・0 で止める）以上なら Claude を呼ばず、
+  claude・blend の行の `error` に理由を残す。呼ぶ前に確かめるので1回分だけ超えることがある
+- 結果: 既存の結果確定（`list_results.py`）が万舟チャンスの結果と一緒に書く。取りこぼしは翌朝の `pre_picks.py`
+- 集計: `manshu_source_summary` は source 別のレース数・的中数・的中率・回収率（100円買い換算）。`saved_at` が締切より前の行だけ。
+  `*_all3` は3種ともそろったレースだけの数字（Claude をスキップした日があっても同じレースどうしで比べる）。
+  `avg_points` は平均の買い目の点数、`avg_claude_listed` は Claude が挙げた組の平均の点数
+- Secrets（GitHub Actions）: `ANTHROPIC_API_KEY`（必須）・`CLAUDE_READ_MODEL`（任意。無ければアプリと同じ既定のモデル）
+- データベース: `supabase/migrations/20261028000000_manshu_source_compare.sql`
+
+### 事後予想の3連単の確率と3艇BOX
+- 事後予想（`hindcast_predictions`）は全レースで3連単の全120通りの確率 `tri_probs` を保存する（今のモデル・新しいモデルとも）
+- 本命の1着確率50〜70%のレースで、1着確率の上位3艇の3連単BOX（6点・各100円）の仮想成績をビュー `hindcast_box3`（1レース1行）・
+  `hindcast_box3_summary`（モデルの版ごと）で見る
+
 ## 🧵 スレッズ・note の投稿（管理者だけ）
 ### 朝の無料3レース（スレッズの自動投稿）
 毎朝 09:00 JST（pg_cron → `threads_morning.yml`）に、その日の「🌅 展示前厳選10」から、投稿時刻から30分以上先に

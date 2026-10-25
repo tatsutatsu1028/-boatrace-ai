@@ -17,7 +17,7 @@ from datetime import date
 import requests
 import streamlit as st
 
-from claude_reader import USD_JPY
+from claude_reader import USD_JPY, usage_row
 from result_tracker import _headers, supabase_config
 
 LOW_BALANCE_USD = 2.0
@@ -27,19 +27,12 @@ CONSOLE_NOTE = ("残高は、このアプリが記録した呼び出しの費用
 
 def log_call(reading, race_key, purpose="race_prediction"):
     """実際に API を呼んだ1回を記録する（費用が分かるときだけ。失敗しても予想は止めない）。"""
-    cost, usage = reading.get("cost") or {}, reading.get("usage") or {}
-    if cost.get("usd") is None:
+    row = usage_row({**reading, "called_api": True}, race_key, purpose)
+    if row is None:
         return False
     url, _ = supabase_config()
     if not url:
         return False
-    row = {
-        "race_key": str(race_key or ""), "purpose": purpose,
-        "model": reading.get("served_model") or reading.get("model"),
-        "usd": float(cost["usd"]), "status": reading.get("status"),
-        **{k: int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
-                                                 "cache_creation_input_tokens")},
-    }
     try:
         r = requests.post(f"{url}/rest/v1/claude_usage", headers=_headers("return=minimal"), json=row, timeout=10)
         r.raise_for_status()
@@ -138,3 +131,46 @@ def render_settings():
             st.error(f"保存できませんでした（{type(e).__name__}）")
     st.caption("残高が残っている状態でチャージしたときは、Console に出ている残高の合計を入れ、日付をその日にしてください。"
                + CONSOLE_NOTE)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_compare_limit():
+    """万舟チャンスの予想3種比較で Claude に使う1日の上限（ドル）。列が無い（マイグレーション前）なら None。"""
+    url, _ = supabase_config()
+    if not url:
+        return None
+    r = requests.get(f"{url}/rest/v1/app_settings",
+                     params={"select": "manshu_compare_claude_daily_usd", "id": "eq.1"},
+                     headers=_headers(), timeout=10)
+    r.raise_for_status()
+    rows = r.json() or []
+    v = rows[0].get("manshu_compare_claude_daily_usd") if rows else None
+    return float(v) if v is not None else None
+
+
+def render_compare_limit():
+    """設定タブ: 万舟チャンスの予想3種比較（自動）で Claude に使う1日の上限（管理者だけ）。"""
+    st.markdown("**💥 万舟チャンスの予想3種比較（自動）の1日の上限**")
+    try:
+        limit = load_compare_limit()
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"上限を読み込めませんでした（{type(e).__name__}）。"
+                   "supabase/migrations/20261028000000_manshu_source_compare.sql を実行してください。")
+        return
+    usd = st.number_input("1日の上限（ドル。0 で Claude の予想を止める）", min_value=0.0, max_value=100.0,
+                          value=float(3.0 if limit is None else limit), step=0.5, format="%.2f",
+                          key="manshu_compare_limit_usd")
+    if st.button("💾 上限を保存", key="manshu_compare_limit_save"):
+        try:
+            url, _ = supabase_config()
+            r = requests.patch(f"{url}/rest/v1/app_settings", params={"id": "eq.1"},
+                               headers=_headers("return=minimal"),
+                               json={"manshu_compare_claude_daily_usd": float(usd)}, timeout=10)
+            r.raise_for_status()
+            load_compare_limit.clear()
+            st.success("保存しました。")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"保存できませんでした（{type(e).__name__}）")
+    st.caption(f"展示後の自動予想が万舟チャンスのレースで Claude の予想を取るときの、今日（日本時間）の合計の上限です"
+               f"（約{usd * USD_JPY:,.0f}円）。超えたら Claude の予想はスキップし、理由を記録します。"
+               "呼ぶ前に確かめるので、1回分だけ超えることがあります。")

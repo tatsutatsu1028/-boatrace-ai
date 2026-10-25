@@ -9,6 +9,7 @@
      出ていなければ次の回に読む）
 書き込む列は翌朝のまとめての記録（pre_picks.py record_results / record_manshu_results）と同じ。
 翌朝の記録は result_at が空のレースだけを対象にするので、ここで取りこぼしたレース（同着・中止など）の保険になる。
+万舟チャンスのレースは、予想3種比較（manshu_source.py の manshu_source_compare）にも同じ結果を書く。
 """
 
 from __future__ import annotations
@@ -56,6 +57,14 @@ def apply_result(race_key, official, rows=None):
             _sb("PATCH", f"{table}?race_key=eq.{race_key}&result_at=is.null", prefer="return=minimal",
                 json=_fields(table, row, _pays(official)))
             done += 1
+        if table == "manshu_chance_picks" and targets:
+            # 万舟チャンスの予想3種比較（manshu_source.py）も同じ結果で書く。失敗しても一覧の結果は残す
+            try:
+                import manshu_source
+
+                manshu_source.apply_result(_sb, race_key, _pays(official))
+            except Exception as e:  # noqa: BLE001
+                log(f"{race_key}: 予想3種比較の結果を書けない {type(e).__name__}")
     return done
 
 

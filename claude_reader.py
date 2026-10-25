@@ -206,6 +206,20 @@ def estimate_cost(model, usage):
     return {"usd": round(usd, 5), "jpy": round(usd * USD_JPY, 2)}
 
 
+def usage_row(reading, race_key, purpose="race_prediction"):
+    """claude_usage に入れる1行（実際に API を呼び、費用が分かるときだけ。それ以外は None）。"""
+    cost, usage = reading.get("cost") or {}, reading.get("usage") or {}
+    if not reading.get("called_api") or cost.get("usd") is None:
+        return None
+    return {
+        "race_key": str(race_key or ""), "purpose": purpose,
+        "model": reading.get("served_model") or reading.get("model"),
+        "usd": float(cost["usd"]), "status": reading.get("status"),
+        **{k: int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                                                 "cache_creation_input_tokens")},
+    }
+
+
 def _normalize(boats, lanes):
     """Claude の確率を艇番ごとに取り出し、合計1にする。足りない艇・負の値があれば None。"""
     p, reasons = {}, {}
@@ -271,6 +285,26 @@ def read_race(api_key, race_key, race, final, model=None, race_label="", reuse=N
         return out
 
     lanes = [int(v["艇番"]) for v in brief["boats"]]
+    data = _ask(api_key, model, SYSTEM_PROMPT, OUTPUT_SCHEMA, brief, out)
+    if data is None:
+        return out
+    p, reasons = _normalize(data.get("boats") or [], lanes)
+    if p is None:
+        out["error"] = "6艇分の確率がそろっていませんでした"
+        return out
+    tickets = _clean_tickets(data.get("tickets") or [], lanes)
+    if not tickets:
+        out["error"] = "買い目を読み取れませんでした"
+        return out
+    out.update({"status": "ok", "p_first": p, "reasons": reasons, "tickets": tickets,
+                "summary": str(data.get("summary") or "").strip()})
+    _CACHE[key] = out
+    return out
+
+
+def _ask(api_key, model, system, schema, brief, out):
+    """Claude に brief（JSON）を渡し、schema の形の答えを dict で返す。失敗したら None（理由は out["error"]）。
+    out には時間・実際に呼んだ印（called_api）・使ったモデル・トークン数・費用を書く。例外は出さない。"""
     t0 = time.time()
     try:
         import anthropic
@@ -279,9 +313,9 @@ def read_race(api_key, race_key, race, final, model=None, race_label="", reuse=N
         params = dict(
             model=model,
             max_tokens=READ_MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=system,
             output_config={"effort": READ_EFFORT,
-                           "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+                           "format": {"type": "json_schema", "schema": schema}},
             messages=[{"role": "user", "content": json.dumps(brief, ensure_ascii=False)}],
         )
         if model in FALLBACK_MODELS:
@@ -299,28 +333,103 @@ def read_race(api_key, race_key, race, final, model=None, race_label="", reuse=N
         out["cost"] = estimate_cost(model, out["usage"])
         if resp.stop_reason == "refusal":
             out["error"] = "Claude が回答を控えました"
-            return out
+            return None
         if resp.stop_reason == "max_tokens":
             out["error"] = "回答が途中で切れました"
-            return out
+            return None
         text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
-        data = json.loads(text)
-        p, reasons = _normalize(data.get("boats") or [], lanes)
-        if p is None:
-            out["error"] = "6艇分の確率がそろっていませんでした"
-            return out
-        tickets = _clean_tickets(data.get("tickets") or [], lanes)
-        if not tickets:
-            out["error"] = "買い目を読み取れませんでした"
-            return out
-        out.update({"status": "ok", "p_first": p, "reasons": reasons, "tickets": tickets,
-                    "summary": str(data.get("summary") or "").strip()})
-        _CACHE[key] = out
-        return out
+        return json.loads(text)
     except Exception as e:  # noqa: BLE001  失敗しても予想の画面は止めない
-        out["seconds"] = round(time.time() - t0, 1)
+        out.setdefault("seconds", round(time.time() - t0, 1))
         out["error"] = f"{type(e).__name__}"
+        return None
+
+
+# ---------------------------------------------------------------
+# 万舟チャンスの予想3種比較専用（manshu_source.py）: 中穴〜万舟になりそうな組を直接挙げてもらう
+# ---------------------------------------------------------------
+LONGSHOT_PROMPT_VERSION = "claude-longshot-v1"
+
+LONGSHOT_SYSTEM_PROMPT = """あなたはボートレースの予想を検討するアナリストです。
+1レース分の入力データと、統計モデルが出した各艇の1着・2着・3着の確率が渡されます。
+このレースは統計モデルが「3連単が荒れやすい」と判定したレースです。
+
+やること:
+- 入力データを読み、このレースが荒れるとしたら、どの艇がどう動いて（スタート・1マークの攻め方・差し/まくり・
+  展示の気配など）どんな決着になりそうかを考える（summary。100〜160字）
+- 1号艇以外が1着になる決着のうち、3連単の配当が中穴〜万舟（オッズ30倍以上）になりそうな組み合わせを、
+  起こりやすい順に10〜20点挙げる（tickets）。
+  prob はその組み合わせ（1着-2着-3着の順）になる確率（このレースの全120通りの中でその決着になる確率。0〜1）。
+  挙げた組の prob の合計は1より小さい（挙げなかった組み合わせにも確率は残る）。reason は25字程度
+
+守ること:
+- 1着が1号艇の組み合わせは挙げない。
+- オッズは渡されない。配当が30倍以上になりそうかは、人気の傾向（1号艇・級別が上の選手・モデルの確率が高い艇が
+  上位に来る組は配当が低い）から判断する。
+- 理由とまとめには、渡されたデータに書かれていることだけを使う。データに無いこと（選手の評判・過去の対戦・
+  記者コメント・ピットの様子・オッズ・モーターの整備内容など）は書かない。値が空欄の項目には触れない。
+- モデルの確率は参考にしてよいが、そのまま写さず、データから見て妥当かどうかを自分で判断する。
+- 組み合わせは 3-1-5 の形で、出走している艇番だけを使い、同じ艇を2回使わない。同じ組み合わせを重ねない。"""
+
+LONGSHOT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tickets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "combo": {"type": "string"},
+                    "prob": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["combo", "prob", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "summary": {"type": "string"},
+    },
+    "required": ["tickets", "summary"],
+    "additionalProperties": False,
+}
+
+
+def clean_longshots(rows, lanes):
+    """中穴〜万舟の組を確かめる（形・艇番・重なり・1号艇1着を外す）。確率の合計が1を超えたら1に縮める。
+    → [{combo, prob, reason}]"""
+    return [{"combo": t["combo"], "prob": t["prob"], "reason": t["reason"]}
+            for t in _clean_tickets(rows, lanes) if not t["combo"].startswith("1-")]
+
+
+def read_longshots(api_key, race_key, race, final, model=None, race_label=""):
+    """
+    万舟チャンスの予想3種比較専用。read_race と同じ入力（build_brief）で、1号艇以外が1着で中穴〜万舟
+    （オッズ30倍以上）になりそうな組と確率を挙げてもらう（例外は出さない）。
+      {"status": "ok"|"error", "model", "served_model", "tickets": [{combo, prob, reason}], "summary",
+       "usage", "cost", "seconds", "input_hash", "prompt_version", "called_api", "error"}
+    """
+    model = (model or DEFAULT_READ_MODEL).strip()
+    brief = build_brief(race, final, race_label)
+    text = json.dumps({"brief": brief, "model": model, "prompt": LONGSHOT_PROMPT_VERSION},
+                      ensure_ascii=False, sort_keys=True)
+    h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    key = ("longshot", str(race_key), model, h)
+    if key in _CACHE:
+        return _CACHE[key]
+    out = {"status": "error", "model": model, "input_hash": h, "prompt_version": LONGSHOT_PROMPT_VERSION}
+    if not api_key:
+        out["error"] = "ANTHROPIC_API_KEY が未設定です"
         return out
+    data = _ask(api_key, model, LONGSHOT_SYSTEM_PROMPT, LONGSHOT_SCHEMA, brief, out)
+    if data is None:
+        return out
+    tickets = clean_longshots(data.get("tickets") or [], [int(v["艇番"]) for v in brief["boats"]])
+    if not tickets:
+        out["error"] = "組み合わせを読み取れませんでした"
+        return out
+    out.update({"status": "ok", "tickets": tickets, "summary": str(data.get("summary") or "").strip()})
+    _CACHE[key] = out
+    return out
 
 
 def _tri_dict(tri):

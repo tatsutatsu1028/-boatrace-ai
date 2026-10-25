@@ -1296,6 +1296,7 @@ with tab3:
     if IS_ADMIN:
         st.divider()
         claude_usage.render_settings()
+        claude_usage.render_compare_limit()
 
     # -------------------------------------------------
     # Threads（スレッズ）連携
