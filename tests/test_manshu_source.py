@@ -31,45 +31,122 @@ def _tri():
     return pd.DataFrame({"combo": COMBOS, "prob": [x / s for x in w]})
 
 
+def _fake_anthropic(monkeypatch, payload, stop_reason="end_turn"):
+    """anthropic の代わり（受け取った引数を残し、payload を JSON で返す）。"""
+    import json
+    import types
+
+    seen = {}
+
+    class Messages:
+        def create(self, **kw):
+            seen.update(kw)
+            return types.SimpleNamespace(
+                model=kw["model"], stop_reason=stop_reason,
+                usage=types.SimpleNamespace(input_tokens=1000, output_tokens=2000),
+                content=[types.SimpleNamespace(type="text", text=json.dumps(payload, ensure_ascii=False))])
+
+    class Client:
+        def __init__(self, **kw):
+            self.messages = Messages()
+            self.beta = types.SimpleNamespace(messages=Messages())
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=Client))
+    return seen
+
+
+def _race_final():
+    race = pd.DataFrame({"lane": range(1, 7), "racer_name": list("abcdef")})
+    final = pd.DataFrame({"lane": range(1, 7), "p_first": [0.5, 0.15, 0.12, 0.1, 0.08, 0.05]})
+    return race, final
+
+
+def test_read_longshots_end_to_end(monkeypatch):
+    import claude_reader as cr
+
+    seen = _fake_anthropic(monkeypatch, {"summary": "s", "tickets": [
+        {"combo": "1-2-3", "prob": 0.2, "reason": "x"}, {"combo": "4-1-2", "prob": 0.02, "reason": "y"}]})
+    race, final = _race_final()
+    r = cr.read_longshots("k", "rk-ls", race, final, model="claude-opus-5-5", race_label="2026-10-25 桐生 5R")
+    assert r["status"] == "ok" and r["tickets"] == [{"combo": "4-1-2", "prob": 0.02, "reason": "y"}]
+    assert r["called_api"] and r["cost"]["usd"] > 0 and r["prompt_version"] == cr.LONGSHOT_PROMPT_VERSION
+    assert seen["system"] == cr.LONGSHOT_SYSTEM_PROMPT
+    assert "桐生 5R" in seen["messages"][0]["content"]  # 入力は read_race と同じ build_brief
+    assert cr.build_brief(race, final, "2026-10-25 桐生 5R") == __import__("json").loads(seen["messages"][0]["content"])
+
+
+def test_read_race_still_works_after_refactor(monkeypatch):
+    import claude_reader as cr
+
+    _fake_anthropic(monkeypatch, {"summary": "s", "boats": [
+        {"lane": i, "p_first": p, "reason": ""} for i, p in zip(range(1, 7), [3, 1, 1, 1, 1, 1])],
+        "tickets": [{"combo": "1-2-3", "group": "本線", "prob": 0.1, "reason": ""}]})
+    race, final = _race_final()
+    r = cr.read_race("k", "rk-rr", race, final, model="claude-opus-5-5")
+    assert r["status"] == "ok" and abs(r["p_first"][1] - 0.375) < 1e-9 and r["tickets"][0]["combo"] == "1-2-3"
+    _fake_anthropic(monkeypatch, {}, stop_reason="max_tokens")
+    r = cr.read_race("k", "rk-rr2", race, final, model="claude-opus-5-5")
+    assert r["status"] == "error" and r["error"] == "回答が途中で切れました" and r["called_api"]
+
+
 def _odds(v=50.0):
     return {c: (5.0 if c[0] == "1" else v) for c in COMBOS}
 
 
-def test_compare_tickets_rule():
-    probs = {"1-2-3": 0.5, "2-1-3": 0.2, "3-1-2": 0.1, "4-5-6": 0.05, "2-3-4": 0.15}
-    odds = {"1-2-3": 200.0, "2-1-3": 12.0, "3-1-2": 30.0, "4-5-6": 900.0, "2-3-4": 45.0}
+def test_compare_tickets_is_production_rule():
+    import manshu
+
+    probs = dict(zip(COMBOS, _tri()["prob"]))
+    odds = {c: (5.0 if c[0] == "1" else (50.0 if int(c[2]) % 2 else 300.0)) for c in COMBOS}
     t = ms.compare_tickets(probs, odds)
-    # 1号艇1着は外す・30倍未満は外す・確率の高い順
-    assert [x["combo"] for x in t] == ["2-3-4", "3-1-2", "4-5-6"]
-    assert [x["tier"] for x in t] == ["中穴", "中穴", "万舟"]
-    assert all(x["stake"] == 100 for x in t) and t[2]["payout"] == 90000
-    assert len(ms.compare_tickets(dict(zip(COMBOS, _tri()["prob"])), _odds())) == ms.COMPARE_N
-    assert ms.method_name() == "TOP10-odds30-prob-no1"
+    assert t == manshu.aim_tickets(probs, odds)
+    assert [x["tier"] for x in t].count("中穴") == 5 and [x["tier"] for x in t].count("万舟") == 5
+    assert all(x["combo"][0] != "1" for x in t)
+    assert ms.method_name() == manshu.aim_method_name()
 
 
-def test_source_probs_uses_app_functions():
-    import claude_reader as cr
-
+def test_source_probs_claude_not_filled_by_model():
     tri = _tri()
-    reading = {"status": "ok", "tickets": [{"combo": "4-5-6", "prob": 0.3}, {"combo": "1-2-3", "prob": 0.2}]}
+    reading = {"status": "ok", "tickets": [{"combo": "4-5-6", "prob": 0.03}, {"combo": "3-2-1", "prob": 0.02}]}
     p = ms.source_probs(tri, reading)
     assert set(p) == {"model", "claude", "blend"}
-    assert p["claude"] == cr.claude_full_tri(reading["tickets"], tri)
-    avg = cr.average_tri(tri, reading["tickets"])
-    assert abs(p["blend"]["4-5-6"] - float(avg.set_index("combo").loc["4-5-6", "prob"])) < 1e-12
-    assert abs(p["claude"]["4-5-6"] - 0.3) < 1e-9
+    assert p["claude"] == {"4-5-6": 0.03, "3-2-1": 0.02}  # 挙げた組だけ
+    m = p["model"]
+    assert len(p["blend"]) == 120
+    assert abs(p["blend"]["4-5-6"] - (m["4-5-6"] + 0.03) / 2) < 1e-12
+    assert abs(p["blend"]["2-1-3"] - m["2-1-3"] / 2) < 1e-12  # 挙げなかった組の Claude の確率は 0
     assert set(ms.source_probs(tri, {"status": "error"})) == {"model"}
+
+
+def test_claude_only_tickets_stay_short():
+    probs = {"4-5-6": 0.03, "3-2-1": 0.02, "2-3-4": 0.01, "5-1-2": 0.01}
+    odds = {"4-5-6": 400.0, "3-2-1": 60.0, "2-3-4": 12.0, "5-1-2": 150.0}
+    r = ms.build_row(T, "claude", probs, odds, None, claude_listed_count=4)
+    assert [x["combo"] for x in r["aim_tickets"]] == ["3-2-1", "4-5-6", "5-1-2"]  # 30倍未満は外れる・埋めない
+    assert r["aim_count"] == 3 and r["stake"] == 300 and r["claude_listed_count"] == 4 and r["error"] is None
+    r = ms.build_row(T, "claude", {"2-3-4": 0.1}, odds, None, claude_listed_count=1)
+    assert r["aim_count"] == 0 and "Claude が挙げた組" in r["error"]
 
 
 def test_build_row_errors_and_deadline():
     probs = dict(zip(COMBOS, _tri()["prob"]))
     r = ms.build_row(T, "model", probs, _odds(), "2026-10-25T11:12:00+09:00")
-    assert r["error"] is None and r["stake"] == 1000 and len(r["aim_tickets"]) == 10
+    assert r["error"] is None and r["aim_count"] == 10 and r["stake"] == 1000 and r["claude_listed_count"] is None
     assert r["deadline_at"] == "2026-10-25T11:30:00+09:00"
     assert ms.build_row(T, "model", probs, {}, None)["error"] == "オッズを取れませんでした"
     assert "30倍以上" in ms.build_row(T, "model", probs, _odds(10.0), None)["error"]
     r = ms.build_row(T, "claude", None, _odds(), None, error="上限")
     assert r["error"] == "上限" and r["aim_tickets"] == [] and r["tri_probs"] is None and r["stake"] is None
+
+
+def test_clean_longshots():
+    import claude_reader as cr
+
+    rows = [{"combo": "1-2-3", "prob": 0.2, "reason": ""}, {"combo": "3-1-5", "prob": 0.05, "reason": "a"},
+            {"combo": "3-1-5", "prob": 0.05, "reason": "重複"}, {"combo": "4-4-1", "prob": 0.01, "reason": ""},
+            {"combo": "6ー2ー1", "prob": 0.01, "reason": "b"}, {"combo": "2-3-7", "prob": 0.01, "reason": ""}]
+    out = cr.clean_longshots(rows, [1, 2, 3, 4, 5, 6])
+    assert out == [{"combo": "3-1-5", "prob": 0.05, "reason": "a"}, {"combo": "6-2-1", "prob": 0.01, "reason": "b"}]
 
 
 class _SB:
@@ -118,15 +195,14 @@ def _install(monkeypatch, reading=None):
     calls = []
     monkeypatch.setattr(prediction, "trifecta", lambda final: _tri())
 
-    def fake_read(api_key, race_key, race, final, model=None, race_label="", reuse=None):
-        calls.append({"api_key": api_key, "label": race_label, "reuse": reuse})
-        if not api_key:
-            return reuse if reuse else {"status": "error", "error": "ANTHROPIC_API_KEY が未設定です"}
+    def fake_read(api_key, race_key, race, final, model=None, race_label=""):
+        calls.append({"api_key": api_key, "label": race_label})
         return reading or {"status": "ok", "model": "claude-opus-5-5", "served_model": "claude-opus-5-5",
                            "called_api": True, "cost": {"usd": 0.12}, "usage": {"input_tokens": 10},
-                           "tickets": [{"combo": "4-5-6", "prob": 0.3}]}
+                           "tickets": [{"combo": "4-5-6", "prob": 0.03}, {"combo": "3-2-1", "prob": 0.02}]}
 
-    monkeypatch.setattr(cr, "read_race", fake_read)
+    monkeypatch.setattr(cr, "read_longshots", fake_read)
+    monkeypatch.setattr(cr, "read_race", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read_race は使わない")))
     return calls
 
 
@@ -138,11 +214,14 @@ def _odds_df(v=50.0):
 def test_record_writes_three_rows_once_and_logs_usage(monkeypatch):
     calls = _install(monkeypatch)
     sb = _SB()
-    assert ms.record(sb, T, None, "final", _odds_df(), api_key="k") == "3種を記録"
+    assert ms.record(sb, T, None, "final", _odds_df(), api_key="k") == "3種を記録（Claude が挙げた組 2点・買い目 2点）"
     assert set(sb.rows) == {(T["race_key"], s) for s in ms.SOURCES}
-    assert all(r["error"] is None and len(r["aim_tickets"]) == 10 for r in sb.rows.values())
-    assert sb.rows[(T["race_key"], "claude")]["claude_model"] == "claude-opus-5-5"
-    assert sb.rows[(T["race_key"], "model")]["claude_model"] is None
+    rows = {s: sb.rows[(T["race_key"], s)] for s in ms.SOURCES}
+    assert all(r["error"] is None for r in rows.values())
+    assert rows["model"]["aim_count"] == 10 and rows["blend"]["aim_count"] == 10 and rows["claude"]["aim_count"] == 2
+    assert rows["claude"]["claude_listed_count"] == 2 and rows["blend"]["claude_listed_count"] == 2
+    assert rows["model"]["claude_listed_count"] is None
+    assert rows["claude"]["claude_model"] == "claude-opus-5-5" and rows["model"]["claude_model"] is None
     assert sb.usage and sb.usage[0]["purpose"] == "manshu_compare" and sb.usage[0]["usd"] == 0.12
     assert calls[-1]["label"] == "2026-10-25 桐生 5R"
     # 2回目は何もしない（Claude も呼ばない）
@@ -161,19 +240,6 @@ def test_record_skips_claude_over_daily_limit(monkeypatch):
         r = sb.rows[(T["race_key"], s)]
         assert "上限" in r["error"] and r["aim_tickets"] == []
     assert sb.rows[(T["race_key"], "model")]["error"] is None
-
-
-def test_record_reuses_saved_reading_without_api(monkeypatch):
-    import claude_reader as cr
-
-    calls = _install(monkeypatch)
-    sb = _SB(spent=99.0)  # 上限を超えていても、保存済みの読みは費用がかからないので使う
-    saved = {"status": "ok", "model": "m", "input_hash": "h", "p_first": {"1": 0.5},
-             "claude_raw_tickets": [{"combo": "2-3-4", "prob": 0.4}]}
-    assert cr.reading_from_section(saved) is not None
-    assert ms.record(sb, T, None, "final", _odds_df(), api_key="k", saved_section=saved) == "3種を記録"
-    assert [c["api_key"] for c in calls] == [""]
-    assert not sb.usage
 
 
 def test_record_claude_error_kept(monkeypatch):

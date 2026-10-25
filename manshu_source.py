@@ -5,13 +5,14 @@
 同じタイミングで、3種類の3連単の確率から同じルールで買い目を作り、manshu_source_compare に1レース3行で残す。
 
   model  : 「🤖 モデルのみ予想」の3連単の確率（trifecta(final)）
-  claude : 「🧠 Claudeのみ予想」と同じ読み（claude_reader.read_race・同じ入力）。Claude が挙げなかった組には、
-           残りの確率をモデルの比率で配る（claude_reader.claude_full_tri。「両方の予想平均」と同じ広げ方）
-  blend  : 「⚖️ 両方の予想平均」と同じ平均（claude_reader.average_tri）
+  claude : この比較専用の Claude の呼び出し（claude_reader.read_longshots。入力は read_race と同じ build_brief）で、
+           1号艇以外が1着で中穴〜万舟（オッズ30倍以上）になりそうな組と確率を直接挙げてもらう。
+           Claude が挙げた組だけを使い、モデルの確率では埋めない
+  blend  : 組ごとに (モデルの確率 + Claude の確率) / 2。Claude が挙げなかった組の Claude の確率は 0
 
-買い目の選び方は3種とも同じ（compare_tickets）: 1号艇の1着を外し、3連単オッズ30倍以上の組から確率が高い順に
-COMPARE_N 点（各100円）。確率だけを各予想のものに差し替える。本番の中穴〜万舟狙いの買い目（manshu.aim_tickets。
-中穴5＋万舟5）とは別のルールなので、model の買い目は manshu_chance_picks.aim_tickets と同じとは限らない。
+買い目の選び方は3種とも本番と同じ（manshu.aim_tickets。中穴5＋万舟5・確率順・1号艇1着を外す）。確率だけを
+各予想のものに差し替える。claude は挙げた組だけから作るので、足りなければ10点より少ないまま（aim_count に点数）。
+claude・blend の行の claude_listed_count は、Claude 自身が挙げた組の点数。
 
   - 1レース1回だけ（race_key, source が主キー。先に model の行を入れられた実行だけが Claude を呼ぶ）
   - Claude の費用は claude_usage に purpose = manshu_compare で残す。今日（日本時間）の合計が
@@ -34,49 +35,33 @@ SOURCES = ("model", "claude", "blend")
 USAGE_PURPOSE = "manshu_compare"
 LIMIT_SETTING = "manshu_compare_claude_daily_usd"
 DEFAULT_DAILY_USD = 3.0
-COMPARE_N = 10
-COMPARE_ODDS_MIN = 30.0
-COMPARE_EXCLUDE_FIRST = ("1",)
-COMPARE_STAKE = 100
 
 
 def method_name():
-    """保存する買い目の作り方の名前（例: TOP10-odds30-prob-no1）。"""
-    ex = "".join(f"-no{x}" for x in COMPARE_EXCLUDE_FIRST)
-    return f"TOP{COMPARE_N}-odds{COMPARE_ODDS_MIN:g}-prob{ex}"
-
-
-def compare_tickets(probs, odds, n=COMPARE_N):
-    """3種共通の買い目。probs: {組番: 確率} / odds: {組番: オッズ}
-    → [{combo, prob, odds, tier, stake, payout}]（1号艇の1着を外し、オッズ30倍以上から確率の高い順に n 点）"""
+    """保存する買い目の作り方の名前（本番と同じ。例: MIX5+5-prob-no1）。"""
     import manshu
 
-    rows = []
-    for combo, p in (probs or {}).items():
-        combo = str(combo)
-        if combo[:1] in COMPARE_EXCLUDE_FIRST:
-            continue
-        try:
-            o, p = float((odds or {}).get(combo)), float(p)
-        except (TypeError, ValueError):
-            continue
-        if p != p or o != o or o < COMPARE_ODDS_MIN:
-            continue
-        rows.append((combo, p, o))
-    rows.sort(key=lambda r: (-r[1], r[0]))
-    return [{"combo": c, "prob": round(p, 5), "odds": o, "tier": manshu.odds_tier(o), "stake": COMPARE_STAKE,
-             "payout": int(round(o * COMPARE_STAKE))} for c, p, o in rows[:n]]
+    return manshu.aim_method_name()
+
+
+def compare_tickets(probs, odds):
+    """3種共通の買い目（本番の中穴〜万舟狙いの買い目と同じ manshu.aim_tickets）。probs: {組番: 確率} / odds: {組番: オッズ}
+    → [{combo, prob, odds, tier, stake, payout}]"""
+    import manshu
+
+    return manshu.aim_tickets(probs, odds)
 
 
 def source_probs(model_tri, reading):
-    """{source: {組番: 確率}}。Claude の読みが無ければ model だけ。model_tri: trifecta(final) の表（combo, prob）。"""
-    import claude_reader as cr
+    """{source: {組番: 確率}}。Claude の答えが無ければ model だけ。model_tri: trifecta(final) の表（combo, prob）。
+    reading: claude_reader.read_longshots の戻り値。claude は挙げた組だけ、blend は120通りの (モデル + Claude) / 2。"""
     import manshu
 
     out = {"model": manshu.tri_dict(model_tri[["combo", "prob"]])}
     if reading and reading.get("status") == "ok" and reading.get("tickets"):
-        out["claude"] = cr.claude_full_tri(reading["tickets"], model_tri)
-        out["blend"] = manshu.tri_dict(cr.average_tri(model_tri, reading["tickets"]))
+        c = {str(t["combo"]): float(t["prob"]) for t in reading["tickets"]}
+        out["claude"] = c
+        out["blend"] = {k: (v + c.get(k, 0.0)) / 2.0 for k, v in out["model"].items()}
     return out
 
 
@@ -88,14 +73,15 @@ def deadline_at(race_date_iso, hhmm):
         return None
 
 
-def build_row(t, source, probs, odds, odds_at, error=None, claude_model=None):
+def build_row(t, source, probs, odds, odds_at, error=None, claude_model=None, claude_listed_count=None):
     """manshu_source_compare の1行（結果の列は空）。probs が None なら確率・買い目なしで error だけ残す。"""
     aim = compare_tickets(probs, odds) if probs and odds else []
     if probs and not error:
         if not odds:
             error = "オッズを取れませんでした"
         elif not aim:
-            error = "1号艇以外が1着でオッズ30倍以上の組がありません"
+            error = ("Claude が挙げた組にオッズ30倍以上の組がありません" if source == "claude"
+                     else "1号艇以外が1着でオッズ30倍以上の組がありません")
     return {
         "race_key": t["race_key"],
         "race_date": t["race_date"],
@@ -105,8 +91,10 @@ def build_row(t, source, probs, odds, odds_at, error=None, claude_model=None):
         "aim_method": method_name(),
         "odds_at": odds_at,
         "deadline_at": deadline_at(t["race_date"], t.get("deadline")),
+        "aim_count": len(aim),
         "stake": sum(x["stake"] for x in aim) or None,
         "claude_model": claude_model,
+        "claude_listed_count": claude_listed_count,
         "error": error,
     }
 
@@ -145,25 +133,19 @@ def spent_today(sb, now=None):
     return sum(float(r.get("usd") or 0) for r in rows)
 
 
-def read_claude(sb, t, race, final, api_key, read_model=None, saved_section=None, now=None):
-    """「Claudeのみ予想」と同じ読み。戻り値 (reading, error)。上限を超えていれば呼ばない。"""
+def read_claude(sb, t, race, final, api_key, read_model=None, now=None):
+    """この比較専用の Claude の呼び出し（read_longshots）。戻り値 (reading, error)。上限を超えていれば呼ばない。"""
     import claude_reader as cr
     from official_fetcher import VENUES
 
-    # アプリの「Claudeのみ予想」と同じレース名（日付 会場 R）
-    label = f"{t['race_date']} {VENUES.get(t['jcd'], t.get('venue') or '')} {t['race_no']}R"
-    reuse = cr.reading_from_section(saved_section)
-    # 同じ入力の読みが保存済み（手動で Claude の予想を取った）なら、API を呼ばずにそれを使う
-    if reuse:
-        r = cr.read_race("", t["race_key"], race, final, model=read_model, race_label=label, reuse=reuse)
-        if r.get("status") == "ok":
-            return r, None
     if not api_key:
         return None, "ANTHROPIC_API_KEY が未設定です"
     limit, spent = daily_limit(sb), spent_today(sb, now)
     if spent >= limit:
         return None, f"1日の上限 ${limit:.2f} に達したためスキップ（今日 ${spent:.2f}）"
-    reading = cr.read_race(api_key, t["race_key"], race, final, model=read_model, race_label=label)
+    # アプリの「Claudeのみ予想」と同じレース名（日付 会場 R）
+    label = f"{t['race_date']} {VENUES.get(t['jcd'], t.get('venue') or '')} {t['race_no']}R"
+    reading = cr.read_longshots(api_key, t["race_key"], race, final, model=read_model, race_label=label)
     row = cr.usage_row(reading, t["race_key"], USAGE_PURPOSE)
     if row:
         try:
@@ -171,11 +153,11 @@ def read_claude(sb, t, race, final, api_key, read_model=None, saved_section=None
         except Exception as e:  # noqa: BLE001  記録に失敗しても比較は残す
             print("[MANSHU_SOURCE] claude_usage の記録に失敗:", type(e).__name__, flush=True)
     if reading.get("status") != "ok":
-        return reading, reading.get("error") or "Claude の予想を取れませんでした"
+        return reading, reading.get("error") or "Claude の答えを取れませんでした"
     return reading, None
 
 
-def record(sb, t, race, final, odds, api_key="", read_model=None, saved_section=None, now=None):
+def record(sb, t, race, final, odds, api_key="", read_model=None, now=None):
     """1レースの3種を記録する。戻り値は記録用の短い文（会場名・買い目は入れない）。"""
     import manshu
     from prediction import trifecta
@@ -186,13 +168,17 @@ def record(sb, t, race, final, odds, api_key="", read_model=None, saved_section=
     probs = source_probs(model_tri, None)
     if not insert(sb, [build_row(t, "model", probs["model"], odds_d, odds_at)]):
         return "記録済み"
-    reading, err = read_claude(sb, t, race, final, api_key, read_model, saved_section, now)
+    reading, err = read_claude(sb, t, race, final, api_key, read_model, now)
     probs = source_probs(model_tri, reading)
     cm = (reading or {}).get("served_model") or (reading or {}).get("model")
-    rows = [build_row(t, s, probs.get(s), odds_d, odds_at, error=None if s in probs else err, claude_model=cm)
+    listed = len(probs["claude"]) if "claude" in probs else None
+    rows = [build_row(t, s, probs.get(s), odds_d, odds_at, error=None if s in probs else err, claude_model=cm,
+                      claude_listed_count=listed)
             for s in ("claude", "blend")]
     insert(sb, rows)
-    return "3種を記録" if not err else f"モデルだけ記録（Claude: {err}）"
+    if err:
+        return f"モデルだけ記録（Claude: {err}）"
+    return f"3種を記録（Claude が挙げた組 {listed}点・買い目 {len(rows[0]['aim_tickets'])}点）"
 
 
 # ---------------------------------------------------------------

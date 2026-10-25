@@ -2,11 +2,16 @@
 --
 --   manshu_source_compare : 1レース3行（source = model / claude / blend）。展示後の自動予想（auto_post_predict.py）が
 --                           万舟チャンスのレースで買い目を作り直すのと同じタイミングで書く
---     tri_probs   : その予想の3連単の全120通りの確率 {組番: 確率}
---                   model = モデルのみ予想 / claude = Claudeのみ予想（挙げなかった組はモデルの比率で残りを配る）/
---                   blend = 両方の予想平均（アプリの3つのボタンと同じ処理）
---     aim_tickets : 3種共通のルールの買い目 [{combo, prob, odds, tier, stake, payout}]
---                   1号艇の1着を外し、3連単オッズ30倍以上から確率の高い順に10点（各100円）。aim_method に作り方の名前
+--     tri_probs   : その予想の3連単の確率 {組番: 確率}
+--                   model = モデルのみ予想（120通り）/
+--                   claude = この比較専用の Claude の呼び出しが挙げた組だけ（1号艇以外が1着で中穴〜万舟になりそうな組。
+--                            モデルの確率では埋めない）/
+--                   blend = 120通りの (モデル + Claude) / 2（Claude が挙げなかった組の Claude の確率は 0）
+--     aim_tickets : 3種共通のルール（本番の中穴〜万舟狙いの買い目と同じ: 1号艇の1着を外し、中穴（30〜99倍）5点＋
+--                   万舟（100倍以上）5点を確率順。片方が足りなければもう片方で埋める。各100円）の買い目
+--                   [{combo, prob, odds, tier, stake, payout}]。aim_method に作り方の名前
+--     aim_count   : 買い目の点数（claude は挙げた組だけから作るので10点より少ないことがある）
+--     claude_listed_count : Claude 自身が挙げた組の点数（claude・blend の行。model は空）
 --     odds_at     : 買い目を作ったオッズを取った時刻 / deadline_at : 締切 / saved_at : 書いた時刻
 --     結果（result_status・trifecta_actual・trifecta_payout・hit・stake・return）は、既存の結果確定（list_results.py）が
 --     万舟チャンスの結果と一緒に書く。取りこぼしは翌朝の pre_picks.py
@@ -29,6 +34,7 @@ create table if not exists public.manshu_source_compare (
   tri_probs jsonb,
   aim_tickets jsonb not null default '[]'::jsonb,
   aim_method text,
+  aim_count smallint,
   odds_at timestamptz,
   deadline_at timestamptz,
   saved_at timestamptz not null default now(),
@@ -40,6 +46,7 @@ create table if not exists public.manshu_source_compare (
   "return" integer,
   result_at timestamptz,
   claude_model text,
+  claude_listed_count smallint,
   error text,
   primary key (race_key, source)
 );
@@ -77,6 +84,8 @@ select
   round(avg(case when hit then 1.0 else 0.0 end) filter (where counted and all3), 4) as hit_rate_all3,
   round(sum("return") filter (where counted and all3)::numeric
         / nullif(sum(stake) filter (where counted and all3), 0), 4) as roi_all3,
+  round(avg(aim_count) filter (where counted), 2) as avg_points,
+  round(avg(claude_listed_count) filter (where counted), 2) as avg_claude_listed,
   count(*) filter (where result_at is null and coalesce(stake, 0) > 0) as pending,
   count(*) filter (where error is not null) as errors,
   count(*) filter (where deadline_at is not null and saved_at >= deadline_at) as after_deadline,

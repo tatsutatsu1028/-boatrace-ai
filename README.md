@@ -133,17 +133,20 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 
 - いつ: 展示後の自動予想（`auto_post_predict.py`）が万舟チャンスのレースで中穴〜万舟狙いの買い目を作り直すのと同じタイミング
   （締切20〜10分前）。展示後の予想が保存済み（手動・自動固定）でスキップしたレースも、その時点の展示・オッズで予想し直して記録する
-- 確率: アプリの3つのボタンと同じ処理・同じ入力。claude は `claude_reader.read_race`（「Claudeのみ予想」と同じ読み。
-  挙げなかった組には残りの確率をモデルの比率で配る `claude_full_tri`）、blend は `average_tri`。手動で同じ入力の
-  Claude の予想を取ってあれば、それを使って API は呼ばない
-- 買い目: 3種とも同じルール（`manshu_source.compare_tickets`）。1号艇の1着を外し、その時点の3連単オッズ30倍以上の組から
-  確率が高い順に10点（各100円）。確率だけを差し替える。本番の中穴〜万舟狙いの買い目（中穴5＋万舟5）とは別のルール
+- 確率: model は「モデルのみ予想」の3連単の確率。claude はこの比較専用の Claude の呼び出し（`claude_reader.read_longshots`。
+  入力は「Claudeのみ予想」と同じ `build_brief`）で、1号艇以外が1着で中穴〜万舟（オッズ30倍以上）になりそうな組と確率を
+  直接挙げてもらい、挙げた組だけを使う（モデルの確率では埋めない）。blend は組ごとに (モデル + Claude) / 2
+  （Claude が挙げなかった組の Claude の確率は 0）
+- 買い目: 3種とも本番の中穴〜万舟狙いの買い目と同じルール（`manshu.aim_tickets`。1号艇の1着を外し、中穴5点＋万舟5点を確率順）。
+  確率だけを差し替える。claude は挙げた組だけから作るので、足りなければ10点より少ないまま（`aim_count`）。
+  claude・blend の行には Claude 自身が挙げた組の点数（`claude_listed_count`）も残す
 - 費用の上限: Claude の費用は `claude_usage`（purpose = `manshu_compare`）に残し、今日（日本時間）の合計が
   `app_settings.manshu_compare_claude_daily_usd`（設定タブ。初期値 3ドル・0 で止める）以上なら Claude を呼ばず、
   claude・blend の行の `error` に理由を残す。呼ぶ前に確かめるので1回分だけ超えることがある
 - 結果: 既存の結果確定（`list_results.py`）が万舟チャンスの結果と一緒に書く。取りこぼしは翌朝の `pre_picks.py`
 - 集計: `manshu_source_summary` は source 別のレース数・的中数・的中率・回収率（100円買い換算）。`saved_at` が締切より前の行だけ。
-  `*_all3` は3種ともそろったレースだけの数字（Claude をスキップした日があっても同じレースどうしで比べる）
+  `*_all3` は3種ともそろったレースだけの数字（Claude をスキップした日があっても同じレースどうしで比べる）。
+  `avg_points` は平均の買い目の点数、`avg_claude_listed` は Claude が挙げた組の平均の点数
 - Secrets（GitHub Actions）: `ANTHROPIC_API_KEY`（必須）・`CLAUDE_READ_MODEL`（任意。無ければアプリと同じ既定のモデル）
 - データベース: `supabase/migrations/20261028000000_manshu_source_compare.sql`
 

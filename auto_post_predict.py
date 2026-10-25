@@ -347,17 +347,6 @@ def rebuild_aim(t, final, odds):
     return f"作り直して保存（{len(aim)}点）" if ok else "保存されませんでした（締切後・結果記録済み）"
 
 
-def saved_claude_section(race_key):
-    """保存済みの予想にある Claude の読み（手動で取ったもの）。無ければ None。"""
-    import json
-
-    rows = _sb("GET", f"prediction_snapshots?race_key=eq.{race_key}&select=payload_json&limit=1").json() or []
-    try:
-        return (json.loads((rows[0] if rows else {}).get("payload_json") or "{}") or {}).get("claude")
-    except (TypeError, ValueError):
-        return None
-
-
 def compare_sources(ctx, t, final=None, work=None, odds=None):
     """万舟チャンス: 予想3種（モデルのみ／Claudeのみ／両方の予想平均）の比較を記録する（manshu_source.py）。
     final が無い（展示後の予想が保存済みでスキップした）ときは、ここで展示とオッズを読んで予想し直す。
@@ -367,7 +356,6 @@ def compare_sources(ctx, t, final=None, work=None, odds=None):
     try:
         if manshu_source.recorded(_sb, t["race_key"]):
             return "記録済み"
-        saved_section = None
         if final is None:
             from official_fetcher import fetch_odds3t, fetch_official_race
 
@@ -382,12 +370,10 @@ def compare_sources(ctx, t, final=None, work=None, odds=None):
                 odds = None
             res, _, _ = predict_race(ctx, t, race, odds)
             final, work = res["final"], res["work"]
-            saved_section = saved_claude_section(t["race_key"])
         return manshu_source.record(
             _sb, t, work, final, odds,
             api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
             read_model=os.environ.get("CLAUDE_READ_MODEL", "").strip() or None,
-            saved_section=saved_section,
         )
     except Exception as e:  # noqa: BLE001
         return f"エラー（{type(e).__name__}）"
