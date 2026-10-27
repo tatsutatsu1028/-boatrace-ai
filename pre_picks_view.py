@@ -260,8 +260,14 @@ def _render_day_summary(rows, d, spec, cancelled):
         st.markdown(s["extra"])
 
 
+def by_deadline(rows):
+    """締切が早い順（締切の無い行は最後。同じ締切なら選んだ順）。"""
+    return sorted(rows, key=lambda r: (not r.get("deadline"), str(r.get("deadline") or "").zfill(5),
+                                       r.get("pick_rank") or 0))
+
+
 def render_list(d, spec, other_marks=None):
-    """一覧（管理者だけ）。予想タブの日付 d のレースを並べ、最後にその日の集計とこれまでの成績。"""
+    """一覧（管理者だけ）。予想タブの日付 d のレースを締切が早い順に並べ、最後にその日の集計とこれまでの成績。"""
     try:
         rows = spec.load(d.isoformat())
     except Exception as e:  # noqa: BLE001
@@ -275,7 +281,7 @@ def render_list(d, spec, other_marks=None):
         import manshu_view
 
         cancelled = manshu_view.cancelled_jcds(d)
-        for r in rows:
+        for r in by_deadline(rows):
             render_card(d, r, spec, other_marks, cancelled)
         if rows:
             _render_day_summary(rows, d, spec, cancelled)

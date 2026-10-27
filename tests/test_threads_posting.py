@@ -37,8 +37,14 @@ def test_select_skips_close_deadlines_and_promotes_next():
     picks = [_pick(1, 0.7, "09:20"), _pick(2, 0.6, "09:30"), _pick(3, 0.5, "12:00"),
              _pick(4, 0.5, "10:00"), _pick(5, 0.4, "15:00"), _pick(6, 0.3, "16:00")]
     chosen = tm.select_for_post(picks, now)
-    # 09:20 は30分未満なので飛ばす。09:30 はちょうど30分なので入る。同じ確率なら締切が早い順
+    # 09:20 は30分未満なので飛ばす。09:30 はちょうど30分なので入る。同じ確率なら締切が早い方。並びは締切順
     assert [p["pick_rank"] for p in chosen] == [2, 4, 3]
+
+
+def test_select_orders_by_deadline():
+    now = datetime(2026, 10, 16, 9, 0, tzinfo=tm.JST)
+    picks = [_pick(1, 0.7, "15:00"), _pick(2, 0.6, "11:00"), _pick(3, 0.5, "13:00"), _pick(4, 0.4, "10:00")]
+    assert [p["pick_rank"] for p in tm.select_for_post(picks, now)] == [2, 3, 1]
 
 
 def test_select_returns_fewer_when_not_enough():
