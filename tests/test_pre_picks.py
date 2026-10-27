@@ -133,3 +133,10 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_by_deadline_orders_rows():
+    rows = [{"pick_rank": 1, "deadline": "15:00"}, {"pick_rank": 2, "deadline": None},
+            {"pick_rank": 3, "deadline": "9:30"}, {"pick_rank": 4, "deadline": "10:00"},
+            {"pick_rank": 5, "deadline": "10:00"}]
+    assert [r["pick_rank"] for r in pre_picks_view.by_deadline(rows)] == [3, 4, 5, 1, 2]

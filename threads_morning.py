@@ -3,7 +3,7 @@
 
 毎朝 09:00 JST（pg_cron → threads_morning.yml）に、その日の「🌅 展示前厳選10」
 （Supabase の pre_exhibition_picks）から、投稿時刻から30分以上先に締切があるレースを
-的中確率が高い順に3つ選び、スレッド形式（1投稿目に1レース目、返信で2・3レース目）で投稿する。
+的中確率が高い順に3つ選び、締切が早い順にスレッド形式（1投稿目に1レース目、返信で2・3レース目）で投稿する。
 締切が過ぎた・間近のレースは飛ばし、次に的中確率が高いレースを繰り上げる。
 
   python threads_morning.py run [--date YYYYMMDD] [--retry] [--dry-run]
@@ -178,14 +178,15 @@ def validate_picks(picks, run, race_date_iso):
 
 
 def select_for_post(picks, now, n=POST_COUNT, lead=MIN_LEAD_MINUTES):
-    """締切が投稿時刻から lead 分以上先のレースを、的中確率が高い順に n 個（同じ確率なら締切が早い順）。"""
+    """締切が投稿時刻から lead 分以上先のレースを、的中確率が高い順に n 個選ぶ（同じ確率なら締切が早い順）。
+    投稿・画像に並べる順は締切が早い順。"""
     ok = []
     for p in picks:
         dl = deadline_at(p.get("race_date"), p.get("deadline"))
         if dl is not None and dl - now >= timedelta(minutes=lead):
             ok.append((-float(p["hit_probability"]), dl, p))
     ok.sort(key=lambda x: (x[0], x[1]))
-    return [p for _, _, p in ok[:n]]
+    return [p for _, _, p in sorted(ok[:n], key=lambda x: x[1])]
 
 
 def build_texts(race_date_iso, chosen, writer=None, promo=None):

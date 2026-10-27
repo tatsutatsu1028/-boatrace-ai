@@ -629,5 +629,7 @@ def render_list(d, is_admin=False):
             "展示・直前情報を使わずに毎朝その日の全レースを予想し、3連単が万舟（100円あたり1万円以上）に"
             "なりやすい順に選んだレースです（毎朝8時過ぎに更新）。" + manshu.NOTE
         )
-        for r in marks:
+        from pre_picks_view import by_deadline
+
+        for r in by_deadline(marks):
             _render_mark(d, r)
