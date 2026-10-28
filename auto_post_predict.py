@@ -7,6 +7,8 @@
   python auto_post_predict.py report [--date YYYYMMDD]              その日の対象・予想できた数・見送った数（理由つき）
 
   - 締切は朝に保存している当日の締切時刻（daily_schedule.deadlines）。無ければ一覧に保存した締切
+  - 中止の会場は見送り（理由「中止」）。途中から中止になった会場は、締切から45分たっても一覧に結果が無い
+    見送りのレースの理由を「中止（会場が途中から中止）」に書き直す（relabel_cancelled）
   - 締切20〜5分前のレースで、展示タイムが6艇そろっていれば予想する。そろっていなければ次の回（5分後）に
     もう一度。5分前を過ぎてもそろわなければ見送り、理由を auto_post_log に残す
   - 1レース1回だけ。展示後の予想が保存済み（手動・自動固定）ならスキップ。展示前に保存された予想は上書きする
@@ -441,6 +443,60 @@ def handle_late(t, prev):
     return write_log(t, prev, "skipped", f"見送り: {why}" if why else NEVER_RAN)["status"]
 
 
+# 途中から中止になった会場: 中止の印（daily_schedule.status）は30分おきにしか更新されないので、締切の時点では
+# まだ分からず「展示タイムがそろっていません」などで見送りにしたレースがある。会場が中止になり、締切から
+# CANCEL_RELABEL_AFTER 分たっても結果が無いレースは、理由を「中止」に書き直す（走ったレースは一覧の結果確定
+# list_results.py が締切20分後から結果を書くので、結果があれば書き直さない）
+CANCEL_RELABEL_AFTER = 45
+CANCELLED_MIDDAY = "中止（会場が途中から中止）"
+RESULT_TABLES = ("pre_exhibition_picks", "manshu_chance_picks")
+
+
+def relabel_candidates(targets, logged, now):
+    """理由を「中止」に書き直す候補: 中止の会場で、展示待ちなどで見送りにし、締切から時間がたったレース。"""
+    out = []
+    for t in targets:
+        r = logged.get(t["race_key"]) or {}
+        why = str(r.get("reason") or "")
+        if not t.get("cancelled") or r.get("status") != "skipped" or why.startswith("中止"):
+            continue
+        left = minutes_left(t["race_date"], t.get("deadline"), now)
+        if left is not None and left <= -CANCEL_RELABEL_AFTER:
+            out.append(t)
+    return out
+
+
+def settled_races(date8):
+    """一覧（展示前厳選10・万舟チャンス）で結果が書かれたレース {race_key}。"""
+    out = set()
+    for table in RESULT_TABLES:
+        rows = _sb("GET", f"{table}?race_date=eq.{_iso(date8)}&result_at=not.is.null&select=race_key").json() or []
+        out |= {str(r["race_key"]) for r in rows}
+    return out
+
+
+def relabel_cancelled(date8, targets, logged, now):
+    """途中から中止になった会場の、結果の無い見送りのレースの理由を「中止」に書き直す。書き直した数を返す。"""
+    cands = relabel_candidates(targets, logged, now)
+    if not cands:
+        return 0
+    try:
+        settled = settled_races(date8)
+    except Exception as e:  # noqa: BLE001  結果が読めなければ書き直さない（次の回にもう一度）
+        log(f"中止の書き直し: 結果を読めませんでした（{type(e).__name__}）")
+        return 0
+    n = 0
+    for t in cands:
+        if t["race_key"] in settled:
+            continue
+        prev = logged[t["race_key"]]
+        logged[t["race_key"]] = write_log(t, prev, "skipped", CANCELLED_MIDDAY)
+        n += 1
+    if n:
+        log(f"{date8}: 途中から中止の会場のレースを中止として記録 {n}")
+    return n
+
+
 def run(date8=None, now=None):
     date8 = date8 or _today()
     now = now or datetime.now(JST)
@@ -449,6 +505,10 @@ def run(date8=None, now=None):
         log(f"{date8}: 対象レースがありません（展示前厳選10・万舟チャンスが未選定）")
         return Counter()
     logged = load_log(date8)
+    try:
+        relabel_cancelled(date8, targets, logged, now)
+    except Exception as e:  # noqa: BLE001  書き直しに失敗しても予想は続ける
+        log(f"中止の書き直しに失敗（{type(e).__name__}）")
     ctx = None
     counts = Counter()
     for t in targets:
@@ -523,6 +583,10 @@ def report(date8=None, now=None, write=True):
                 except Exception as e:  # noqa: BLE001
                     log(f"記録に失敗（{type(e).__name__}）")
         logged = load_log(date8)
+        try:
+            relabel_cancelled(date8, targets, logged, now)
+        except Exception as e:  # noqa: BLE001
+            log(f"中止の書き直しに失敗（{type(e).__name__}）")
     s = summarize(targets, logged, now)
     log(f"===== {date8} 展示後の自動予想 =====")
     log(f"対象 {s['targets']}レース（展示前厳選10 {s['pre']}・万舟チャンス {s['manshu']}・両方に入る {s['both']}）")

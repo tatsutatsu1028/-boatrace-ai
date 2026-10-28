@@ -178,6 +178,37 @@ def test_run_only_touches_window_and_late(monkeypatch):
     assert f"{DATE8}_01_9" not in fake.logs
 
 
+def test_relabel_midday_cancel(monkeypatch):
+    """途中から中止の会場: 結果の無い見送りだけ理由を「中止」に書き直す（走ったレース・時間が早いレースは書き直さない）。"""
+    targets = ap.merge_targets([_pick("03", 1, "10:59"), _pick("03", 6, "13:09"), _pick("03", 7, "13:35"),
+                                _pick("01", 5, "13:00")], [])
+    ap.apply_schedule(targets, [{"jcd": "03", "deadlines": {}, "status": "中止"}])
+    exh = "見送り: 展示タイムがそろっていません（0/6）"
+    logged = {f"{DATE8}_03_1": {"status": "skipped", "reason": exh, "attempts": 2},   # 走った（結果あり）
+              f"{DATE8}_03_6": {"status": "skipped", "reason": exh, "attempts": 2},   # 中止
+              f"{DATE8}_03_7": {"status": "skipped", "reason": ap.NEVER_RAN},         # 締切から45分たっていない
+              f"{DATE8}_01_5": {"status": "skipped", "reason": exh, "attempts": 2}}   # 中止でない会場
+    written = {}
+    monkeypatch.setattr(ap, "settled_races", lambda d: {f"{DATE8}_03_1"})
+    monkeypatch.setattr(ap, "write_log", lambda t, prev, status, reason=None, **k: written.setdefault(
+        t["race_key"], {"race_key": t["race_key"], "status": status, "reason": reason}))
+    assert ap.relabel_cancelled(DATE8, targets, logged, _at("14:00")) == 1
+    assert written == {f"{DATE8}_03_6": {"race_key": f"{DATE8}_03_6", "status": "skipped",
+                                          "reason": ap.CANCELLED_MIDDAY}}
+    assert logged[f"{DATE8}_03_6"]["reason"] == ap.CANCELLED_MIDDAY
+    # 書き直した後は候補に入らない（次の回に読み直さない）
+    assert [t["race_key"] for t in ap.relabel_candidates(targets, logged, _at("14:30"))] == [f"{DATE8}_03_1",
+                                                                                         f"{DATE8}_03_7"]
+    # 結果が読めなければ書き直さない
+    written.clear()
+
+    def boom(d):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(ap, "settled_races", boom)
+    assert ap.relabel_cancelled(DATE8, targets, logged, _at("15:00")) == 0 and not written
+
+
 def test_summarize_counts_and_reasons():
     targets = ap.merge_targets([_pick("01", 1, "10:00"), _pick("01", 2, "10:30"), _pick("01", 3, "11:00")],
                                [_pick("01", 3, "11:00"), _pick("01", 4, "21:00")])
