@@ -55,12 +55,14 @@ def test_phase_boundaries():
     assert ap.phase(20) == "window"
     assert ap.phase(15) == "window"
     assert ap.phase(10) == "window"
-    assert ap.phase(9.9) == "late"
+    assert ap.phase(5) == "window"
+    assert ap.phase(4.9) == "late"
     assert ap.phase(-3) == "late"
 
 
-def test_plan_every_race_gets_two_or_three_checks():
-    """5分おきの起動なら、締切20〜10分前のあいだに必ず2回（境目ちょうどなら3回）確かめる。"""
+def test_plan_every_race_gets_three_or_four_checks():
+    """5分おきの起動なら、締切20〜5分前のあいだに必ず3回（境目ちょうどなら4回）確かめ、
+    そのうち1回は締切10〜5分前（展示タイムが遅く出る江戸川・常滑などでも間に合う）。"""
     picks = [_pick(f"{(i % 24) + 1:02d}", (i % 12) + 1, f"{8 + i // 4:02d}:{(i * 7) % 60:02d}") for i in range(52)]
     targets = ap.merge_targets(picks, [])
     for delay in (0, 2, 3, 4):
@@ -68,15 +70,16 @@ def test_plan_every_race_gets_two_or_three_checks():
             left = [ap.minutes_left(tg["race_date"], tg["deadline"], x) for x in runs]
             if tg["deadline"] < "08:20":
                 continue  # 起動の時間帯（8:00〜）より前に締切20分前が来るレース
-            assert 2 <= len(runs) <= 3, (tg["deadline"], delay, runs)
-            assert all(10 <= m <= 20 for m in left)
+            assert 3 <= len(runs) <= 4, (tg["deadline"], delay, runs)
+            assert all(5 <= m <= 20 for m in left)
+            assert any(m <= 10 for m in left)
 
 
 def test_plan_text_hides_venue_in_actions():
     targets = ap.merge_targets([_pick("01", 5, "11:30", venue="桐生")], [_pick("01", 5, "11:30", venue="桐生")])
     planned = ap.plan(targets, DATE8, delay=3)
     detail = ap.format_plan(planned, detail=True)[0]
-    assert "桐生 5R" in detail and "11:13 → 11:18" in detail and "展示前厳選10・万舟チャンス" in detail
+    assert "桐生 5R" in detail and "11:13 → 11:18 → 11:23（3回まで）" in detail and "展示前厳選10・万舟チャンス" in detail
     assert "桐生" not in ap.format_plan(planned, detail=False)[0]
 
 

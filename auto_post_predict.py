@@ -1,14 +1,14 @@
 """
 展示後の自動予想: その日の「🌅 展示前厳選10」と「💥 万舟チャンス」のレース（重複は1回）を、
-締切の20〜10分前に、予想タブの「🤖 モデルのみ予想」と同じ予想（本番の新モデル）で予想して保存する。
+締切の20〜5分前に、予想タブの「🤖 モデルのみ予想」と同じ予想（本番の新モデル）で予想して保存する。
 
   python auto_post_predict.py run                      5分おき（pg_cron → auto_post_predict.yml）
   python auto_post_predict.py plan   [--date YYYYMMDD] [--delay 分]   どのレースが何時に動くか（保存はしない）
   python auto_post_predict.py report [--date YYYYMMDD]              その日の対象・予想できた数・見送った数（理由つき）
 
   - 締切は朝に保存している当日の締切時刻（daily_schedule.deadlines）。無ければ一覧に保存した締切
-  - 締切20〜10分前のレースで、展示タイムが6艇そろっていれば予想する。そろっていなければ次の回（5分後）に
-    もう一度。10分前を過ぎてもそろわなければ見送り、理由を auto_post_log に残す
+  - 締切20〜5分前のレースで、展示タイムが6艇そろっていれば予想する。そろっていなければ次の回（5分後）に
+    もう一度。5分前を過ぎてもそろわなければ見送り、理由を auto_post_log に残す
   - 1レース1回だけ。展示後の予想が保存済み（手動・自動固定）ならスキップ。展示前に保存された予想は上書きする
   - 保存は手動と同じ save_latest_prediction_snapshot()。collector_name = auto_post（自動固定 auto_random とは別。
     自動固定の1日の件数・結果の自動記録には数えない）。保存するとトリガーが一覧の展示後の欄（post_*）を書く
@@ -37,7 +37,7 @@ COLLECTOR = "auto_post"
 LOG_TABLE = "auto_post_log"
 # 締切の何分前から何分前までに予想するか
 WINDOW_FROM = 20
-WINDOW_TO = 10
+WINDOW_TO = 5
 # pg_cron の起動間隔（分）と、plan の既定の起動時間帯（JST）
 CRON_STEP = 5
 CRON_START = "08:00"
@@ -46,7 +46,7 @@ CRON_END = "22:55"
 DEFAULT_DELAY = 3
 FINAL = ("done", "skipped", "already")
 SOURCE_LABELS = {"pre": "展示前厳選10", "manshu": "万舟チャンス"}
-NEVER_RAN = "締切20〜10分前に一度も確認できませんでした（起動の遅れ・欠落など）"
+NEVER_RAN = "締切20〜5分前に一度も確認できませんでした（起動の遅れ・欠落など）"
 
 
 def log(*a):
@@ -110,7 +110,7 @@ def minutes_left(race_date_iso, hhmm, now):
 
 
 def phase(left):
-    """early（まだ）/ window（締切20〜10分前。予想する）/ late（10分前を過ぎた）/ unknown（締切不明）。"""
+    """early（まだ）/ window（締切20〜5分前。予想する）/ late（5分前を過ぎた）/ unknown（締切不明）。"""
     if left is None:
         return "unknown"
     if left > WINDOW_FROM:
@@ -149,7 +149,7 @@ def format_plan(planned, detail=True):
         if tg.get("cancelled"):
             when = "中止のため動かない"
         elif not runs:
-            when = "動かない（締切20〜10分前が起動の時間帯の外）"
+            when = "動かない（締切20〜5分前が起動の時間帯の外）"
         else:
             when = " → ".join(x.strftime("%H:%M") for x in runs) + f"（{len(runs)}回まで）"
         head = f"{name} 締切 {tg.get('deadline') or '--:--'}" if detail else name
@@ -380,7 +380,7 @@ def compare_sources(ctx, t, final=None, work=None, odds=None):
 
 
 def handle_window(ctx, t, prev):
-    """締切20〜10分前の1レース。戻り値は書いた状態。"""
+    """締切20〜5分前の1レース。戻り値は書いた状態。"""
     from official_fetcher import fetch_odds3t, fetch_official_race
 
     meta = snapshot_meta(t["race_key"])
@@ -405,7 +405,7 @@ def handle_window(ctx, t, prev):
     try:
         res, payload_json, payload_hash = predict_race(ctx, t, race, odds)
         status = save_snapshot(t, payload_json, payload_hash)
-    except Exception as e:  # noqa: BLE001  次の回（締切10分前まで）にもう一度
+    except Exception as e:  # noqa: BLE001  次の回（締切5分前まで）にもう一度
         log(f"締切 {t.get('deadline')}: 予想・保存でエラー {type(e).__name__}: {str(e)[:200]}")
         return write_log(t, prev, "waiting", f"予想・保存でエラー（{type(e).__name__}）", tried=True)["status"]
     if status == "auto_fixed":
@@ -428,7 +428,7 @@ def handle_window(ctx, t, prev):
 
 
 def handle_late(t, prev):
-    """締切10分前を過ぎても予想していないレース: 見送りとして記録する（展示後の予想が保存済みならそれを記録）。"""
+    """締切5分前を過ぎても予想していないレース: 見送りとして記録する（展示後の予想が保存済みならそれを記録）。"""
     if t.get("cancelled"):
         return write_log(t, prev, "skipped", "中止")["status"]
     try:
@@ -469,7 +469,7 @@ def run(date8=None, now=None):
         counts[st] += 1
         log(f"締切 {t.get('deadline')}（あと{left:.0f}分）: {st}" if left is not None else f"{st}")
     if not counts:
-        log(f"{date8}: 締切20〜10分前のレースはありません（対象 {len(targets)}レース）")
+        log(f"{date8}: 締切20〜5分前のレースはありません（対象 {len(targets)}レース）")
     else:
         log(f"{date8}: " + "・".join(f"{k} {v}" for k, v in counts.items()))
     return counts
