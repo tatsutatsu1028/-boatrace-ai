@@ -1417,8 +1417,14 @@ with tab3:
                                 with st.spinner("トークンからアカウント情報を取得しています…"):
                                     _uid, _uname = threads_fetch_user_id(_ttoken.strip())
 
-                            threads_save_config(_sb_url, _sb_key, _uid, _ttoken)
+                            _res = threads_save_config(_sb_url, _sb_key, _uid, _ttoken)
 
+                            if isinstance(_res, dict) and _res.get("exchange_error"):
+                                # st.rerun() 後も見えるよう toast で知らせる。
+                                st.toast(
+                                    "長期トークンへの交換はできなかったため、"
+                                    "入力されたトークンを長期トークンとしてそのまま保存しました。"
+                                )
                             if _uname:
                                 st.success(f"保存しました。連携アカウント: @{_uname}")
                             else:

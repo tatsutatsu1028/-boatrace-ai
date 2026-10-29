@@ -136,9 +136,13 @@ def save_config(
 ):
     """Threads連携情報をSupabaseへ保存する。
 
-    新しく貼り付けたトークン（token_updated_at未指定）は、THREADS_APP_SECRETが
-    設定されていれば保存前に長期トークンへ交換する。既存トークンのメタ情報更新や
-    refresh後の保存では再交換しない。
+    新しく貼り付けたトークン（token_updated_at未指定）は、保存前に長期トークンへ
+    交換する。交換に失敗した場合（App Secret未設定を含む）は、すでに長期トークン
+    とみなして交換せずにそのまま保存する。どちらの場合も保存前に /me で有効性を
+    確認し、無効ならエラーにする。既存トークンのメタ情報更新やrefresh後の保存では
+    再交換しない。
+
+    戻り値は {"exchanged": bool, "exchange_error": str | None}。
     """
     sb_url = str(sb_url or "").strip().rstrip("/")
     sb_key = str(sb_key or "").strip()
@@ -150,13 +154,27 @@ def save_config(
     if not access_token:
         raise ValueError("アクセストークンが必要です。")
 
-    app_secret = str(os.environ.get("THREADS_APP_SECRET", "") or "").strip()
+    exchanged = False
+    exchange_error = None
     if exchange_if_possible and token_updated_at is None:
-        if not app_secret:
-            raise RuntimeError(
-                "THREADS_APP_SECRET が未設定のため、短期トークンを長期トークンへ交換できません。"
-            )
-        access_token = exchange_access_token(access_token, app_secret=app_secret)
+        try:
+            access_token = exchange_access_token(access_token)
+            exchanged = True
+        except Exception as e:
+            # 長期トークンを貼った場合、th_exchange_token はエラーになる。
+            # その場合は交換せず、貼られたトークンをそのまま使う。
+            exchange_error = str(e)
+
+        # 保存前にトークンが本当に使えるか確かめる。
+        try:
+            verified_uid, _ = fetch_user_id(access_token)
+        except Exception as e:
+            msg = f"トークンが無効なため保存できませんでした: {e}"
+            if exchange_error:
+                msg += f"\n（長期トークンへの交換エラー: {exchange_error}）"
+            raise RuntimeError(msg) from e
+        if not user_id:
+            user_id = verified_uid
 
     if not user_id:
         user_id, _ = fetch_user_id(access_token)
@@ -180,7 +198,7 @@ def save_config(
         raise RuntimeError(
             f"Supabaseへの保存に失敗しました（HTTP {r.status_code}）: {r.text[:300]}"
         )
-    return True
+    return {"exchanged": exchanged, "exchange_error": exchange_error}
 
 
 def token_age_days(cfg):
