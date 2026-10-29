@@ -467,10 +467,11 @@ def relabel_candidates(targets, logged, now):
 
 
 def settled_races(date8):
-    """一覧（展示前厳選10・万舟チャンス）で結果が書かれたレース {race_key}。"""
+    """一覧（展示前厳選10・万舟チャンス）で結果（払戻）が出たレース {race_key}。中止・不成立（void）は入れない
+    （中止のレースは翌朝の記録で void になるので、結果が書かれたかどうかでは走ったか分からない）。"""
     out = set()
     for table in RESULT_TABLES:
-        rows = _sb("GET", f"{table}?race_date=eq.{_iso(date8)}&result_at=not.is.null&select=race_key").json() or []
+        rows = _sb("GET", f"{table}?race_date=eq.{_iso(date8)}&result_status=eq.settled&select=race_key").json() or []
         out |= {str(r["race_key"]) for r in rows}
     return out
 

@@ -209,6 +209,19 @@ def test_relabel_midday_cancel(monkeypatch):
     assert ap.relabel_cancelled(DATE8, targets, logged, _at("15:00")) == 0 and not written
 
 
+def test_settled_races_excludes_void(monkeypatch):
+    """中止のレースは翌朝 void として結果が書かれるので、払戻の出たレース（settled）だけを走ったレースとする。"""
+    paths = []
+
+    class R:
+        def json(self):
+            return [{"race_key": f"{DATE8}_03_1"}]
+
+    monkeypatch.setattr(ap, "_sb", lambda method, path, **k: paths.append(path) or R())
+    assert ap.settled_races(DATE8) == {f"{DATE8}_03_1"}
+    assert len(paths) == 2 and all("result_status=eq.settled" in p and "result_at" not in p for p in paths)
+
+
 def test_summarize_counts_and_reasons():
     targets = ap.merge_targets([_pick("01", 1, "10:00"), _pick("01", 2, "10:30"), _pick("01", 3, "11:00")],
                                [_pick("01", 3, "11:00"), _pick("01", 4, "21:00")])
