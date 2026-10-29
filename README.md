@@ -246,8 +246,8 @@ note のレースは記事に載せた買い目で的中を判定する。締め
 
 - `threads_posts`: 自分の投稿1件1行。投稿日時・種類（朝の自動投稿 `morning` / 結果の返信 `result`・`result_summary` /
   アプリからの1レース投稿 `race` / 本日のまとめ `summary` / スレッズのアプリから直接 `manual`・`manual_reply`）・本文の先頭80文字・
-  どのレース（race_key・会場・R）か。種類は各投稿の記録（`threads_auto_posts` / `threads_result_posts` / `threads_race_posts`）の
-  投稿IDで紐付け、記録に無い投稿は本文の型から見分ける。本日のまとめは投稿したときにアプリが投稿IDを記録する（`threads_poster.record_post`）
+  どのレース（race_key・会場・R）か。朝の自動投稿と結果の返信は `threads_auto_posts` / `threads_result_posts` の
+  投稿IDで種類・レースを紐付け、それ以外は本文の型から見分ける。本日のまとめは投稿したときにアプリが投稿IDを記録する（`threads_poster.record_post`）
 - `threads_post_insights`: 投稿から14日以内の投稿の views・likes・replies・reposts・quotes・shares（1投稿1日1行。日ごとの推移が残る）
 - `threads_account_insights`: 前日（JST）のアカウント全体の views と、取った時点の followers_count（1日1行）
 - 分析用のビュー `threads_post_insights_view`（数値に投稿の種類・投稿時刻・本文の先頭を付けたもの）

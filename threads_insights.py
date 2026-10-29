@@ -7,9 +7,9 @@
   python threads_insights.py run [--force] [--backfill]
 
   1. 自分の投稿（/me/threads と /me/replies）を読み、threads_posts に1件1行で記録する。
-     種類（朝の自動投稿・結果の返信・アプリからの1レース投稿・本日のまとめ・手動）とどのレースの投稿かは、
-     それぞれの投稿の記録（threads_auto_posts / threads_result_posts / threads_race_posts / threads_posts）の
-     投稿IDで紐付ける。記録に無い投稿は本文の型から見分け、どれでもなければ手動（manual）
+     朝の自動投稿と結果の返信は、threads_auto_posts / threads_result_posts の投稿IDで種類・レースを紐付ける。
+     アプリが記録した本日のまとめ（threads_posts の source = app）はその種類のまま。
+     それ以外は本文の型から見分け（アプリからの1レース投稿など）、どれでもなければ手動（manual）
   2. 投稿から POST_DAYS 日以内の投稿の数値（views・likes・replies・reposts・quotes・shares）を
      /{投稿ID}/insights から取り、threads_post_insights に1投稿1日1行で書く（日ごとの推移が残る）
   3. アカウント全体の数値（前日の views・今の followers_count）を /me/threads_insights から取り、
@@ -174,18 +174,14 @@ def _race_fields(race_key, venue=None, race_no=None):
     return {key: v for key, v in out.items() if v is not None}
 
 
-def known_posts(auto_rows, result_rows, race_rows, recorded_rows):
-    """投稿ID → 種類・レースの情報（記録の表から）。"""
+def known_posts(auto_rows, result_rows, recorded_rows=()):
+    """投稿ID → 種類・レースの情報（threads_auto_posts・threads_result_posts と、アプリが記録した行から）。"""
     known = {}
     for row in recorded_rows or []:
         if row.get("post_id") and row.get("source") == "app":
             known[str(row["post_id"])] = {k: row.get(k) for k in
                                           ("kind", "source", "race_key", "race_date", "venue", "race_no", "style")
                                           if row.get(k) is not None}
-    for row in race_rows or []:
-        if row.get("post_id"):
-            known[str(row["post_id"])] = {"kind": "race", "source": "race_posts", "style": row.get("style"),
-                                          **_race_fields(row.get("race_key"))}
     for row in result_rows or []:
         if not row.get("post_id"):
             continue
@@ -295,14 +291,12 @@ def _load_known(post_ids, since_date):
     auto = _json(_sb("GET", f"threads_auto_posts?{date_filter}&select=race_date,posts"))
     results = _json(_sb("GET", f"threads_result_posts?{date_filter}&post_id=not.is.null"
                                "&select=race_date,item,post_index,race_key,venue,race_no,post_id"))
-    races = _json(_sb("GET", f"threads_race_posts?{date_filter}&post_id=not.is.null"
-                             "&select=race_key,post_id,style"))
     recorded = []
     for i in range(0, len(ids), 100):
         chunk = ids[i:i + 100]
         recorded += _json(_sb("GET", f"{POSTS}?post_id=in.({_in(chunk)})"
                                      "&select=post_id,kind,source,race_key,race_date,venue,race_no,style"))
-    return known_posts(auto, results, races, recorded)
+    return known_posts(auto, results, recorded)
 
 
 def _upsert(table, rows, conflict):

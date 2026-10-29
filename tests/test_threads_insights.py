@@ -42,15 +42,13 @@ def test_known_posts_links_each_table():
          "venue": "桐生", "race_no": 5, "post_id": "r1"},
         {"race_date": "2026-10-29", "item": "summary", "post_id": "rs"},
     ]
-    races = [{"race_key": "20261029_12_3", "post_id": "p1", "style": "aim"}]
     recorded = [{"post_id": "s1", "kind": "summary", "source": "app", "race_date": "2026-10-29"},
                 {"post_id": "x", "kind": "manual", "source": "none"}]
-    k = ti.known_posts(auto, results, races, recorded)
+    k = ti.known_posts(auto, results, recorded)
     assert k["m2"] == {"kind": "morning", "source": "auto_posts", "post_index": 2, "race_key": "20261029_12_8",
                        "race_date": "2026-10-29", "venue": "住之江", "race_no": 8}
     assert k["r1"]["kind"] == "result" and k["r1"]["post_index"] == 1
     assert k["rs"] == {"kind": "result_summary", "source": "result_posts", "race_date": "2026-10-29"}
-    assert k["p1"]["kind"] == "race" and k["p1"]["style"] == "aim" and k["p1"]["race_date"] == "2026-10-29"
     assert k["s1"]["kind"] == "summary"
     # 前の回に「手動」と推定しただけの行は、記録として使わない
     assert "x" not in k

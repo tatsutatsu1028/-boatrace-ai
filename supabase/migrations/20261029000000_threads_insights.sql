@@ -4,11 +4,12 @@
 --     kind  morning        : 朝の自動投稿（threads_auto_posts。post_index は何投稿目か）
 --           result         : 朝の3レースの結果の自動返信（threads_result_posts）
 --           result_summary : 朝の3レースの結果まとめの自動返信（threads_result_posts の summary）
---           race           : アプリから1レースずつ投稿（threads_race_posts。style は normal / aim）
+--           race           : アプリから1レースずつ投稿（本文の型から。style は normal / aim）
 --           summary        : アプリの「📊 本日のまとめ投稿」
 --           manual         : スレッズのアプリから直接（上のどれにも当たらない投稿）
 --           manual_reply   : スレッズのアプリから直接の返信（コメントへの返事など）
---     source  どこから種類が分かったか（auto_posts / result_posts / race_posts / app / text / none）
+--     source  どこから種類が分かったか（auto_posts / result_posts / app / text / none）
+--             朝の自動投稿と結果の返信は threads_auto_posts / threads_result_posts の投稿IDで紐付ける
 --   threads_post_insights    : 投稿ごとの数値の推移。投稿から14日以内の投稿を毎日1回（1投稿1日1行）
 --   threads_account_insights : アカウント全体の数値（1日1行）。views は前日（JST）の閲覧数、
 --                              followers_count は取った時点のフォロワー数。この行が「その日の取得が終わった」印
