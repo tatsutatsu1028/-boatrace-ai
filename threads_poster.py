@@ -137,10 +137,10 @@ def save_config(
     """Threads連携情報をSupabaseへ保存する。
 
     新しく貼り付けたトークン（token_updated_at未指定）は、保存前に長期トークンへ
-    交換する。交換に失敗した場合（App Secret未設定を含む）は、すでに長期トークン
-    とみなして交換せずにそのまま保存する。どちらの場合も保存前に /me で有効性を
-    確認し、無効ならエラーにする。既存トークンのメタ情報更新やrefresh後の保存では
-    再交換しない。
+    交換する。交換に失敗した場合（App Secret未設定を含む）は、元のトークンが
+    /me で有効か確認し、有効ならすでに長期トークンとみなして交換せずにそのまま
+    保存する。/me も失敗したときだけエラーにする。既存トークンのメタ情報更新や
+    refresh後の保存では再交換しない。
 
     戻り値は {"exchanged": bool, "exchange_error": str | None}。
     """
@@ -162,19 +162,18 @@ def save_config(
             exchanged = True
         except Exception as e:
             # 長期トークンを貼った場合、th_exchange_token はエラーになる。
-            # その場合は交換せず、貼られたトークンをそのまま使う。
+            # その場合は元のトークンが有効か /me で確かめ、有効なら
+            # すでに長期トークンとみなして交換せずにそのまま保存する。
             exchange_error = str(e)
-
-        # 保存前にトークンが本当に使えるか確かめる。
-        try:
-            verified_uid, _ = fetch_user_id(access_token)
-        except Exception as e:
-            msg = f"トークンが無効なため保存できませんでした: {e}"
-            if exchange_error:
-                msg += f"\n（長期トークンへの交換エラー: {exchange_error}）"
-            raise RuntimeError(msg) from e
-        if not user_id:
-            user_id = verified_uid
+            try:
+                verified_uid, _ = fetch_user_id(access_token)
+            except Exception as me_err:
+                raise RuntimeError(
+                    f"トークンが無効なため保存できませんでした: {me_err}"
+                    f"\n（長期トークンへの交換エラー: {exchange_error}）"
+                ) from me_err
+            if not user_id:
+                user_id = verified_uid
 
     if not user_id:
         user_id, _ = fetch_user_id(access_token)
