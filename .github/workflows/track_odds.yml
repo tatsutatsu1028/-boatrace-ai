@@ -51,3 +51,13 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python threads_results.py run
+
+      # スレッズのインサイト（投稿ごとの閲覧数・いいね等と、アカウントの閲覧数・フォロワー数）を1日1回ためる（threads_insights.py）。
+      # 5分おきに呼ばれるが、JST 21:30 以降の最初の回だけ取る（その日の分を取り終えたら次の日まで何もしない）。
+      # 記録は Supabase の threads_posts / threads_post_insights / threads_account_insights。ログは件数・合否だけ。
+      - name: Threads insights
+        if: ${{ !cancelled() }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python threads_insights.py run
