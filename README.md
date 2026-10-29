@@ -241,6 +241,20 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 設定タブの「📊 本日のまとめ投稿」。「朝の無料3レース」と「noteのレース」を分けて載せる。朝のレースは投稿した買い目、
 note のレースは記事に載せた買い目で的中を判定する。締めの一言（3パターン）は両方を合わせた的中率で決める。
 
+### スレッズのインサイト（自動で記録）
+オッズ追跡（`track_odds.yml`）の最後のステップで、1日1回（JST 21:30 以降の最初の回）スレッズの数値をためます（`threads_insights.py`）。
+
+- `threads_posts`: 自分の投稿1件1行。投稿日時・種類（朝の自動投稿 `morning` / 結果の返信 `result`・`result_summary` /
+  アプリからの1レース投稿 `race` / 本日のまとめ `summary` / スレッズのアプリから直接 `manual`・`manual_reply`）・本文の先頭80文字・
+  どのレース（race_key・会場・R）か。朝の自動投稿と結果の返信は `threads_auto_posts` / `threads_result_posts` の
+  投稿IDで種類・レースを紐付け、それ以外は本文の型から見分ける。本日のまとめは投稿したときにアプリが投稿IDを記録する（`threads_poster.record_post`）
+- `threads_post_insights`: 投稿から14日以内の投稿の views・likes・replies・reposts・quotes・shares（1投稿1日1行。日ごとの推移が残る）
+- `threads_account_insights`: 前日（JST）のアカウント全体の views と、取った時点の followers_count（1日1行）
+- 分析用のビュー `threads_post_insights_view`（数値に投稿の種類・投稿時刻・本文の先頭を付けたもの）
+- 失敗したら次の回にやり直す（3回まで。理由は `threads_account_insights.error`）。トークンに `threads_manage_insights` の権限が必要
+- 手動: `python threads_insights.py run --force`（今すぐ取る）/ `--backfill`（過去の投稿もすべて `threads_posts` に記録する）
+- データベース: `supabase/migrations/20261029000000_threads_insights.sql`
+
 ## 的中確率の表示補正
 新しいモデル（`ml`）では補正しない（補正なしで実際の的中率に合っているため）。以下は今までのモデルのときの補正。
 

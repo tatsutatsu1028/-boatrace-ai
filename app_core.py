@@ -87,6 +87,7 @@ try:
         fetch_morning_post_results as threads_fetch_morning_post_results,
         apply_actuals as threads_apply_actuals,
         post_text as threads_post_text,
+        record_post as threads_record_post,
         load_config as threads_load_config,
         save_config as threads_save_config,
         token_age_days as threads_token_age_days,
@@ -121,6 +122,9 @@ except Exception:
 
     def threads_post_text(*args, **kwargs):
         raise RuntimeError("threads_poster.py が未導入です。")
+
+    def threads_record_post(*args, **kwargs):
+        return False
 
     def threads_load_config(*args, **kwargs):
         return None
@@ -1583,6 +1587,9 @@ with tab3:
                             _sum_text,
                         )
                         st.session_state[_sum_posted_key] = _sum_post_id
+                        # インサイトの集計で「本日のまとめ」の投稿と分かるように、投稿IDを記録する
+                        threads_record_post(_sb_url, _sb_key, _sum_post_id, "summary", _sum_text,
+                                            race_date=_sum_date_str)
                         st.success(f"投稿しました。（投稿ID: {_sum_post_id}）")
                         st.rerun()
                     except Exception as e:

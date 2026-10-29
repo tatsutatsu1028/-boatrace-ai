@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import math
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
+
+_JST = timezone(timedelta(hours=9))
 
 
 API_BASE = "https://graph.threads.net/v1.0"
@@ -252,6 +254,45 @@ def refresh_access_token(sb_url, sb_key):
         exchange_if_possible=False,
     )
     return new_token
+
+
+POSTS_TABLE = "threads_posts"
+TEXT_HEAD_LEN = 80
+
+
+def record_post(sb_url, sb_key, post_id, kind, text="", race_key=None, **extra):
+    """投稿IDと種類を threads_posts に記録する（インサイトの集計で種類を見分けるのに使う）。
+
+    朝の自動投稿・結果の返信・1レースの投稿は、それぞれの記録の表からインサイトの集計が拾うので、
+    ほかに記録の無い投稿（アプリの「本日のまとめ投稿」など）だけここで記録する。
+    記録に失敗しても投稿は済んでいるので、例外は出さずに False を返す。
+    """
+    sb_url = str(sb_url or "").strip().rstrip("/")
+    sb_key = str(sb_key or "").strip()
+    post_id = str(post_id or "").strip()
+    if not sb_url or not sb_key or not post_id:
+        return False
+    now = datetime.now(timezone.utc)
+    text = str(text or "")
+    row = {
+        "post_id": post_id, "kind": kind, "source": "app", "posted_at": now.isoformat(),
+        "posted_date": now.astimezone(_JST).date().isoformat(),
+        "text_head": text[:TEXT_HEAD_LEN], "text_length": len(text), "updated_at": now.isoformat(),
+        **extra,
+    }
+    if race_key:
+        k = str(race_key)
+        row.update(race_key=k, race_date=f"{k[:4]}-{k[4:6]}-{k[6:8]}")
+    try:
+        r = requests.post(
+            f"{sb_url}/rest/v1/{POSTS_TABLE}",
+            headers=_headers(sb_key, prefer="resolution=merge-duplicates,return=minimal"),
+            json=row,
+            timeout=TIMEOUT,
+        )
+        return r.status_code < 400
+    except requests.RequestException:
+        return False
 
 
 def _check_post_args(user_id, access_token, text):
