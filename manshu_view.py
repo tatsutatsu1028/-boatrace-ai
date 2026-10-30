@@ -11,6 +11,9 @@
 
   - 中穴〜万舟狙いの買い目（管理者だけ）: 1号艇の1着を外し、3連単オッズ30倍以上から確率順に10点。
     朝の買い目は「仮（朝のオッズ）」。展示後に予想タブで予想すると、その時点のオッズで作り直して保存する
+  - 自分のメモ（管理者の一覧だけ）: レースごとの自由記述（例: 4号艇 伸び良し、1号艇 出足不安）。締切前だけ保存できる
+    （manshu_memos）。予想比較の「メモ入りの Claude（claude_memo）・メモ入りの平均（blend_memo）」にだけ使い、本番の予想・買い目・スレッズ・note・
+    Discord には使わない。スタッフには出さない
 
 表示は「荒れやすいレース」。「儲かる」とは書かない（検証で回収率が100%を超える根拠は無い）。
 """
@@ -482,7 +485,89 @@ def _spec():
         other_marks_note="🌅 展示前厳選10（当たりやすいレース）にも入っています。",
         flag_note="（万舟チャンスからは外していません）",
         favorite_line=favorite_text,
+        memo_block=_memo_block,
     )
+
+
+# ---------------------------------------------------------------
+# 自分のメモ（管理者の一覧だけ。manshu_memos。比較の claude_memo・blend_memo にだけ使う）
+# ---------------------------------------------------------------
+MEMO_MIGRATION = "supabase/migrations/20261030000000_manshu_memos.sql"
+MEMO_MAX = 1000
+MEMO_PLACEHOLDER = "例: 4号艇 伸び良し、1号艇 出足不安"
+MEMO_STATUS = {"saved": "保存しました", "deleted": "メモを消しました",
+               "closed": "締切を過ぎたため保存できませんでした", "not_found": "万舟チャンスのレースではありません"}
+
+
+def _rpc(name, body):
+    import requests
+
+    url, key = _supabase_config()
+    if not url or not key:
+        raise RuntimeError("Supabase の設定がありません")
+    r = requests.post(f"{url}/rest/v1/rpc/{name}",
+                      headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                      json=body, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_memos(date_iso):
+    """その日のメモ {race_key: {memo, saved_at, predicted_at, predicted_memo_saved_at, predict_error}}。"""
+    return {m["race_key"]: m for m in _rpc("manshu_memos_for_date", {"p_date": date_iso}) or []}
+
+
+def save_memo(race_key, text):
+    """メモを保存する（締切前だけ。空なら消す）。戻り値 saved / deleted / closed / not_found。"""
+    status = _rpc("manshu_save_memo", {"p_race_key": race_key, "p_memo": str(text or "").strip()[:MEMO_MAX]})
+    load_memos.clear()
+    return status
+
+
+def memo_predict_text(m):
+    """メモ入りの Claude 予想の状態（管理者向けの短い文）。"""
+    if not m:
+        return ""
+    if not m.get("predicted_at"):
+        return "メモ入りの予想: まだ（展示後の自動記録のときに作ります）"
+    if str(m.get("predicted_memo_saved_at")) != str(m.get("saved_at")):
+        return "メモ入りの予想: 最新のメモで作り直し中（数分かかります）"
+    if m.get("predict_error"):
+        return f"メモ入りの予想: 作れませんでした（{m['predict_error']}）"
+    return f"メモ入りの予想: {jst_hhmm(m['predicted_at'])} に作成（比較用の記録だけ）"
+
+
+def _memo_block(d, r, passed):
+    rk = r["race_key"]
+    try:
+        m = load_memos(d.isoformat()).get(rk)
+    except Exception as e:  # noqa: BLE001
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        st.caption("📝 自分のメモ: " + (f"`{MEMO_MIGRATION}` の実行が必要です" if status == 404
+                                       else f"読めませんでした（{type(e).__name__}）"))
+        return
+    if passed:
+        if m:
+            st.caption(f"📝 自分のメモ（{jst_hhmm(m.get('saved_at'))} 保存・締切後は編集できません）")
+            st.text(m["memo"])
+        return
+    text = st.text_area("📝 自分のメモ（比較用。外には出しません）", value=(m or {}).get("memo", ""),
+                        max_chars=MEMO_MAX, height=90, placeholder=MEMO_PLACEHOLDER, key=f"manshu_memo_{rk}")
+    if st.button("💾 メモを保存", key=f"manshu_memo_save_{rk}", use_container_width=True):
+        try:
+            status = save_memo(rk, text)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"保存できませんでした（{type(e).__name__}）")
+        else:
+            (st.success if status in ("saved", "deleted") else st.warning)(MEMO_STATUS.get(status, str(status)))
+            try:
+                m = load_memos(d.isoformat()).get(rk)
+            except Exception:  # noqa: BLE001
+                m = None
+    if m:
+        st.caption(f"{jst_hhmm(m.get('saved_at'))} 保存　{memo_predict_text(m)}")
+    st.caption("「どの艇が・何が良い/悪い」の形でそろえると読み取りやすくなります。空で保存するとメモを消します。")
 
 
 def manshu_result_line(r, state):

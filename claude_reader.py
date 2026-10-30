@@ -371,6 +371,15 @@ LONGSHOT_SYSTEM_PROMPT = """あなたはボートレースの予想を検討す�
 - モデルの確率は参考にしてよいが、そのまま写さず、データから見て妥当かどうかを自分で判断する。
 - 組み合わせは 3-1-5 の形で、出走している艇番だけを使い、同じ艇を2回使わない。同じ組み合わせを重ねない。"""
 
+# メモ入り（manshu_source.py の claude_memo）: 入力に「オーナーが自分で見た気配」を足し、そのことだけを書き足す
+LONGSHOT_MEMO_PROMPT_VERSION = "claude-longshot-memo-v1"
+MEMO_LABEL = "オーナーが自分で見た気配"
+
+LONGSHOT_MEMO_SYSTEM_PROMPT = LONGSHOT_SYSTEM_PROMPT + f"""
+- 入力の「{MEMO_LABEL}」は、このレースの選手・艇の様子をオーナーが自分で見て書いた短いメモ
+  （例: 4号艇 伸び良し、1号艇 出足不安）。データと合わせて判断材料に使ってよく、理由とまとめにも使ってよい。
+  ただしメモだけで決めつけず、データと食い違うときはどちらがもっともらしいかを自分で判断する。"""
+
 LONGSHOT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -401,26 +410,32 @@ def clean_longshots(rows, lanes):
             for t in _clean_tickets(rows, lanes) if not t["combo"].startswith("1-")]
 
 
-def read_longshots(api_key, race_key, race, final, model=None, race_label=""):
+def read_longshots(api_key, race_key, race, final, model=None, race_label="", memo=None):
     """
     万舟チャンスの予想3種比較専用。read_race と同じ入力（build_brief）で、1号艇以外が1着で中穴〜万舟
     （オッズ30倍以上）になりそうな組と確率を挙げてもらう（例外は出さない）。
+    memo があれば入力に「オーナーが自分で見た気配」として足す（claude_memo。プロンプトは LONGSHOT_MEMO_*）。
       {"status": "ok"|"error", "model", "served_model", "tickets": [{combo, prob, reason}], "summary",
        "usage", "cost", "seconds", "input_hash", "prompt_version", "called_api", "error"}
     """
     model = (model or DEFAULT_READ_MODEL).strip()
     brief = build_brief(race, final, race_label)
-    text = json.dumps({"brief": brief, "model": model, "prompt": LONGSHOT_PROMPT_VERSION},
+    memo = str(memo or "").strip()
+    system, version = LONGSHOT_SYSTEM_PROMPT, LONGSHOT_PROMPT_VERSION
+    if memo:
+        brief[MEMO_LABEL] = memo
+        system, version = LONGSHOT_MEMO_SYSTEM_PROMPT, LONGSHOT_MEMO_PROMPT_VERSION
+    text = json.dumps({"brief": brief, "model": model, "prompt": version},
                       ensure_ascii=False, sort_keys=True)
     h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     key = ("longshot", str(race_key), model, h)
     if key in _CACHE:
         return _CACHE[key]
-    out = {"status": "error", "model": model, "input_hash": h, "prompt_version": LONGSHOT_PROMPT_VERSION}
+    out = {"status": "error", "model": model, "input_hash": h, "prompt_version": version}
     if not api_key:
         out["error"] = "ANTHROPIC_API_KEY が未設定です"
         return out
-    data = _ask(api_key, model, LONGSHOT_SYSTEM_PROMPT, LONGSHOT_SCHEMA, brief, out)
+    data = _ask(api_key, model, system, LONGSHOT_SCHEMA, brief, out)
     if data is None:
         return out
     tickets = clean_longshots(data.get("tickets") or [], [int(v["艇番"]) for v in brief["boats"]])

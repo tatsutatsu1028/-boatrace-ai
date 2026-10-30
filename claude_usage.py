@@ -171,6 +171,6 @@ def render_compare_limit():
             st.success("保存しました。")
         except Exception as e:  # noqa: BLE001
             st.error(f"保存できませんでした（{type(e).__name__}）")
-    st.caption(f"展示後の自動予想が万舟チャンスのレースで Claude の予想を取るときの、今日（日本時間）の合計の上限です"
+    st.caption(f"展示後の自動予想が万舟チャンスのレースで Claude の予想（メモ入りも含む）を取るときの、今日（日本時間）の合計の上限です"
                f"（約{usd * USD_JPY:,.0f}円）。超えたら Claude の予想はスキップし、理由を記録します。"
                "呼ぶ前に確かめるので、1回分だけ超えることがあります。")
