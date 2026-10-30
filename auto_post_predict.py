@@ -6,6 +6,7 @@
   python auto_post_predict.py plan   [--date YYYYMMDD] [--delay 分]   どのレースが何時に動くか（保存はしない）
   python auto_post_predict.py report [--date YYYYMMDD]              その日の対象・予想できた数・見送った数（理由つき）
   python auto_post_predict.py memo   --race-key YYYYMMDD_JJ_R        メモ入りの Claude 予想を作り直す（メモの保存で起動）
+  python auto_post_predict.py notify-test                            メモ入り予想の通知先（Discord）にテスト通知を送る
 
   - 締切は朝に保存している当日の締切時刻（daily_schedule.deadlines）。無ければ一覧に保存した締切
   - 中止の会場は見送り（理由「中止」）。途中から中止になった会場は、締切から45分たっても一覧に結果が無い
@@ -680,7 +681,7 @@ def report(date8=None, now=None, write=True):
 
 def main():
     ap = argparse.ArgumentParser(description="展示後の自動予想（展示前厳選10・万舟チャンス）")
-    ap.add_argument("task", choices=["run", "plan", "report", "memo"])
+    ap.add_argument("task", choices=["run", "plan", "report", "memo", "notify-test"])
     ap.add_argument("--date", default=None, help="YYYYMMDD（既定は今日 JST）")
     ap.add_argument("--delay", type=int, default=DEFAULT_DELAY, help="plan: 起動から確認までの見込み（分）")
     ap.add_argument("--race-key", default=None, help="memo: 作り直すレース（YYYYMMDD_JJ_R）")
@@ -693,6 +694,10 @@ def main():
         run_memo(args.race_key)
     elif args.task == "report":
         report(args.date)
+    elif args.task == "notify-test":
+        import memo_notify
+
+        raise SystemExit(0 if memo_notify.send_test() else 1)
     else:
         date8 = args.date or _today()
         targets = load_targets(date8)

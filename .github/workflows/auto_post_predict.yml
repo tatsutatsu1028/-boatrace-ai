@@ -7,6 +7,7 @@ name: Auto Post-exhibition Predict
 #   task=plan   : どのレースが何時に動くか（保存しない。手動で確かめる用）
 #   task=memo   : 万舟チャンスのメモが保存されたとき、そのレース（race_key）のメモ入りの Claude 予想を作り直す
 #                 （supabase/migrations/20261030000000_manshu_memos.sql の manshu_save_memo が起動する）
+#   task=notify-test : メモ入り予想の通知先（DISCORD_MEMO_WEBHOOK_URL）にテスト通知を送る（手動）
 # 起動は Supabase の pg_cron から workflow_dispatch で行う
 # （supabase/migrations/20261025000000_auto_post_predict.sql）。schedule は置かない（二重起動を避ける）。
 # 重複して起動しても、保存済みのレースは auto_post_log と保存済みの予想を見てスキップする。
@@ -15,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "run（予想）/ report（夜の集計）/ plan（何時に動くか）/ memo（メモ入りの予想を作り直す）"
+        description: "run（予想）/ report（夜の集計）/ plan（何時に動くか）/ memo（メモ入りの予想を作り直す）/ notify-test（メモ通知のテスト）"
         required: true
         default: "run"
       date:

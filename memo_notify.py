@@ -103,3 +103,25 @@ def notify(t, memo, rows, model_tickets, odds_at=None, update=False, now=None, s
     except Exception as e:  # noqa: BLE001  通知に失敗しても記録は残す
         return f"・通知: 失敗（{type(e).__name__}）"
     return "・通知: 更新を送信" if update else "・通知: 送信"
+
+
+def send_test():
+    """通知先の確かめ（auto_post_predict.py notify-test）。見本の文を「テスト」と分かる形で送る。戻り値は送れたか。"""
+    import manshu_source as ms
+
+    url = webhook_url()
+    if not url:
+        print(f"[MEMO_NOTIFY] {ENV} が未設定です", flush=True)
+        return False
+    t = {"jcd": "", "venue": "テスト会場", "race_no": "○", "deadline": "--:--"}
+    tk = [{"combo": "2-1-3", "odds": 45.0, "tier": "中穴"}, {"combo": "4-1-2", "odds": 150.0, "tier": "万舟"}]
+    rows = {ms.MEMO_SOURCE: {"aim_tickets": tk}, ms.MEMO_BLEND: {"aim_tickets": tk}}
+    text = ("🔔 テスト通知です（実際のレースではありません）。この形でメモ入り予想が届きます。\n\n"
+            + build_message(t, "4号艇：（見本）出足・回り足良い", rows, tk))
+    try:
+        send(text[:LIMIT], url)
+    except Exception as e:  # noqa: BLE001
+        print(f"[MEMO_NOTIFY] テスト通知に失敗しました（{type(e).__name__}）", flush=True)
+        return False
+    print("[MEMO_NOTIFY] テスト通知を送りました", flush=True)
+    return True
