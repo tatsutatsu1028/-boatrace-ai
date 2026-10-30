@@ -380,6 +380,8 @@ def test_read_longshots_with_memo(monkeypatch):
     assert seen["system"] == cr.LONGSHOT_MEMO_SYSTEM_PROMPT and seen["system"].startswith(cr.LONGSHOT_SYSTEM_PROMPT)
     brief = json.loads(seen["messages"][0]["content"])
     assert brief.pop(cr.MEMO_LABEL) == "4号艇 伸び良し"
+    assert brief.pop(cr.MEMO_RULE_LABEL) == cr.MEMO_RULE  # コメントの無い艇は動かさないことを明記して渡す
+    assert cr.MEMO_RULE in seen["system"]
     assert brief == cr.build_brief(race, final, "L")  # ほかの入力は Claude のみと同じ
     r2 = cr.read_longshots("k", "rk-memo", race, final, model="claude-opus-5-5", race_label="L")
     assert r2["input_hash"] != r["input_hash"] and r2["prompt_version"] == cr.LONGSHOT_PROMPT_VERSION
@@ -465,3 +467,20 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_memo_lane_format():
+    import manshu_view as mv
+
+    text = mv.memo_join({4: " 出足・回り足良い ", 1: "", 2: "スタート\n遅め"})
+    assert text == "2号艇：スタート 遅め\n4号艇：出足・回り足良い"  # 書いた艇だけ・艇番順・1行ずつ
+    assert mv.memo_join({}) == "" and mv.memo_join({k: " " for k in range(1, 7)}) == ""
+    assert mv.memo_split(text) == ({2: "スタート 遅め", 4: "出足・回り足良い"}, "")
+    assert mv.memo_split("４号艇:伸び良し") == ({4: "伸び良し"}, "")  # 全角・半角のコロンも読む
+    # 今までの自由記述は艇の欄に入れず、要約にだけ出す
+    assert mv.memo_split("4号艇 伸び良し、1号艇 出足不安") == ({}, "4号艇 伸び良し、1号艇 出足不安")
+    assert mv.memo_summary("4号艇 伸び良し") == "📝 メモ　4号艇 伸び良し"
+    assert mv.memo_summary(text) == "📝 メモ（2艇入力済み）　2号艇 スタート 遅め / 4号艇 出足・回り足良い"
+    assert mv.memo_summary("") == "📝 メモ"
+    assert len(mv.memo_summary("1号艇：" + "あ" * 100)) < 80
+    assert len(mv.memo_join({k: "あ" * 500 for k in range(1, 7)})) <= mv.MEMO_MAX

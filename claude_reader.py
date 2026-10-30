@@ -372,13 +372,17 @@ LONGSHOT_SYSTEM_PROMPT = """あなたはボートレースの予想を検討す�
 - 組み合わせは 3-1-5 の形で、出走している艇番だけを使い、同じ艇を2回使わない。同じ組み合わせを重ねない。"""
 
 # メモ入り（manshu_source.py の claude_memo）: 入力に「オーナーが自分で見た気配」を足し、そのことだけを書き足す
-LONGSHOT_MEMO_PROMPT_VERSION = "claude-longshot-memo-v1"
+LONGSHOT_MEMO_PROMPT_VERSION = "claude-longshot-memo-v2"
 MEMO_LABEL = "オーナーが自分で見た気配"
+MEMO_RULE_LABEL = "メモの扱い"
+MEMO_RULE = "コメントが書かれていない艇は、メモが無い場合と同じ評価のままにすること。書かれた艇の評価だけを動かすこと。"
 
 LONGSHOT_MEMO_SYSTEM_PROMPT = LONGSHOT_SYSTEM_PROMPT + f"""
 - 入力の「{MEMO_LABEL}」は、このレースの選手・艇の様子をオーナーが自分で見て書いた短いメモ
-  （例: 4号艇 伸び良し、1号艇 出足不安）。データと合わせて判断材料に使ってよく、理由とまとめにも使ってよい。
-  ただしメモだけで決めつけず、データと食い違うときはどちらがもっともらしいかを自分で判断する。"""
+  （艇ごとに1行。例: 4号艇：伸び良し）。データと合わせて判断材料に使ってよく、理由とまとめにも使ってよい。
+  ただしメモだけで決めつけず、データと食い違うときはどちらがもっともらしいかを自分で判断する。
+- {MEMO_RULE}
+  メモに書かれていない艇を、メモがあるからという理由で上げたり下げたり外したりしない。"""
 
 LONGSHOT_SCHEMA = {
     "type": "object",
@@ -424,6 +428,7 @@ def read_longshots(api_key, race_key, race, final, model=None, race_label="", me
     system, version = LONGSHOT_SYSTEM_PROMPT, LONGSHOT_PROMPT_VERSION
     if memo:
         brief[MEMO_LABEL] = memo
+        brief[MEMO_RULE_LABEL] = MEMO_RULE
         system, version = LONGSHOT_MEMO_SYSTEM_PROMPT, LONGSHOT_MEMO_PROMPT_VERSION
     text = json.dumps({"brief": brief, "model": model, "prompt": version},
                       ensure_ascii=False, sort_keys=True)

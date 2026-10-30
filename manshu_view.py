@@ -496,7 +496,8 @@ def _spec():
 # ---------------------------------------------------------------
 MEMO_MIGRATION = "supabase/migrations/20261030000000_manshu_memos.sql"
 MEMO_MAX = 1000
-MEMO_PLACEHOLDER = "例: 4号艇 伸び良し、1号艇 出足不安"
+MEMO_LANE_MAX = 100    # 1艇の欄（6艇 ×「n号艇：」込みで MEMO_MAX に収まる長さ）
+MEMO_SUMMARY_MAX = 40  # 折りたたみの見出しに出す要約の長さ
 MEMO_STATUS = {"saved": "保存しました", "deleted": "メモを消しました",
                "closed": "締切を過ぎたため保存できませんでした", "not_found": "万舟チャンスのレースではありません"}
 
@@ -525,6 +526,41 @@ def save_memo(race_key, text):
     status = _rpc("manshu_save_memo", {"p_race_key": race_key, "p_memo": str(text or "").strip()[:MEMO_MAX]})
     load_memos.clear()
     return status
+
+
+def memo_join(lanes):
+    """艇ごとのメモ {艇番: 文} → 保存する形（入力のある艇だけ「4号艇：出足良い」を1行ずつ。全部空なら ""）。"""
+    out = []
+    for lane in range(1, 7):
+        text = " ".join(str((lanes or {}).get(lane) or "").split())[:MEMO_LANE_MAX]
+        if text:
+            out.append(f"{lane}号艇：{text}")
+    return "\n".join(out)
+
+
+def memo_split(memo):
+    """保存されたメモ → ({艇番: 文}, この形に合わない行の文)。今までの自由記述のメモは2つ目に入る（艇の欄には入れない）。"""
+    import re
+    import unicodedata
+
+    lanes, rest = {}, []
+    for line in str(memo or "").splitlines():
+        m = re.fullmatch(r"\s*([1-6])号艇\s*[:：]\s*(.*?)\s*", unicodedata.normalize("NFKC", line))
+        if m and m.group(2) and int(m.group(1)) not in lanes:
+            lanes[int(m.group(1))] = m.group(2)
+        elif line.strip():
+            rest.append(line.strip())
+    return lanes, " ".join(rest)
+
+
+def memo_summary(memo):
+    """折りたたみの見出しの1行（例: 📝 メモ（1艇入力済み）　4号艇 出足・回り足良い）。"""
+    lanes, rest = memo_split(memo)
+    head = f"📝 メモ（{len(lanes)}艇入力済み）" if lanes else "📝 メモ"
+    text = " / ".join([f"{k}号艇 {v}" for k, v in sorted(lanes.items())] + ([rest] if rest else []))
+    if len(text) > MEMO_SUMMARY_MAX:
+        text = text[:MEMO_SUMMARY_MAX - 1] + "…"
+    return head + (f"　{text}" if text else "")
 
 
 def memo_predict_text(m):
@@ -556,22 +592,33 @@ def _memo_block(d, r, passed):
             st.caption(f"📝 自分のメモ（{jst_hhmm(m.get('saved_at'))} 保存・締切後は編集できません）")
             st.text(m["memo"])
         return
-    text = st.text_area("📝 自分のメモ（比較用。外には出しません）", value=(m or {}).get("memo", ""),
-                        max_chars=MEMO_MAX, height=90, placeholder=MEMO_PLACEHOLDER, key=f"manshu_memo_{rk}")
-    if st.button("💾 メモを保存", key=f"manshu_memo_save_{rk}", use_container_width=True):
+    memo = (m or {}).get("memo", "")
+    lanes, rest = memo_split(memo)
+    with st.expander(memo_summary(memo), key=f"manshu_memo_exp_{rk}"):
+        if rest:
+            st.caption(f"今までのメモ（艇ごとの形ではないもの）: {rest}　保存するとこの欄の内容に置き換わります。")
+        # フォームにまとめて、入力中は再実行しない（保存ボタンを押したときだけ）
+        with st.form(f"manshu_memo_form_{rk}", border=False):
+            values = {lane: st.text_input(f"{lane}号艇", value=lanes.get(lane, ""), max_chars=MEMO_LANE_MAX,
+                                          placeholder=f"{lane}号艇", label_visibility="collapsed", icon=f"{lane}\ufe0f\u20e3",
+                                          key=f"manshu_memo_{rk}_{lane}")
+                      for lane in range(1, 7)}
+            submitted = st.form_submit_button("💾 メモを保存", use_container_width=True)
+        st.caption("書いた艇だけ保存します（書かない艇はメモが無いときと同じ扱い）。全部空で保存するとメモを消します。")
+    if submitted:
         try:
-            status = save_memo(rk, text)
+            status = save_memo(rk, memo_join(values))
         except Exception as e:  # noqa: BLE001
             st.error(f"保存できませんでした（{type(e).__name__}）")
         else:
-            (st.success if status in ("saved", "deleted") else st.warning)(MEMO_STATUS.get(status, str(status)))
-            try:
-                m = load_memos(d.isoformat()).get(rk)
-            except Exception:  # noqa: BLE001
-                m = None
+            # 見出しの入力数・要約も新しいメモにするため、この欄だけもう一度描く（結果の文はその後に出す）
+            st.session_state[f"manshu_memo_msg_{rk}"] = status
+            st.rerun(scope="fragment")
+    status = st.session_state.pop(f"manshu_memo_msg_{rk}", None)
+    if status:
+        (st.success if status in ("saved", "deleted") else st.warning)(MEMO_STATUS.get(status, str(status)))
     if m:
         st.caption(f"{jst_hhmm(m.get('saved_at'))} 保存　{memo_predict_text(m)}")
-    st.caption("「どの艇が・何が良い/悪い」の形でそろえると読み取りやすくなります。空で保存するとメモを消します。")
 
 
 def manshu_result_line(r, state):
