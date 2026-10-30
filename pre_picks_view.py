@@ -163,6 +163,7 @@ class ListSpec:
     other_marks_note: str = ""      # もう一方の一覧にも入っているレースに出す文
     flag_note: str = "（厳選からは外していません）"
     favorite_line: Callable = None  # 行 → 本命の行（無ければ favorite_line）
+    memo_block: Callable = None     # (d, 行, passed) → 自分のメモの欄を描く（万舟チャンスだけ）
 
 
 def favorite_line(r):
@@ -194,6 +195,8 @@ def render_card(d, r, spec, other_marks=None, cancelled=()):
             st.warning("⚠️ 展示後に評価が変わりました: " + " / ".join(r.get("post_flag_reasons") or [])
                        + spec.flag_note)
         spec.tickets_block(d, r, passed)
+        if spec.memo_block:
+            spec.memo_block(d, r, passed)
         line = list_result_line(r, result_state(d, r, cancelled), spec)
         if line:
             st.markdown(line)

@@ -5,6 +5,7 @@
   python auto_post_predict.py run                      5分おき（pg_cron → auto_post_predict.yml）
   python auto_post_predict.py plan   [--date YYYYMMDD] [--delay 分]   どのレースが何時に動くか（保存はしない）
   python auto_post_predict.py report [--date YYYYMMDD]              その日の対象・予想できた数・見送った数（理由つき）
+  python auto_post_predict.py memo   --race-key YYYYMMDD_JJ_R        メモ入りの Claude 予想を作り直す（メモの保存で起動）
 
   - 締切は朝に保存している当日の締切時刻（daily_schedule.deadlines）。無ければ一覧に保存した締切
   - 中止の会場は見送り（理由「中止」）。途中から中止になった会場は、締切から45分たっても一覧に結果が無い
@@ -19,6 +20,9 @@
   - 保存する予想に Claude の予想は使わない（手動のまま）。ただし万舟チャンスのレースだけ、買い目を作り直すのと
     同じタイミングで「モデルのみ／Claudeのみ／両方の予想平均」の3種の比較を記録する（manshu_source.py。
     展示後の予想が保存済みでスキップしたレースも記録する。Claude の費用は1日の上限あり）
+  - 比較の4つ目「メモ入りの Claude（claude_memo）」は、記録のときにオーナーのメモ（manshu_memos）があれば作り、
+    無ければ「記録なし」。記録の後・締切前にメモが保存・変更されたら作り直す（メモの保存が task=memo を起動。
+    取りこぼしは task=run が毎回確かめる）。メモは比較にだけ使い、保存する予想・買い目・ログには入れない
 
 ログは誰でも見られるので、会場名・確率・買い目は出さない（件数・締切時刻・理由・合否だけ）。
 レースごとの記録は Supabase の auto_post_log にある。
@@ -381,6 +385,70 @@ def compare_sources(ctx, t, final=None, work=None, odds=None):
         return f"エラー（{type(e).__name__}）"
 
 
+def pending_memos(targets, now, race_key=None):
+    """メモ入りの Claude 予想を作り直すレース [(t, メモ)]: 万舟チャンスで締切前、自動記録（model の行）が済み、
+    今のメモと記録（claude_memo の memo_saved_at）が食い違うレース。記録の前のレースは記録のときにメモを使う。"""
+    import manshu_source as ms
+
+    keys = {}
+    for t in targets:
+        left = minutes_left(t["race_date"], t.get("deadline"), now)
+        if ("manshu" in t["sources"] and not t.get("cancelled") and left is not None and left > 0
+                and race_key in (None, t["race_key"])):
+            keys[t["race_key"]] = t
+    if not keys:
+        return []
+    inn = f"in.({','.join(keys)})"
+    rows = _sb("GET", f"{ms.TABLE}?race_key={inn}&source=in.(model,{ms.MEMO_SOURCE})"
+                      "&select=race_key,source,memo_saved_at,result_at").json() or []
+    memos = {m["race_key"]: m for m in _sb("GET", f"{ms.MEMO_TABLE}?race_key={inn}&select=race_key,memo,saved_at").json()
+             or [] if str(m.get("memo") or "").strip()}
+    out = []
+    for k, t in keys.items():
+        mine = {r["source"]: r for r in rows if r["race_key"] == k}
+        if "model" in mine and ms.needs_memo_update(memos.get(k), mine.get(ms.MEMO_SOURCE)):
+            out.append((t, memos.get(k)))
+    return out
+
+
+def rebuild_memo(ctx, t, memo):
+    """メモ入りの Claude 予想（claude_memo）を、その時点の展示・オッズで予想し直して作り直す。戻り値は記録用の短い文。"""
+    import manshu_source
+    from official_fetcher import fetch_odds3t, fetch_official_race
+
+    try:
+        date8 = t["race_key"][:8]
+        race = fetch_official_race(date8, t["jcd"], t["race_no"])
+        n = exhibition_count(race)
+        if race is None or len(race) != 6 or n != 6:
+            return f"展示タイムがそろっていないため作り直しませんでした（{n}/6）"
+        try:
+            odds = fetch_odds3t(date8, t["jcd"], t["race_no"])
+        except Exception:  # noqa: BLE001
+            odds = None
+        res, _, _ = predict_race(ctx, t, race, odds)
+        return manshu_source.sync_memo(
+            _sb, t, res["work"], res["final"], odds, api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+            read_model=os.environ.get("CLAUDE_READ_MODEL", "").strip() or None, memo=memo)
+    except Exception as e:  # noqa: BLE001
+        return f"エラー（{type(e).__name__}）"
+
+
+def sync_memos(ctx, targets, race_key=None):
+    """メモが自動記録の後に保存・変更されたレースの claude_memo を作り直す。戻り値は使った Context（無ければ None）。"""
+    try:
+        todo = pending_memos(targets, datetime.now(JST), race_key)
+    except Exception as e:  # noqa: BLE001  メモの表がまだ無いデータベースなど。自動予想は止めない
+        log(f"メモの確認に失敗（{type(e).__name__}）")
+        return ctx
+    for t, memo in todo:
+        ctx = ctx or Context()
+        log(f"締切 {t.get('deadline')}: メモ入りの予想 {rebuild_memo(ctx, t, memo)}")
+    if race_key and not todo:
+        log("メモ入りの予想: 作り直すものはありません（締切後・自動記録の前・作り直し済み）")
+    return ctx
+
+
 def handle_window(ctx, t, prev):
     """締切20〜5分前の1レース。戻り値は書いた状態。"""
     from official_fetcher import fetch_odds3t, fetch_official_race
@@ -533,7 +601,14 @@ def run(date8=None, now=None):
         log(f"{date8}: 締切20〜5分前のレースはありません（対象 {len(targets)}レース）")
     else:
         log(f"{date8}: " + "・".join(f"{k} {v}" for k, v in counts.items()))
+    sync_memos(ctx, targets)
     return counts
+
+
+def run_memo(race_key):
+    """メモの保存で起動: そのレースのメモ入りの Claude 予想を作り直す（必要なときだけ）。"""
+    targets = load_targets(race_key[:8])
+    sync_memos(None, targets, race_key)
 
 
 # ---------------------------------------------------------------
@@ -604,12 +679,17 @@ def report(date8=None, now=None, write=True):
 
 def main():
     ap = argparse.ArgumentParser(description="展示後の自動予想（展示前厳選10・万舟チャンス）")
-    ap.add_argument("task", choices=["run", "plan", "report"])
+    ap.add_argument("task", choices=["run", "plan", "report", "memo"])
     ap.add_argument("--date", default=None, help="YYYYMMDD（既定は今日 JST）")
     ap.add_argument("--delay", type=int, default=DEFAULT_DELAY, help="plan: 起動から確認までの見込み（分）")
+    ap.add_argument("--race-key", default=None, help="memo: 作り直すレース（YYYYMMDD_JJ_R）")
     args = ap.parse_args()
     if args.task == "run":
         run(args.date)
+    elif args.task == "memo":
+        if not args.race_key:
+            ap.error("memo には --race-key が必要です")
+        run_memo(args.race_key)
     elif args.task == "report":
         report(args.date)
     else:

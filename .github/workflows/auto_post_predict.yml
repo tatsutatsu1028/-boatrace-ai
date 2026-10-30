@@ -5,6 +5,8 @@ name: Auto Post-exhibition Predict
 #   task=run    : 5分おき（JST 8:00〜22:55）
 #   task=report : 夜（JST 23:10）にその日の対象・予想できた数・見送った数（理由つき）
 #   task=plan   : どのレースが何時に動くか（保存しない。手動で確かめる用）
+#   task=memo   : 万舟チャンスのメモが保存されたとき、そのレース（race_key）のメモ入りの Claude 予想を作り直す
+#                 （supabase/migrations/20261030000000_manshu_memos.sql の manshu_save_memo が起動する）
 # 起動は Supabase の pg_cron から workflow_dispatch で行う
 # （supabase/migrations/20261025000000_auto_post_predict.sql）。schedule は置かない（二重起動を避ける）。
 # 重複して起動しても、保存済みのレースは auto_post_log と保存済みの予想を見てスキップする。
@@ -13,11 +15,15 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "run（予想）/ report（夜の集計）/ plan（何時に動くか）"
+        description: "run（予想）/ report（夜の集計）/ plan（何時に動くか）/ memo（メモ入りの予想を作り直す）"
         required: true
         default: "run"
       date:
         description: "対象の日 (YYYYMMDD)。空なら今日（JST）"
+        required: false
+        default: ""
+      race_key:
+        description: "task=memo のレース（YYYYMMDD_JJ_R）"
         required: false
         default: ""
 
@@ -58,7 +64,9 @@ jobs:
           # CLAUDE_READ_MODEL が無ければアプリと同じ既定のモデル。1日の上限は app_settings
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_READ_MODEL: ${{ secrets.CLAUDE_READ_MODEL }}
+          RACE_KEY: ${{ inputs.race_key }}
         run: |
           ARGS="${{ inputs.task || 'run' }}"
           if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi
+          if [[ "$RACE_KEY" =~ ^[0-9]{8}_[0-9]{2}_[0-9]{1,2}$ ]]; then ARGS="$ARGS --race-key $RACE_KEY"; fi
           python auto_post_predict.py $ARGS
