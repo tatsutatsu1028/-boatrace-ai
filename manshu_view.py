@@ -391,7 +391,9 @@ def _manshu_prob_line(r):
     return line + f"（全レースの平均 約{manshu.BASE_RATE:.0%}）"
 
 
+@st.fragment
 def _manshu_tickets_block(d, r, passed):
+    """一覧のカードの買い目の欄。「オッズを更新」はこの欄の中だけ再実行する（予想タブに戻らない）。"""
     rk = r["race_key"]
     saved = r.get("aim_tickets") or []
     if passed:
@@ -538,7 +540,9 @@ def memo_predict_text(m):
     return f"メモ入りの予想: {jst_hhmm(m['predicted_at'])} に作成（比較用の記録だけ）"
 
 
+@st.fragment
 def _memo_block(d, r, passed):
+    """一覧のカードの自分のメモの欄。入力・保存はこの欄の中だけ再実行する（予想タブに戻らない）。"""
     rk = r["race_key"]
     try:
         m = load_memos(d.isoformat()).get(rk)
