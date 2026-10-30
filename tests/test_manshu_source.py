@@ -227,7 +227,7 @@ def test_record_writes_three_rows_once_and_logs_usage(monkeypatch):
     assert set(sb.rows) == {(T["race_key"], s) for s in ms.SOURCES}
     rows = {s: sb.rows[(T["race_key"], s)] for s in ms.SOURCES}
     assert all(rows[s]["error"] is None for s in ("model", "claude", "blend"))
-    assert rows[ms.MEMO_SOURCE]["error"] == ms.NO_MEMO
+    assert rows[ms.MEMO_SOURCE]["error"] == ms.NO_MEMO and rows[ms.MEMO_BLEND]["error"] == ms.NO_MEMO
     assert rows["model"]["aim_count"] == 10 and rows["blend"]["aim_count"] == 10 and rows["claude"]["aim_count"] == 2
     assert rows["claude"]["claude_listed_count"] == 2 and rows["blend"]["claude_listed_count"] == 2
     assert rows["model"]["claude_listed_count"] is None
@@ -267,7 +267,7 @@ def test_result_fields_and_apply(monkeypatch):
     sb = _SB()
     ms.record(sb, T, None, "final", _odds_df(), api_key="k")
     hit_combo = sb.rows[(T["race_key"], "model")]["aim_tickets"][0]["combo"]
-    assert ms.apply_result(sb, T["race_key"], [(hit_combo, 5230.0)]) == 4
+    assert ms.apply_result(sb, T["race_key"], [(hit_combo, 5230.0)]) == 5
     r = sb.rows[(T["race_key"], "model")]
     assert r["result_status"] == "settled" and r["hit"] is True and r["stake"] == 1000 and r["return"] == 5230
     assert r["trifecta_actual"] == hit_combo and r["trifecta_payout"] == 5230
@@ -304,9 +304,10 @@ def test_no_memo_is_recorded_as_none_not_filled_by_model(monkeypatch):
     calls = _install(monkeypatch)
     sb = _SB()
     ms.record(sb, T, None, "final", _odds_df(), api_key="k")
-    r = sb.rows[(T["race_key"], ms.MEMO_SOURCE)]
-    assert r["error"] == ms.NO_MEMO and r["tri_probs"] is None and r["aim_tickets"] == [] and r["stake"] is None
-    assert r["memo_saved_at"] is None
+    for s_ in ms.MEMO_SOURCES:
+        r = sb.rows[(T["race_key"], s_)]
+        assert r["error"] == ms.NO_MEMO and r["tri_probs"] is None and r["aim_tickets"] == [] and r["stake"] is None
+        assert r["memo_saved_at"] is None
     assert len(calls) == 1 and calls[0]["memo"] is None  # メモが無ければ Claude は1回だけ
     assert "memo_saved_at" not in sb.rows[(T["race_key"], "model")]  # ほかの行は列を送らない
 
@@ -315,11 +316,16 @@ def test_record_with_memo_calls_claude_with_memo(monkeypatch):
     calls = _install(monkeypatch)
     sb = _SB(memo=MEMO)
     st = ms.record(sb, T, None, "final", _odds_df(), api_key="k")
-    assert st.endswith("メモ入り: 記録（Claude が挙げた組 2点・買い目 2点）")
+    assert st.endswith("メモ入り: 記録（Claude が挙げた組 2点・買い目 2点／平均 10点）")
     assert [c["memo"] for c in calls] == [None, MEMO["memo"]]
     r = sb.rows[(T["race_key"], ms.MEMO_SOURCE)]
     assert r["memo_saved_at"] == MEMO["saved_at"] and r["error"] is None and r["aim_count"] == 2
     assert r["tri_probs"] == {"4-5-6": 0.03, "3-2-1": 0.02} and r["claude_listed_count"] == 2
+    # blend_memo は blend と同じ作り方（このテストでは Claude の答えが同じなので blend と同じ確率・買い目）
+    b, blend = sb.rows[(T["race_key"], ms.MEMO_BLEND)], sb.rows[(T["race_key"], "blend")]
+    assert b["memo_saved_at"] == MEMO["saved_at"] and b["error"] is None and b["claude_listed_count"] == 2
+    assert b["tri_probs"] == blend["tri_probs"] and len(b["tri_probs"]) == 120
+    assert b["aim_tickets"] == blend["aim_tickets"] and b["aim_count"] == 10
     assert [u["purpose"] for u in sb.usage] == ["manshu_compare", "manshu_compare_memo"]
 
 
@@ -327,8 +333,9 @@ def test_memo_claude_error_kept_with_memo_time(monkeypatch):
     calls = _install(monkeypatch)
     sb = _SB(spent=3.5, memo=MEMO)
     ms.record(sb, T, None, "final", _odds_df(), api_key="k")
-    r = sb.rows[(T["race_key"], ms.MEMO_SOURCE)]
-    assert "上限" in r["error"] and r["memo_saved_at"] == MEMO["saved_at"] and r["aim_tickets"] == []
+    for s_ in ms.MEMO_SOURCES:
+        r = sb.rows[(T["race_key"], s_)]
+        assert "上限" in r["error"] and r["memo_saved_at"] == MEMO["saved_at"] and r["aim_tickets"] == []
     assert not calls
 
 
@@ -351,10 +358,14 @@ def test_sync_memo_replaces_row(monkeypatch):
     r = sb.rows[(T["race_key"], ms.MEMO_SOURCE)]
     assert r["memo_saved_at"] == MEMO["saved_at"] and r["aim_count"] == 2 and r["error"] is None
     assert r["saved_at"] and calls[-1]["memo"] == MEMO["memo"]
+    b = sb.rows[(T["race_key"], ms.MEMO_BLEND)]
+    assert b["memo_saved_at"] == MEMO["saved_at"] and b["aim_count"] == 10 and b["saved_at"] == r["saved_at"]
     # メモを消したら「記録なし」に戻す（古い確率・買い目を残さない）
     assert ms.sync_memo(sb, T, None, "final", _odds_df(), api_key="k", memo=None) == "作り直し: 記録なし"
-    r = sb.rows[(T["race_key"], ms.MEMO_SOURCE)]
-    assert r["memo_saved_at"] is None and r["tri_probs"] is None and r["aim_tickets"] == [] and r["claude_model"] is None
+    for s_ in ms.MEMO_SOURCES:
+        r = sb.rows[(T["race_key"], s_)]
+        assert r["memo_saved_at"] is None and r["tri_probs"] is None and r["aim_tickets"] == []
+        assert r["claude_model"] is None
 
 
 def test_read_longshots_with_memo(monkeypatch):

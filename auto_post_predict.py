@@ -20,8 +20,8 @@
   - 保存する予想に Claude の予想は使わない（手動のまま）。ただし万舟チャンスのレースだけ、買い目を作り直すのと
     同じタイミングで「モデルのみ／Claudeのみ／両方の予想平均」の3種の比較を記録する（manshu_source.py。
     展示後の予想が保存済みでスキップしたレースも記録する。Claude の費用は1日の上限あり）
-  - 比較の4つ目「メモ入りの Claude（claude_memo）」は、記録のときにオーナーのメモ（manshu_memos）があれば作り、
-    無ければ「記録なし」。記録の後・締切前にメモが保存・変更されたら作り直す（メモの保存が task=memo を起動。
+  - 比較の「メモ入りの Claude（claude_memo）」と「メモ入りの平均（blend_memo）」は、記録のときにオーナーのメモ
+    （manshu_memos）があれば作り、無ければ「記録なし」。記録の後・締切前にメモが保存・変更されたら作り直す（メモの保存が task=memo を起動。
     取りこぼしは task=run が毎回確かめる）。メモは比較にだけ使い、保存する予想・買い目・ログには入れない
 
 ログは誰でも見られるので、会場名・確率・買い目は出さない（件数・締切時刻・理由・合否だけ）。
@@ -412,7 +412,7 @@ def pending_memos(targets, now, race_key=None):
 
 
 def rebuild_memo(ctx, t, memo):
-    """メモ入りの Claude 予想（claude_memo）を、その時点の展示・オッズで予想し直して作り直す。戻り値は記録用の短い文。"""
+    """メモ入りの Claude 予想（claude_memo・blend_memo）を、その時点の展示・オッズで予想し直して作り直す。戻り値は記録用の短い文。"""
     import manshu_source
     from official_fetcher import fetch_odds3t, fetch_official_race
 
@@ -435,7 +435,7 @@ def rebuild_memo(ctx, t, memo):
 
 
 def sync_memos(ctx, targets, race_key=None):
-    """メモが自動記録の後に保存・変更されたレースの claude_memo を作り直す。戻り値は使った Context（無ければ None）。"""
+    """メモが自動記録の後に保存・変更されたレースの claude_memo・blend_memo を作り直す。戻り値は使った Context（無ければ None）。"""
     try:
         todo = pending_memos(targets, datetime.now(JST), race_key)
     except Exception as e:  # noqa: BLE001  メモの表がまだ無いデータベースなど。自動予想は止めない

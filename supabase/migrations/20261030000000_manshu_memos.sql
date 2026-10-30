@@ -1,4 +1,4 @@
--- 万舟チャンスのレースに、オーナーが自分で書いたメモ（自由記述）を付け、メモ入りの Claude 予想を比較に足す。
+-- 万舟チャンスのレースに、オーナーが自分で書いたメモ（自由記述）を付け、メモ入りの予想2種を比較に足す。
 --
 --   manshu_memos : 1レース1行（race_key・メモ・保存日時）。管理者が一覧のカードで書く（manshu_view.py）。
 --                  書くのも読むのも下の関数だけ（表そのものは RLS で閉じる）。締切後は書き換えられない。
@@ -8,13 +8,15 @@
 --                  auto_post_predict.yml（task=memo）を起動してメモ入りの Claude 予想を作り直す
 --   manshu_memos_for_date(date)       : その日のメモと、メモ入りの Claude 予想を作った時刻・作れなかった理由
 --
---   manshu_source_compare に4つ目の source 'claude_memo' を足す:
---     claude と同じ入力・同じ買い目ルール（中穴5＋万舟5）に、メモを「オーナーが自分で見た気配」として足した予想。
---     メモの無いレースは「記録なし」（tri_probs なし・買い目なし・memo_saved_at なし）で、集計に入れない
+--   manshu_source_compare に source を2つ足す:
+--     claude_memo : claude と同じ入力・同じ買い目ルール（中穴5＋万舟5）に、メモを「オーナーが自分で見た気配」として
+--                   足した予想
+--     blend_memo  : claude_memo とモデルを blend と同じ方法で平均したもの（120通りの (モデル + claude_memo) / 2）
+--     メモの無いレースは2つとも「記録なし」（tri_probs なし・買い目なし・memo_saved_at なし）で、集計に入れない
 --     memo_saved_at : 予想に使ったメモの保存日時（saved_at が予想を作った日時）
 --   manshu_source_summary に足す列:
---     *_memo4   : メモがあり、4種（model・claude・blend・claude_memo）がそろったレースだけの数字
---     no_memo   : claude_memo の「記録なし」（メモの無かった）レース数
+--     *_memo5   : メモがあり、5種（model・claude・blend・claude_memo・blend_memo）がそろったレースだけの数字
+--     no_memo   : 「記録なし」（メモの無かった）レース数（claude_memo・blend_memo の行）
 --   all3 は今までどおり model・claude・blend の3種だけで数える。締切後に作ったもの（saved_at が締切以降）と、
 --   締切後に保存されたメモで作ったもの（memo_saved_at が締切以降）は数えない
 --
@@ -33,7 +35,7 @@ revoke all on public.manshu_memos from anon, authenticated;
 -- 比較の4つ目
 alter table public.manshu_source_compare drop constraint if exists manshu_source_compare_source_check;
 alter table public.manshu_source_compare
-  add constraint manshu_source_compare_source_check check (source in ('model', 'claude', 'blend', 'claude_memo'));
+  add constraint manshu_source_compare_source_check check (source in ('model', 'claude', 'blend', 'claude_memo', 'blend_memo'));
 alter table public.manshu_source_compare add column if not exists memo_saved_at timestamptz;
 
 create or replace function public.manshu_save_memo(p_race_key text, p_memo text)
@@ -126,13 +128,13 @@ with c as (
   select *,
          result_status = 'settled' and deadline_at is not null and saved_at < deadline_at
            and coalesce(stake, 0) > 0
-           and (source <> 'claude_memo' or (memo_saved_at is not null and memo_saved_at < deadline_at)) as counted
+           and (source not in ('claude_memo', 'blend_memo') or (memo_saved_at is not null and memo_saved_at < deadline_at)) as counted
   from public.manshu_source_compare
 ), a as (
   select c.*,
          count(*) filter (where counted and source in ('model', 'claude', 'blend'))
            over (partition by race_key) = 3 as all3,
-         count(*) filter (where counted) over (partition by race_key) = 4 as memo4
+         count(*) filter (where counted) over (partition by race_key) = 5 as memo5
   from c
 )
 select
@@ -151,18 +153,18 @@ select
   round(avg(aim_count) filter (where counted), 2) as avg_points,
   round(avg(claude_listed_count) filter (where counted), 2) as avg_claude_listed,
   count(*) filter (where result_at is null and coalesce(stake, 0) > 0) as pending,
-  count(*) filter (where error is not null and not (source = 'claude_memo' and memo_saved_at is null)) as errors,
+  count(*) filter (where error is not null and not (source in ('claude_memo', 'blend_memo') and memo_saved_at is null)) as errors,
   count(*) filter (where deadline_at is not null and saved_at >= deadline_at) as after_deadline,
   min(race_date) as first_date,
   max(race_date) as last_date,
-  count(*) filter (where counted and memo4) as races_memo4,
-  count(*) filter (where counted and memo4 and hit) as hits_memo4,
-  round(avg(case when hit then 1.0 else 0.0 end) filter (where counted and memo4), 4) as hit_rate_memo4,
-  sum(stake) filter (where counted and memo4) as stake_memo4,
-  sum("return") filter (where counted and memo4) as return_memo4,
-  round(sum("return") filter (where counted and memo4)::numeric
-        / nullif(sum(stake) filter (where counted and memo4), 0), 4) as roi_memo4,
-  count(*) filter (where source = 'claude_memo' and memo_saved_at is null) as no_memo
+  count(*) filter (where counted and memo5) as races_memo5,
+  count(*) filter (where counted and memo5 and hit) as hits_memo5,
+  round(avg(case when hit then 1.0 else 0.0 end) filter (where counted and memo5), 4) as hit_rate_memo5,
+  sum(stake) filter (where counted and memo5) as stake_memo5,
+  sum("return") filter (where counted and memo5) as return_memo5,
+  round(sum("return") filter (where counted and memo5)::numeric
+        / nullif(sum(stake) filter (where counted and memo5), 0), 4) as roi_memo5,
+  count(*) filter (where source in ('claude_memo', 'blend_memo') and memo_saved_at is null) as no_memo
 from a
 group by source;
 

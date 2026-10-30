@@ -1,5 +1,5 @@
 """
-万舟チャンスの予想比較（モデルのみ／Claudeのみ／両方の予想平均／メモ入りのClaude）の自動記録。
+万舟チャンスの予想比較（モデルのみ／Claudeのみ／両方の予想平均／メモ入りのClaude／メモ入りの平均）の自動記録。
 
 展示後の自動予想（auto_post_predict.py）が万舟チャンスのレースで中穴〜万舟狙いの買い目を作り直すのと
 同じタイミングで、3種類の3連単の確率から同じルールで買い目を作り、manshu_source_compare に1レース3行で残す。
@@ -12,7 +12,9 @@
   claude_memo : claude と同じ入力・同じ呼び出しに、オーナーが自分で書いたメモ（manshu_memos）を
            「オーナーが自分で見た気配」として足したもの。メモの無いレースはモデルで埋めず「記録なし」
            （確率・買い目なし。集計に入れない）。memo_saved_at に使ったメモの保存日時を残す。
-           自動記録の後・締切前にメモが保存されたら、その時点で作り直す（sync_memo。メモの保存で
+  blend_memo : claude_memo とモデルを blend と同じ方法で平均したもの（120通りの (モデル + claude_memo) / 2）。
+           claude_memo と一緒に作り、メモが無ければ同じく「記録なし」
+           2つとも、自動記録の後・締切前にメモが保存されたら、その時点で作り直す（sync_memo。メモの保存で
            auto_post_predict.yml task=memo が起動する。取りこぼしは5分おきの task=run）。
            メモはこの比較にだけ使い、本番の予想・買い目・表示・通知・投稿には使わない
 
@@ -37,8 +39,10 @@ from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
 TABLE = "manshu_source_compare"
-SOURCES = ("model", "claude", "blend", "claude_memo")
+SOURCES = ("model", "claude", "blend", "claude_memo", "blend_memo")
 MEMO_SOURCE = "claude_memo"
+MEMO_BLEND = "blend_memo"
+MEMO_SOURCES = (MEMO_SOURCE, MEMO_BLEND)
 MEMO_TABLE = "manshu_memos"
 NO_MEMO = "記録なし（メモなし）"
 USAGE_PURPOSE = "manshu_compare"
@@ -86,7 +90,7 @@ def deadline_at(race_date_iso, hhmm):
 def build_row(t, source, probs, odds, odds_at, error=None, claude_model=None, claude_listed_count=None,
               memo_saved_at=None):
     """manshu_source_compare の1行（結果の列は空）。probs が None なら確率・買い目なしで error だけ残す。
-    claude_memo の行だけ memo_saved_at を持つ（ほかの行は列を送らない）。"""
+    claude_memo・blend_memo の行だけ memo_saved_at を持つ（ほかの行は列を送らない）。"""
     aim = compare_tickets(probs, odds) if probs and odds else []
     if probs and not error:
         if not odds:
@@ -109,7 +113,7 @@ def build_row(t, source, probs, odds, odds_at, error=None, claude_model=None, cl
         "claude_listed_count": claude_listed_count,
         "error": error,
     }
-    if source == MEMO_SOURCE:
+    if source in MEMO_SOURCES:
         row["memo_saved_at"] = memo_saved_at
     return row
 
@@ -217,42 +221,39 @@ def load_memo(sb, race_key):
     return rows[0] if rows and str(rows[0].get("memo") or "").strip() else None
 
 
-def memo_row(sb, t, race, final, model_tri, odds_d, odds_at, api_key="", read_model=None, now=None, memo=None):
-    """claude_memo の1行。メモが無ければ「記録なし」（Claude を呼ばない・モデルで埋めない）。"""
+def memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key="", read_model=None, now=None, memo=None):
+    """claude_memo・blend_memo の2行。メモが無ければ2つとも「記録なし」（Claude を呼ばない・モデルで埋めない）。
+    確率の作り方は claude・blend と同じ（source_probs）。"""
     if not memo:
-        return build_row(t, MEMO_SOURCE, None, odds_d, odds_at, error=NO_MEMO)
+        return [build_row(t, s_, None, odds_d, odds_at, error=NO_MEMO) for s_ in MEMO_SOURCES]
     reading, err = read_claude(sb, t, race, final, api_key, read_model, now, memo=memo["memo"])
     probs = source_probs(model_tri, reading)
+    probs = {MEMO_SOURCE: probs.get("claude"), MEMO_BLEND: probs.get("blend")}
     cm = (reading or {}).get("served_model") or (reading or {}).get("model")
-    c = probs.get("claude")
-    return build_row(t, MEMO_SOURCE, c, odds_d, odds_at, error=None if c else err, claude_model=cm,
-                     claude_listed_count=len(c) if c else None, memo_saved_at=memo["saved_at"])
+    c = probs[MEMO_SOURCE]
+    return [build_row(t, s_, probs[s_], odds_d, odds_at, error=None if c else err, claude_model=cm,
+                      claude_listed_count=len(c) if c else None, memo_saved_at=memo["saved_at"])
+            for s_ in MEMO_SOURCES]
 
 
-def _memo_text(row):
-    if row.get("memo_saved_at") is None:
+def _memo_text(rows):
+    c, b = rows
+    if c.get("memo_saved_at") is None:
         return "記録なし"
-    if row.get("error"):
-        return f"作れませんでした（{row['error']}）"
-    return f"記録（Claude が挙げた組 {row['claude_listed_count']}点・買い目 {row['aim_count']}点）"
+    if c.get("error") and not c.get("tri_probs"):
+        return f"作れませんでした（{c['error']}）"
+    return f"記録（Claude が挙げた組 {c['claude_listed_count']}点・買い目 {c['aim_count']}点／平均 {b['aim_count']}点）"
 
 
 def record_memo(sb, t, race, final, model_tri, odds_d, odds_at, api_key="", read_model=None, now=None):
-    """自動記録のときの claude_memo（まだ無いときだけ入れる）。失敗しても3種の記録は残す。戻り値は短い文。"""
+    """自動記録のときの claude_memo・blend_memo（まだ無いときだけ入れる）。失敗しても3種の記録は残す。戻り値は短い文。"""
     try:
-        row = memo_row(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now,
-                       load_memo(sb, t["race_key"]))
-        insert(sb, [row])
-        return _memo_text(row)
+        rows = memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now,
+                         load_memo(sb, t["race_key"]))
+        insert(sb, rows)
+        return _memo_text(rows)
     except Exception as e:  # noqa: BLE001  メモの表・列がまだ無いデータベースなど
         return f"エラー（{type(e).__name__}）"
-
-
-def memo_state(sb, race_key):
-    """(メモ, claude_memo の行)。どちらも無ければ None。"""
-    rows = sb("GET", f"{TABLE}?race_key=eq.{race_key}&source=eq.{MEMO_SOURCE}"
-                     "&select=memo_saved_at,saved_at,result_at").json() or []
-    return load_memo(sb, race_key), (rows[0] if rows else None)
 
 
 def needs_memo_update(memo, row):
@@ -272,7 +273,7 @@ def upsert(sb, rows):
 
 
 def sync_memo(sb, t, race, final, odds, api_key="", read_model=None, now=None, memo=None):
-    """自動記録の後に保存・変更・削除されたメモで claude_memo を作り直す。memo は load_memo の戻り値。
+    """自動記録の後に保存・変更・削除されたメモで claude_memo・blend_memo を作り直す。memo は load_memo の戻り値。
     戻り値は記録用の短い文（メモ・会場名・買い目は入れない）。"""
     import manshu
     from prediction import trifecta
@@ -280,12 +281,13 @@ def sync_memo(sb, t, race, final, odds, api_key="", read_model=None, now=None, m
     model_tri = trifecta(final)[["combo", "prob"]]
     odds_d = manshu.odds_dict(odds)
     odds_at = datetime.now(JST).isoformat(timespec="seconds") if odds_d else None
-    row = memo_row(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now, memo)
+    rows = memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now, memo)
     # 作り直すときは前の行の内容を全部置き換える（記録なしに戻すときは古い確率・買い目を残さない）
-    row.setdefault("claude_model", None)
-    row["saved_at"] = datetime.now(JST).isoformat(timespec="seconds")
-    upsert(sb, [row])
-    return "作り直し: " + _memo_text(row)
+    saved = datetime.now(JST).isoformat(timespec="seconds")
+    for row in rows:
+        row["saved_at"] = saved
+    upsert(sb, rows)
+    return "作り直し: " + _memo_text(rows)
 
 
 # ---------------------------------------------------------------
