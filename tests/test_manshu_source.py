@@ -484,3 +484,76 @@ def test_memo_lane_format():
     assert mv.memo_summary("") == "📝 メモ"
     assert len(mv.memo_summary("1号艇：" + "あ" * 100)) < 80
     assert len(mv.memo_join({k: "あ" * 500 for k in range(1, 7)})) <= mv.MEMO_MAX
+
+
+# ---------------------------------------------------------------
+# メモ入り予想の通知（memo_notify.py。オーナー専用の Discord）
+# ---------------------------------------------------------------
+LANE_MEMO = {"memo": "1号艇：出足不安\n4号艇：出足・回り足良い", "saved_at": "2026-10-25T02:10:00+00:00"}
+BEFORE = datetime(2026, 10, 25, 11, 0, tzinfo=ms.JST)
+
+
+def _sent(monkeypatch):
+    import memo_notify
+
+    sent = []
+    monkeypatch.setattr(memo_notify, "send", lambda text, url=None, timeout=10: sent.append(text))
+    return sent
+
+
+def test_memo_notify_only_with_webhook_and_memo(monkeypatch):
+    _install(monkeypatch)
+    sent = _sent(monkeypatch)
+    monkeypatch.delenv("DISCORD_MEMO_WEBHOOK_URL", raising=False)
+    ms.record(_SB(memo=LANE_MEMO), T, None, "final", _odds_df(), api_key="k", now=BEFORE)
+    assert sent == []  # 未設定なら何もしない
+    monkeypatch.setenv("DISCORD_MEMO_WEBHOOK_URL", "https://example.invalid/hook")
+    st = ms.record(_SB(), T, None, "final", _odds_df(), api_key="k", now=BEFORE)
+    assert sent == [] and "通知" not in st  # メモの無いレースは送らない
+    st = ms.record(_SB(memo=LANE_MEMO), T, None, "final", _odds_df(), api_key="k", now=BEFORE)
+    assert st.endswith("・通知: 送信") and len(sent) == 1
+    text = sent[0]
+    assert "【更新】" not in text and "桐生 5R" in text and "締切 11:30" in text
+    assert "1号艇：出足不安" in text and "4号艇：出足・回り足良い" in text
+    assert "メモ入りのClaude（claude_memo）**（2点）" in text and "メモ入りの平均（blend_memo）**（10点）" in text
+    assert "**参考: モデルの買い目**（" in text and "中穴: " in text and "50.0倍" in text
+    assert "桐生" not in st and "出足" not in st  # ログには会場名・メモを出さない
+
+
+def test_memo_notify_not_after_deadline(monkeypatch):
+    _install(monkeypatch)
+    sent = _sent(monkeypatch)
+    monkeypatch.setenv("DISCORD_MEMO_WEBHOOK_URL", "https://example.invalid/hook")
+    late = datetime(2026, 10, 25, 11, 31, tzinfo=ms.JST)
+    st = ms.record(_SB(memo=LANE_MEMO), T, None, "final", _odds_df(), api_key="k", now=late)
+    assert sent == [] and st.endswith("締切後のため送らず")
+
+
+def test_memo_notify_update_on_rebuild(monkeypatch):
+    _install(monkeypatch)
+    sent = _sent(monkeypatch)
+    monkeypatch.setenv("DISCORD_MEMO_WEBHOOK_URL", "https://example.invalid/hook")
+    sb = _SB()
+    ms.record(sb, T, None, "final", _odds_df(), api_key="k", now=BEFORE)  # 記録のときはメモなし
+    # 記録の後に初めてメモを書いた → 最初の通知（更新ではない）
+    assert ms.sync_memo(sb, T, None, "final", _odds_df(), api_key="k", now=BEFORE, memo=LANE_MEMO).endswith("・通知: 送信")
+    assert "【更新】" not in sent[-1]
+    later = {**LANE_MEMO, "memo": "4号艇：伸び良し", "saved_at": "2026-10-25T02:20:00+00:00"}
+    assert ms.sync_memo(sb, T, None, "final", _odds_df(), api_key="k", now=BEFORE, memo=later).endswith("更新を送信")
+    assert "【更新】" in sent[-1] and "4号艇：伸び良し" in sent[-1]
+    # メモを消した → 送らない
+    n = len(sent)
+    ms.sync_memo(sb, T, None, "final", _odds_df(), api_key="k", now=BEFORE, memo=None)
+    assert len(sent) == n
+
+
+def test_memo_notify_message_shape():
+    import memo_notify
+
+    tk = [{"combo": "2-1-3", "odds": 45.0, "tier": "中穴"}, {"combo": "4-1-2", "odds": 150.0, "tier": "万舟"},
+          {"combo": "3-1-2", "odds": 60.2, "tier": "中穴"}]
+    assert memo_notify.ticket_lines(tk) == ["中穴: 2-1-3 45.0倍 / 3-1-2 60.2倍", "万舟: 4-1-2 150.0倍"]
+    rows = {ms.MEMO_SOURCE: {"aim_tickets": [], "error": "1日の上限"}, ms.MEMO_BLEND: {"aim_tickets": tk}}
+    text = memo_notify.build_message(T, "4号艇：" + "あ" * 3000, rows, tk, "2026-10-25T02:20:00+00:00", update=True)
+    assert len(text) <= memo_notify.LIMIT and text.startswith("📝 メモ入り予想【更新】")
+    assert "（オッズ 11:20 時点）" in text and "作れませんでした（1日の上限）" in text

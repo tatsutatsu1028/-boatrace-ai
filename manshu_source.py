@@ -16,7 +16,8 @@
            claude_memo と一緒に作り、メモが無ければ同じく「記録なし」
            2つとも、自動記録の後・締切前にメモが保存されたら、その時点で作り直す（sync_memo。メモの保存で
            auto_post_predict.yml task=memo が起動する。取りこぼしは5分おきの task=run）。
-           メモはこの比較にだけ使い、本番の予想・買い目・表示・通知・投稿には使わない
+           メモはこの比較にだけ使い、本番の予想・買い目・表示・通知・投稿には使わない。例外として、作ったときに
+           オーナー専用の Discord チャンネル（DISCORD_MEMO_WEBHOOK_URL）にだけメモ入り予想を通知する（memo_notify.py）
 
 買い目の選び方は3種とも本番と同じ（manshu.aim_tickets。中穴5＋万舟5・確率順・1号艇1着を外す）。確率だけを
 各予想のものに差し替える。claude は挙げた組だけから作るので、足りなければ10点より少ないまま（aim_count に点数）。
@@ -245,13 +246,26 @@ def _memo_text(rows):
     return f"記録（Claude が挙げた組 {c['claude_listed_count']}点・買い目 {c['aim_count']}点／平均 {b['aim_count']}点）"
 
 
+def notify_memo(t, memo, rows, model_tri, odds_d, odds_at, update=False, now=None):
+    """メモ入り予想をオーナー専用の Discord に通知する（memo_notify.py。メモが無い・未設定なら何もしない）。
+    戻り値はログ用の短い文（送らなければ空）。"""
+    import manshu
+    import memo_notify
+
+    if not memo:
+        return ""
+    model_aim = compare_tickets(manshu.tri_dict(model_tri), odds_d) if odds_d else []
+    return memo_notify.notify(t, memo["memo"], {r["source"]: r for r in rows}, model_aim, odds_at, update, now)
+
+
 def record_memo(sb, t, race, final, model_tri, odds_d, odds_at, api_key="", read_model=None, now=None):
-    """自動記録のときの claude_memo・blend_memo（まだ無いときだけ入れる）。失敗しても3種の記録は残す。戻り値は短い文。"""
+    """自動記録のときの claude_memo・blend_memo（まだ無いときだけ入れる）。失敗しても3種の記録は残す。戻り値は短い文。
+    入れられたらメモ入り予想を通知する。"""
     try:
-        rows = memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now,
-                         load_memo(sb, t["race_key"]))
-        insert(sb, rows)
-        return _memo_text(rows)
+        memo = load_memo(sb, t["race_key"])
+        rows = memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now, memo)
+        sent = notify_memo(t, memo, rows, model_tri, odds_d, odds_at, now=now) if insert(sb, rows) else ""
+        return _memo_text(rows) + sent
     except Exception as e:  # noqa: BLE001  メモの表・列がまだ無いデータベースなど
         return f"エラー（{type(e).__name__}）"
 
@@ -281,13 +295,16 @@ def sync_memo(sb, t, race, final, odds, api_key="", read_model=None, now=None, m
     model_tri = trifecta(final)[["combo", "prob"]]
     odds_d = manshu.odds_dict(odds)
     odds_at = datetime.now(JST).isoformat(timespec="seconds") if odds_d else None
+    prev = sb("GET", f"{TABLE}?race_key=eq.{t['race_key']}&source=eq.{MEMO_SOURCE}&select=memo_saved_at").json() or []
     rows = memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now, memo)
     # 作り直すときは前の行の内容を全部置き換える（記録なしに戻すときは古い確率・買い目を残さない）
     saved = datetime.now(JST).isoformat(timespec="seconds")
     for row in rows:
         row["saved_at"] = saved
     upsert(sb, rows)
-    return "作り直し: " + _memo_text(rows)
+    # 前にメモ入りで作っていれば「更新」（自動記録の後に初めてメモを書いたときは最初の通知）
+    update = any(r.get("memo_saved_at") for r in prev)
+    return "作り直し: " + _memo_text(rows) + notify_memo(t, memo, rows, model_tri, odds_d, odds_at, update, now)
 
 
 # ---------------------------------------------------------------

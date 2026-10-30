@@ -65,6 +65,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_READ_MODEL: ${{ secrets.CLAUDE_READ_MODEL }}
           RACE_KEY: ${{ inputs.race_key }}
+          # メモ入り予想（claude_memo・blend_memo）の通知先。オーナー専用のチャンネル（memo_notify.py）。未設定なら送らない
+          DISCORD_MEMO_WEBHOOK_URL: ${{ secrets.DISCORD_MEMO_WEBHOOK_URL }}
         run: |
           ARGS="${{ inputs.task || 'run' }}"
           if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi
