@@ -541,8 +541,9 @@ def run_aim(date=None, fetch=None):
             done += 1
         else:
             reasons[why] = reasons.get(why, 0) + 1
-        # 画面で先に作った買い目は上書きしない（aim_tickets が空の行だけ）
-        _sb("PATCH", f"manshu_chance_picks?race_key=eq.{r['race_key']}&aim_tickets=is.null&result_at=is.null",
+        # 画面で先に作った買い目は上書きしない（aim_tickets が空の行だけ）。通知済み（固定）の行も触らない
+        _sb("PATCH", f"manshu_chance_picks?race_key=eq.{r['race_key']}&aim_tickets=is.null&result_at=is.null"
+                     "&aim_locked_at=is.null",
             prefer="return=minimal", json=patch)
     _log_aim(f"{date}: 買い目の取り直し", done, len(rows), reasons)
     return done, len(rows)

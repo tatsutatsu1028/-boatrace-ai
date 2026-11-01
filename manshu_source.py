@@ -20,7 +20,9 @@
            オーナー専用の Discord チャンネル（DISCORD_MEMO_WEBHOOK_URL）にだけメモ入り予想を通知する（memo_notify.py）
 
 買い目の選び方は3種とも本番と同じ（manshu.aim_tickets。中穴5＋万舟5・確率順・1号艇1着を外す）。確率だけを
-各予想のものに差し替える。claude は挙げた組だけから作るので、足りなければ10点より少ないまま（aim_count に点数）。
+各予想のものに差し替える。ただし model の行の買い目は作り直さず、本番の買い目（manshu_chance_picks.aim_tickets。
+締切前の Discord 通知で送って固定したもの）をそのまま使う（official_aim）。通知・アプリ・記録・成績を同じ買い目にするため。
+本番の買い目が無いレース（穴目で通知したなど）は model の行も買い目なし（error に理由）。claude は挙げた組だけから作るので、足りなければ10点より少ないまま（aim_count に点数）。
 claude・blend の行の claude_listed_count は、Claude 自身が挙げた組の点数。
 
   - 1レース1回だけ（race_key, source が主キー。先に model の行を入れられた実行だけが Claude を呼ぶ）
@@ -46,6 +48,7 @@ MEMO_BLEND = "blend_memo"
 MEMO_SOURCES = (MEMO_SOURCE, MEMO_BLEND)
 MEMO_TABLE = "manshu_memos"
 NO_MEMO = "記録なし（メモなし）"
+NO_OFFICIAL = "本番の中穴〜万舟狙いの買い目がありません"
 USAGE_PURPOSE = "manshu_compare"
 MEMO_PURPOSE = "manshu_compare_memo"
 LIMIT_SETTING = "manshu_compare_claude_daily_usd"
@@ -89,11 +92,17 @@ def deadline_at(race_date_iso, hhmm):
 
 
 def build_row(t, source, probs, odds, odds_at, error=None, claude_model=None, claude_listed_count=None,
-              memo_saved_at=None):
+              memo_saved_at=None, tickets=None):
     """manshu_source_compare の1行（結果の列は空）。probs が None なら確率・買い目なしで error だけ残す。
-    claude_memo・blend_memo の行だけ memo_saved_at を持つ（ほかの行は列を送らない）。"""
-    aim = compare_tickets(probs, odds) if probs and odds else []
-    if probs and not error:
+    claude_memo・blend_memo の行だけ memo_saved_at を持つ（ほかの行は列を送らない）。
+    tickets を渡したら買い目は作らずにそれを使う（model の行の本番の買い目。空なら NO_OFFICIAL）。"""
+    if tickets is not None:
+        aim = list(tickets)
+    else:
+        aim = compare_tickets(probs, odds) if probs and odds else []
+    if tickets is not None and not aim and not error:
+        error = NO_OFFICIAL
+    elif probs and not error:
         if not odds:
             error = "オッズを取れませんでした"
         elif not aim:
@@ -178,8 +187,15 @@ def read_claude(sb, t, race, final, api_key, read_model=None, now=None, memo=Non
     return reading, None
 
 
-def record(sb, t, race, final, odds, api_key="", read_model=None, now=None):
-    """1レースの4種を記録する。戻り値は記録用の短い文（会場名・買い目・メモは入れない）。"""
+def official_aim(sb, race_key):
+    """本番の中穴〜万舟狙いの買い目（manshu_chance_picks.aim_tickets）。無ければ []。"""
+    rows = sb("GET", f"manshu_chance_picks?race_key=eq.{race_key}&select=aim_tickets").json() or []
+    return (rows[0].get("aim_tickets") if rows else None) or []
+
+
+def record(sb, t, race, final, odds, api_key="", read_model=None, now=None, official=None):
+    """1レースの4種を記録する。戻り値は記録用の短い文（会場名・買い目・メモは入れない）。
+    official: 本番の買い目（official_aim）。model の行はこれをそのまま使う（None ならここで読む）。"""
     import manshu
     from prediction import trifecta
 
@@ -187,7 +203,9 @@ def record(sb, t, race, final, odds, api_key="", read_model=None, now=None):
     odds_d = manshu.odds_dict(odds)
     odds_at = datetime.now(JST).isoformat(timespec="seconds") if odds_d else None
     probs = source_probs(model_tri, None)
-    if not insert(sb, [build_row(t, "model", probs["model"], odds_d, odds_at)]):
+    official = official_aim(sb, t["race_key"]) if official is None else official
+    model_row = build_row(t, "model", probs["model"], odds_d, odds_at, tickets=official)
+    if not insert(sb, [model_row]):
         return "記録済み"
     reading, err = read_claude(sb, t, race, final, api_key, read_model, now)
     probs = source_probs(model_tri, reading)
@@ -197,7 +215,8 @@ def record(sb, t, race, final, odds, api_key="", read_model=None, now=None):
                       claude_listed_count=listed)
             for s in ("claude", "blend")]
     insert(sb, rows)
-    memo_text = record_memo(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now)
+    memo_text = record_memo(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now,
+                            model_aim=model_row["aim_tickets"])
     if err:
         return f"モデルだけ記録（Claude: {err}）・メモ入り: {memo_text}"
     return f"3種を記録（Claude が挙げた組 {listed}点・買い目 {len(rows[0]['aim_tickets'])}点）・メモ入り: {memo_text}"
@@ -246,25 +265,25 @@ def _memo_text(rows):
     return f"記録（Claude が挙げた組 {c['claude_listed_count']}点・買い目 {c['aim_count']}点／平均 {b['aim_count']}点）"
 
 
-def notify_memo(t, memo, rows, model_tri, odds_d, odds_at, update=False, now=None):
+def notify_memo(t, memo, rows, model_aim, odds_at, update=False, now=None):
     """メモ入り予想をオーナー専用の Discord に通知する（memo_notify.py。メモが無い・未設定なら何もしない）。
+    model_aim は参考に出すモデルの買い目（本番の買い目＝model の行と同じもの。作り直さない）。
     戻り値はログ用の短い文（送らなければ空）。"""
-    import manshu
     import memo_notify
 
     if not memo:
         return ""
-    model_aim = compare_tickets(manshu.tri_dict(model_tri), odds_d) if odds_d else []
     return memo_notify.notify(t, memo["memo"], {r["source"]: r for r in rows}, model_aim, odds_at, update, now)
 
 
-def record_memo(sb, t, race, final, model_tri, odds_d, odds_at, api_key="", read_model=None, now=None):
+def record_memo(sb, t, race, final, model_tri, odds_d, odds_at, api_key="", read_model=None, now=None,
+                model_aim=None):
     """自動記録のときの claude_memo・blend_memo（まだ無いときだけ入れる）。失敗しても3種の記録は残す。戻り値は短い文。
     入れられたらメモ入り予想を通知する。"""
     try:
         memo = load_memo(sb, t["race_key"])
         rows = memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now, memo)
-        sent = notify_memo(t, memo, rows, model_tri, odds_d, odds_at, now=now) if insert(sb, rows) else ""
+        sent = notify_memo(t, memo, rows, model_aim or [], odds_at, now=now) if insert(sb, rows) else ""
         return _memo_text(rows) + sent
     except Exception as e:  # noqa: BLE001  メモの表・列がまだ無いデータベースなど
         return f"エラー（{type(e).__name__}）"
@@ -296,6 +315,8 @@ def sync_memo(sb, t, race, final, odds, api_key="", read_model=None, now=None, m
     odds_d = manshu.odds_dict(odds)
     odds_at = datetime.now(JST).isoformat(timespec="seconds") if odds_d else None
     prev = sb("GET", f"{TABLE}?race_key=eq.{t['race_key']}&source=eq.{MEMO_SOURCE}&select=memo_saved_at").json() or []
+    model = sb("GET", f"{TABLE}?race_key=eq.{t['race_key']}&source=eq.model&select=aim_tickets").json() or []
+    model_aim = (model[0].get("aim_tickets") if model else None) or []
     rows = memo_rows(sb, t, race, final, model_tri, odds_d, odds_at, api_key, read_model, now, memo)
     # 作り直すときは前の行の内容を全部置き換える（記録なしに戻すときは古い確率・買い目を残さない）
     saved = datetime.now(JST).isoformat(timespec="seconds")
@@ -304,7 +325,7 @@ def sync_memo(sb, t, race, final, odds, api_key="", read_model=None, now=None, m
     upsert(sb, rows)
     # 前にメモ入りで作っていれば「更新」（自動記録の後に初めてメモを書いたときは最初の通知）
     update = any(r.get("memo_saved_at") for r in prev)
-    return "作り直し: " + _memo_text(rows) + notify_memo(t, memo, rows, model_tri, odds_d, odds_at, update, now)
+    return "作り直し: " + _memo_text(rows) + notify_memo(t, memo, rows, model_aim, odds_at, update, now)
 
 
 # ---------------------------------------------------------------
