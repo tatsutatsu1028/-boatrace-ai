@@ -518,3 +518,14 @@ def test_eval_excludes_lane1_and_favorite():
     assert set(a2.loc[a2.race_key == "r1", "combo"]) == {"3-1-2", "4-5-6"}  # r1 の本命（2号艇）も外す
     mix = out[("本番 中穴＋万舟・確率順（30倍以上）", "1号艇1着を外す（基本）")]
     assert set(mix.loc[mix.race_key == "r1", "combo"]) == {"2-1-3", "3-1-2", "4-5-6"}
+
+
+def test_locked_aim_text():
+    """通知済み（aim_locked_at）なら「作り直します」とは書かず、固定と出す。"""
+    import manshu_view
+
+    r = {"aim_source": "morning", "aim_odds_at": "2026-11-01T00:01:00+00:00",
+         "aim_locked_at": "2026-11-01T04:32:00+00:00"}
+    text = manshu_view.aim_source_text(r)
+    assert "固定" in text and "13:32" in text and "作り直します" not in text
+    assert "作り直します" in manshu_view.aim_source_text({**r, "aim_locked_at": None})

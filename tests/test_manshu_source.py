@@ -152,9 +152,12 @@ def test_clean_longshots():
 class _SB:
     """Supabase の代わり。"""
 
-    def __init__(self, spent=0.0, limit=3.0, memo=None):
+    def __init__(self, spent=0.0, limit=3.0, memo=None, official=None):
         self.rows = {}
         self.memo = memo
+        # 本番の買い目（manshu_chance_picks.aim_tickets）。既定はモデルの確率・オッズ50倍で作ったもの
+        self.official = (ms.compare_tickets(dict(zip(COMBOS, _tri()["prob"])), _odds())
+                         if official is None else official)
         self.usage = []
         self.spent, self.limit = spent, limit
         self.patches = []
@@ -176,6 +179,8 @@ class _SB:
             data = [dict(r) for r in fake.rows.values() if r["source"] == src]
         elif path.startswith(ms.TABLE) and method == "GET":
             data = [dict(r) for r in fake.rows.values() if not r.get("result_at")]
+        elif path.startswith("manshu_chance_picks") and method == "GET":
+            data = [{"aim_tickets": fake.official or None}]
         elif path.startswith(ms.MEMO_TABLE):
             data = [dict(fake.memo)] if fake.memo else []
         elif path.startswith(ms.TABLE) and method == "PATCH":
@@ -557,3 +562,40 @@ def test_memo_notify_message_shape():
     text = memo_notify.build_message(T, "4号艇：" + "あ" * 3000, rows, tk, "2026-10-25T02:20:00+00:00", update=True)
     assert len(text) <= memo_notify.LIMIT and text.startswith("📝 メモ入り予想【更新】")
     assert "（オッズ 11:20 時点）" in text and "作れませんでした（1日の上限）" in text
+
+
+# ---------------------------------------------------------------
+# 買い目は1つ: model の行・メモ入り通知の参考は本番の買い目（通知で固定したもの）をそのまま使う
+# ---------------------------------------------------------------
+def test_model_row_uses_official_tickets_not_recomputed(monkeypatch):
+    """20261101_21_11 の食い違い: 通知・本番の買い目と比較の model の行が別に作られていた。"""
+    _install(monkeypatch)
+    official = [{"combo": "3-1-4", "prob": 0.01, "odds": 80.0, "tier": "中穴", "stake": 100, "payout": 8000}]
+    sb = _SB(official=official)
+    ms.record(sb, T, None, "final", _odds_df(), api_key="k")
+    model = sb.rows[(T["race_key"], "model")]
+    assert model["aim_tickets"] == official and model["aim_count"] == 1 and model["stake"] == 100
+    assert model["tri_probs"]  # 確率はモデルのまま残す
+    # 結果も本番の買い目で判定する（本番に無い組では当たりにしない）
+    other = ms.compare_tickets(dict(zip(COMBOS, _tri()["prob"])), _odds())[0]["combo"]
+    assert other != "3-1-4"
+    ms.apply_result(sb, T["race_key"], [(other, 7150.0)])
+    assert sb.rows[(T["race_key"], "model")]["hit"] is False
+
+
+def test_model_row_without_official_tickets(monkeypatch):
+    _install(monkeypatch)
+    sb = _SB(official=[])
+    ms.record(sb, T, None, "final", _odds_df(), api_key="k")
+    model = sb.rows[(T["race_key"], "model")]
+    assert model["aim_tickets"] == [] and model["error"] == ms.NO_OFFICIAL
+
+
+def test_memo_notify_reference_is_official(monkeypatch):
+    _install(monkeypatch)
+    sent = _sent(monkeypatch)
+    monkeypatch.setenv("DISCORD_MEMO_WEBHOOK_URL", "https://example.invalid/hook")
+    official = [{"combo": "3-1-4", "prob": 0.01, "odds": 80.0, "tier": "中穴", "stake": 100, "payout": 8000}]
+    ms.record(_SB(memo=LANE_MEMO, official=official), T, None, "final", _odds_df(), api_key="k", now=BEFORE)
+    ref = sent[0].split("参考: モデルの買い目")[1]
+    assert "3-1-4 80.0倍" in ref and "（1点）" in ref

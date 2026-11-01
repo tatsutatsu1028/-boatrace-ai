@@ -10,7 +10,9 @@
     （1号艇を1着から外した上位10点・資金配分しない）
 
   - 中穴〜万舟狙いの買い目（管理者だけ）: 1号艇の1着を外し、3連単オッズ30倍以上から確率順に10点。
-    朝の買い目は「仮（朝のオッズ）」。展示後に予想タブで予想すると、その時点のオッズで作り直して保存する
+    朝の買い目は「仮（朝のオッズ）」。展示後に予想タブで予想すると、その時点のオッズで作り直して保存する。
+    締切前の Discord 通知で送った後は固定（aim_locked_at）。画面でも作り直さず、通知した買い目を出す
+    （通知・表示・記録・成績を同じ買い目にする。20261101000000_manshu_aim_lock.sql）
   - 自分のメモ（管理者の一覧だけ）: レースごとの自由記述（例: 4号艇 伸び良し、1号艇 出足不安）。締切前だけ保存できる
     （manshu_memos）。予想比較の「メモ入りの Claude（claude_memo）・メモ入りの平均（blend_memo）」にだけ使い、本番の予想・買い目・スレッズ・note・
     締切10分前の Discord 通知には使わない。スタッフには出さない（オーナー専用の Discord チャンネルへの
@@ -223,6 +225,9 @@ def render_aim_compare(mark, final, tickets, odds_df, is_admin=False, pre_exhibi
     rk = mark["race_key"]
     probs = manshu.tri_dict(trifecta(final)[["combo", "prob"]])
     odds = manshu.odds_dict(odds_df)
+    if mark.get("aim_locked_at"):
+        _render_locked_pair(mark, tickets, odds)
+        return
     at = None
     fresh = st.session_state.setdefault("manshu_pred_odds", {})
     if st.button("🔄 オッズを更新（万舟狙いの買い目を作り直す）", key=f"manshu_aim_pred_refresh_{rk}"):
@@ -271,7 +276,33 @@ def render_aim_compare(mark, final, tickets, odds_df, is_admin=False, pre_exhibi
     if aim and not _deadline_passed(datetime.fromisoformat(f"{rk[:4]}-{rk[4:6]}-{rk[6:8]}").date(),
                                     mark.get("deadline")):
         if save_aim(rk, aim, "predict", at) is False:
-            st.caption("（買い目の保存に失敗しました。データベースの準備がまだかもしれません）")
+            st.caption(f"（この買い目は保存されませんでした。{SAVE_REFUSED}）")
+
+
+SAVE_REFUSED = "通知済みで固定されているか、締切後・データベースの準備がまだのことがあります。一覧の買い目が本番です"
+
+
+def locked_text(r):
+    return f"（{jst_hhmm(r.get('aim_locked_at'))} に Discord へ通知した買い目で固定。作り直しません）"
+
+
+def _render_locked_pair(mark, tickets, odds):
+    """通知済み（固定）のレース: 作り直さず、通知した買い目（aim_tickets）をそのまま出す。"""
+    saved = mark.get("aim_tickets") or []
+    st.markdown(f"##### {manshu.ICON} 通常の買い目と{manshu.AIM_LABEL}（管理者だけ）")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**通常の買い目（今のモデル）**")
+        nf = normal_frame(tickets, odds)
+        if len(nf):
+            st.dataframe(nf, hide_index=True, use_container_width=True)
+    with c2:
+        st.markdown(f"**{manshu.AIM_LABEL}**（各100円・資金配分なし）")
+        if saved:
+            st.dataframe(aim_frame(saved), hide_index=True, use_container_width=True)
+        else:
+            st.caption("中穴〜万舟狙いの買い目なしで通知しました。")
+    st.caption(locked_text(mark))
 
 
 # ---------------------------------------------------------------
@@ -362,6 +393,9 @@ def aim_source_text(r):
     """保存された買い目の作り方の説明。朝の買い目は「仮（朝のオッズ）」（展示後に予想すると作り直す）。"""
     at = jst_hhmm(r.get("aim_odds_at"))
     src = r.get("aim_source")
+    if r.get("aim_locked_at"):
+        which = {"morning": "朝", "predict": "予想タブ", "list": "一覧", "auto": "展示後の自動予想"}.get(src, "")
+        return f"（{which + 'で ' if which else ''}{at} のオッズで作成。{locked_text(r).strip('（）')}）"
     if src == "morning":
         return (f"【{MORNING_TAG}】朝 {at} のオッズで作った仮の買い目です。展示後に予想タブで予想すると、"
                 "その時点のオッズで作り直します（「オッズを更新」でも取り直せます）")
@@ -406,6 +440,13 @@ def _manshu_tickets_block(d, r, passed):
         else:
             st.caption(f"{manshu.AIM_LABEL}: 締切前に表示した買い目はありません")
         return
+    if r.get("aim_locked_at"):
+        if saved:
+            st.caption(f"{manshu.AIM_LABEL}{locked_text(r)}")
+            st.markdown(aim_text(saved))
+        else:
+            st.caption(f"{manshu.AIM_LABEL}: 買い目なしで通知しました{locked_text(r)}")
+        return
     probs, which = aim_probs(r)
     shown = st.session_state.setdefault("manshu_aim_list", {})
     label = "🔄 オッズを更新" if (shown.get(rk) or saved) else "💰 オッズを取得して買い目を作る"
@@ -432,6 +473,9 @@ def rebuild_aim(r):
     """その時点のオッズで中穴〜万舟狙いの買い目を作り直して保存する（一覧の「オッズを更新」と、
     一覧の note記事・スレッズ投稿の欄で共通）。作れたら True。結果は一覧の表示（manshu_aim_list）にも入れる。"""
     rk = r["race_key"]
+    if r.get("aim_locked_at"):
+        st.caption(f"{manshu.AIM_LABEL}{locked_text(r)}")
+        return bool(r.get("aim_tickets"))
     probs, which = aim_probs(r)
     if not probs:
         st.caption(f"{manshu.AIM_LABEL}: 3連単の確率が無いため作れません。")
@@ -445,10 +489,13 @@ def rebuild_aim(r):
         st.caption("オッズがまだ出ていません（発売前など）。")
         return False
     tickets = manshu.aim_tickets(probs, odds)
-    st.session_state.setdefault("manshu_aim_list", {})[rk] = (tickets, at, which)
     if tickets and save_aim(rk, tickets, "list", at) is False:
-        st.caption("（買い目の保存に失敗しました）")
+        # 保存されなかった買い目は出さない（出すと本番・通知と違う買い目が画面に残る）
+        st.session_state.setdefault("manshu_aim_list", {}).pop(rk, None)
+        load_marks.clear()
+        st.caption(f"（買い目は保存されませんでした。{SAVE_REFUSED}）")
         return False
+    st.session_state.setdefault("manshu_aim_list", {})[rk] = (tickets, at, which)
     return bool(tickets)
 
 

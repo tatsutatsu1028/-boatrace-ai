@@ -16,7 +16,9 @@
   - 保存は手動と同じ save_latest_prediction_snapshot()。collector_name = auto_post（自動固定 auto_random とは別。
     自動固定の1日の件数・結果の自動記録には数えない）。保存するとトリガーが一覧の展示後の欄（post_*）を書く
   - 万舟チャンスのレースは、展示後の3連単の確率とその時点のオッズで中穴〜万舟狙いの買い目を作り直して
-    保存する（予想タブの「展示後に作り直す」と同じ。aim_source = auto）
+    保存する（予想タブの「展示後に作り直す」と同じ。aim_source = auto）。締切前の Discord 通知
+    （notify_due_races）はこの作り直しを待って送り、送った買い目を固定する（aim_locked_at。以後は書き換えない。
+    20261101000000_manshu_aim_lock.sql）。比較の model の行・成績もこの1つの買い目を使う
   - 保存する予想に Claude の予想は使わない（手動のまま）。ただし万舟チャンスのレースだけ、買い目を作り直すのと
     同じタイミングで「モデルのみ／Claudeのみ／両方の予想平均」の3種の比較を記録する（manshu_source.py。
     展示後の予想が保存済みでスキップしたレースも記録する。Claude の費用は1日の上限あり）
@@ -351,13 +353,15 @@ def rebuild_aim(t, final, odds):
         "p_race_key": t["race_key"], "p_tickets": aim, "p_method": manshu.aim_method_name(),
         "p_source": "auto", "p_odds_at": datetime.now(JST).isoformat(timespec="seconds"),
     }).json()
-    return f"作り直して保存（{len(aim)}点）" if ok else "保存されませんでした（締切後・結果記録済み）"
+    return f"作り直して保存（{len(aim)}点）" if ok else "保存されませんでした（通知済みで固定・締切後・結果記録済み）"
 
 
 def compare_sources(ctx, t, final=None, work=None, odds=None):
     """万舟チャンス: 予想3種（モデルのみ／Claudeのみ／両方の予想平均）の比較を記録する（manshu_source.py）。
     final が無い（展示後の予想が保存済みでスキップした）ときは、ここで展示とオッズを読んで予想し直す。
-    失敗しても自動予想は止めない。戻り値は記録用の短い文。"""
+    失敗しても自動予想は止めない。戻り値は記録用の短い文。
+    model の行の買い目は作り直さず、本番の買い目（rebuild_aim の後の manshu_chance_picks.aim_tickets。
+    締切前の通知で固定したもの）を使う（manshu_source.record が読む）。"""
     import manshu_source
 
     try:
