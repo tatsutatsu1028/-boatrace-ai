@@ -533,7 +533,10 @@ def _login_gate():
                 expires_at=datetime.now() + timedelta(hours=24),
                 max_age=AUTH_TTL_SECONDS,
                 secure=True,
-                same_site="strict",
+                # strict だと、Discord の通知やスレッズ等の外部リンクからアプリを開いたとき
+                # （サイトをまたいだ移動）に iPhone の Safari 等で Cookie が読めず、
+                # 毎回PINを聞かれる。Cookie は画面のJSで読むだけなので lax で十分。
+                same_site="lax",
             )
 
             st.session_state["auth_role"] = role

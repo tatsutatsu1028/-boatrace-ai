@@ -1,4 +1,4 @@
-streamlit>=1.37
+streamlit==1.65.0
 pandas==3.0.6
 numpy==2.4.6
 scikit-learn>=1.4
@@ -10,7 +10,7 @@ html5lib>=1.1
 pypdf
 pytesseract
 Pillow
-extra-streamlit-components
+extra-streamlit-components==0.1.81
 lightgbm>=4.0
 scipy
 anthropic>=1.0
