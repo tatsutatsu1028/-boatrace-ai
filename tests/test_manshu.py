@@ -121,6 +121,9 @@ def test_select_and_rows():
     m.attrs = dict(c.attrs)
     rows = pre_picks.manshu_rows(m)
     assert rows[0]["manshu_model_version"] == "manshu-v1" and rows[0]["pick_rank"] == 1
+    # 頭本命: 2番目に高い1着確率（同じなら内側の2号艇）
+    assert rows[0]["head_axis_lane"] == 2 and rows[0]["head_axis_prob"] == 0.1
+    assert rows[0]["favorite_lane"] == 1  # 本命はそのまま
     import json
     json.dumps(rows)  # Supabase に送れる形
     # 確率の列が無い（万舟チャンスが出せなかった）ときは選ばない

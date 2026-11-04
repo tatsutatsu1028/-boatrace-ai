@@ -46,6 +46,28 @@ def test_favorite_morning_and_post():
     assert manshu_view.favorite_text({}) is None
 
 
+def test_head_axis_morning_and_post():
+    # 朝: p_first で2番目に高い艇
+    r = {"favorite_lane": 1, "favorite_prob": 0.4, "p_first": [0.4, 0.15, 0.25, 0.1, 0.05, 0.05]}
+    assert manshu.head_axis_now(r) == (3, 0.25, "朝")
+    assert manshu_view.head_axis_text(r) == "頭本命：3号艇（1着確率25%）"
+    line = manshu_view.favorite_head_line(r)
+    assert line.startswith("本命 1号艇 40%（朝の予想）　")  # 本命の表示はそのまま
+    assert ":violet[**🟣 頭本命：3号艇（1着確率25%）**]" in line
+    # 同じ確率なら内側
+    assert manshu.head_axis_now({"p_first": [0.4, 0.2, 0.2, 0.1, 0.05, 0.05]})[0] == 2
+    # 展示後の3連単確率があればそれで決める
+    r["post_tri_probs"] = _tri({1: 0.30, 3: 0.38, 2: 0.32})
+    lane, p, which = manshu.head_axis_now(r)
+    assert (lane, round(p, 2), which) == (2, 0.32, "展示後")
+    r["post_tri_probs"] = _tri({4: 0.5, 2: 0.25, 5: 0.25})
+    assert manshu.head_axis_now(r)[0] == 2
+    # p_first が無い行は保存した head_axis_lane
+    assert manshu.head_axis_now({"head_axis_lane": 4, "head_axis_prob": 0.2}) == (4, 0.2, "朝")
+    assert manshu_view.head_axis_text({}) is None
+    assert manshu_view.favorite_head_line({}) is None
+
+
 def _odds():
     # 1号艇1着以外は全部 50倍（中穴）か 150倍（万舟）
     out = {}

@@ -436,6 +436,34 @@ def favorite_now(r):
     return lane, (float(p) if p is not None else None), "朝"
 
 
+def second_lane(first):
+    """1着確率 {艇番: 確率} から、1着確率が2番目に高い艇 (艇番, 確率)。同じ確率なら内側を上にする。2艇未満なら None。"""
+    ranked = sorted(((int(k), float(v)) for k, v in (first or {}).items() if v is not None), key=lambda x: (-x[1], x[0]))
+    return ranked[1] if len(ranked) >= 2 else None
+
+
+def head_axis_from_p_first(p_first):
+    """1〜6号艇の1着確率のリスト（展示前の p_first）から頭本命 (艇番, 確率)。無ければ None。"""
+    if not p_first:
+        return None
+    return second_lane({i + 1: p for i, p in enumerate(p_first)})
+
+
+def head_axis_now(r):
+    """印のレースの今の頭本命（万舟狙い用の1着軸。1着確率が2番目に高い艇） (艇番, 1着確率, "展示後"/"朝")。
+    本命（favorite_now）と同じく、展示後に予想していれば展示後の確率（post_tri_probs）、無ければ朝の p_first。"""
+    post = second_lane(first_probs(r.get("post_tri_probs")))
+    if post:
+        return post[0], post[1], "展示後"
+    pre = head_axis_from_p_first(r.get("p_first"))
+    if pre:
+        return pre[0], pre[1], "朝"
+    if r.get("head_axis_lane") is not None:
+        p = r.get("head_axis_prob")
+        return int(r["head_axis_lane"]), (float(p) if p is not None else None), "朝"
+    return None
+
+
 def compare_summary(rows):
     """確定オッズで作った朝版と展示後版の買い目の成績（manshu_aim_compare の行）。
     同じレースで比べるため、両方の買い目があるレースだけを数える。"""
