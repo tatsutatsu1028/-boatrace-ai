@@ -307,6 +307,8 @@ def select_manshu(cands, n=None):
 
 
 def manshu_rows(marks):
+    import manshu
+
     cols = ["race_key", "race_date", "jcd", "venue", "race_no", "deadline", "pick_rank", "manshu_prob",
             "model_version", "favorite_lane", "favorite_prob", "p_first", "tickets", "longshot_tickets"]
     cols += [c for c in ("tri_probs",) if c in marks.columns]
@@ -314,6 +316,10 @@ def manshu_rows(marks):
     for r in marks[cols].to_dict("records"):
         r["manshu_model_version"] = marks.attrs.get("manshu_version", "")
         r["manshu_prob"] = round(float(r["manshu_prob"]), 4)
+        # 頭本命（万舟狙い用の1着軸。1着確率が2番目に高い艇・同じなら内側）。表示と記録だけ（買い目には使わない）
+        head = manshu.head_axis_from_p_first(r.get("p_first"))
+        r["head_axis_lane"] = head[0] if head else None
+        r["head_axis_prob"] = round(head[1], 6) if head else None
         out.append(r)
     return out
 
@@ -397,10 +403,10 @@ def save_manshu(date, cands):
                 add_morning_aim(rows)
                 try:
                     _sb("POST", "manshu_chance_picks", json=rows, prefer="return=minimal")
-                except Exception:  # noqa: BLE001  新しい列（tri_probs・aim_*）がまだ無いデータベースでは無しで保存する
+                except Exception:  # noqa: BLE001  新しい列（tri_probs・aim_*・head_axis_*）がまだ無いデータベースでは無しで保存する
                     log(f"{date}: 万舟チャンスを買い目なしで保存（新しい列がまだ無いデータベース）")
                     _sb("POST", "manshu_chance_picks", json=[{k: v for k, v in r.items()
-                                                              if k != "tri_probs" and not k.startswith("aim_")}
+                                                              if k != "tri_probs" and not k.startswith(("aim_", "head_axis_"))}
                                                              for r in rows], prefer="return=minimal")
                 _sb("POST", "rpc/manshu_picks_sync_post", json={"p_race_date": iso})
         except Exception as e:  # noqa: BLE001  厳選10の保存は続ける

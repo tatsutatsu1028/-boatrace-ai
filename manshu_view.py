@@ -6,6 +6,7 @@
   - 予想タブの日付の下: その日の印のレースの一覧（このレースを開く）。管理者には結果の成績も出す
   - 展示前厳選10: 万舟チャンスにも入っているレースに印
   - 一覧・予想画面の本命: 「本命 1号艇 43%」。展示後に予想していれば展示後の1着確率、無ければ朝の1着確率
+    その横に頭本命（万舟狙い用の1着軸。1着確率が2番目に高い艇・同じなら内側）を紫で「🟣 頭本命：3号艇（1着確率22%）」
   - 予想画面: 印のレースなら注意書き（本命が来にくい傾向）。管理者には参考として穴寄りの買い目
     （1号艇を1着から外した上位10点・資金配分しない）
 
@@ -330,6 +331,28 @@ def favorite_text(r):
     return text
 
 
+HEAD_AXIS_COLOR = "#7c3aed"  # 頭本命は本命と見分けられるよう紫で出す
+
+
+def head_axis_text(r):
+    """頭本命（万舟狙い用の1着軸。1着確率が2番目に高い艇）の文（例: 頭本命：3号艇（1着確率22%））。
+    本命と同じく、展示後に予想していれば展示後の確率、無ければ朝の確率。表示だけで買い目には使わない。"""
+    head = manshu.head_axis_now(r or {})
+    if not head:
+        return None
+    lane, p, _which = head
+    return f"頭本命：{lane}号艇" + (f"（1着確率{p:.0%}）" if p is not None else "")
+
+
+def favorite_head_line(r):
+    """一覧の本命の行: 本命の文（favorite_text・変えない）の横に、紫の「🟣 頭本命：…」を並べる（markdown）。"""
+    fav = favorite_text(r)
+    head = head_axis_text(r)
+    if head:
+        head = f":violet[**🟣 {head}**]"
+    return "　".join(x for x in (fav, head) if x) or None
+
+
 def render_race_note(mark, final=None, model_info=None, is_admin=False):
     """予想画面: 印のレースの注意書き（管理者には render_aim_compare で万舟狙いの買い目を並べる）。"""
     if not mark:
@@ -341,9 +364,13 @@ def render_race_note(mark, final=None, model_info=None, is_admin=False):
         text += f" → 展示後 {float(post['prob']):.0%}"
     text += f"（全レースの平均 約{manshu.BASE_RATE:.0%}）"
     # 今表示している予想の展示後の3連単確率があれば、それで本命を出す（一覧への反映を待たない）
-    fav = favorite_text({**mark, "post_tri_probs": post.get("tri") or mark.get("post_tri_probs")})
+    now = {**mark, "post_tri_probs": post.get("tri") or mark.get("post_tri_probs")}
+    fav = favorite_text(now)
     if fav:
         text += f"<br>{fav}"
+    head = head_axis_text(now)
+    if head:
+        text += (f'{"　" if fav else "<br>"}<span style="color:{HEAD_AXIS_COLOR};">🟣 {head}</span>')
     st.markdown(
         f'<div style="border:2px solid #ea580c;border-radius:10px;padding:8px 12px;margin:4px 0 6px 0;'
         f'background:rgba(234,88,12,0.08);font-weight:700;">{text}</div>',
@@ -364,7 +391,7 @@ def _render_mark(d, r):
         if r.get("post_manshu_prob") is not None:
             line += f" → 展示後 **{float(r['post_manshu_prob']):.0%}**"
         st.markdown(line)
-        fav = favorite_text(r)
+        fav = favorite_head_line(r)
         if fav:
             st.markdown(fav)
         status = r.get("result_status")
@@ -534,7 +561,7 @@ def _spec():
         overall=_render_summary,
         other_marks_note="🌅 展示前厳選10（当たりやすいレース）にも入っています。",
         flag_note="（万舟チャンスからは外していません）",
-        favorite_line=favorite_text,
+        favorite_line=favorite_head_line,
         memo_block=_memo_block,
     )
 
