@@ -134,6 +134,33 @@ def test_variants_orders_and_mix():
     assert manshu_compare.done({**old, "variants": {"post": full}})
     # E〜I が無い（A〜D だけの）行も作り直す
     assert not manshu_compare.done({**old, "variants": {"post": {k: v for k, v in full.items() if k < "E"}}})
+    # J・K が無い（A〜I だけの）行も作り直す
+    assert not manshu_compare.done({**old, "variants": {"post": {k: v for k, v in full.items() if k not in "JK"}}})
+
+
+def test_lane1_variants():
+    odds = _odds()
+    # 1号艇1着の組: 1-2-3 は 40倍、1-2-4 は 35倍、1-2-5 は 150倍、1-2-6 は 250倍、1-3-2 は 400倍、ほかは 5倍
+    odds.update({"1-2-3": 40.0, "1-2-4": 35.0, "1-2-5": 150.0, "1-2-6": 250.0, "1-3-2": 400.0})
+    probs = {k: (0.03 if k.startswith("1") else 0.004) for k in odds}
+    probs.update({"1-2-3": 0.05, "1-2-4": 0.04, "1-2-5": 0.035, "1-2-6": 0.02, "1-3-2": 0.06})
+    # J: 30倍以上の1号艇1着の組のうち確率上位2点（1-3-2・1-2-3）だけ残す
+    kept = manshu.lane1_kept(probs, odds, manshu.LANE1_VARIANTS["J"])
+    assert {k for k in kept if k[0] == "1"} == {"1-3-2", "1-2-3"}
+    assert all(k in kept for k in probs if k[0] != "1")
+    # K: 100〜299倍の1号艇1着の組だけ残す
+    kept = manshu.lane1_kept(probs, odds, manshu.LANE1_VARIANTS["K"])
+    assert {k for k in kept if k[0] == "1"} == {"1-2-5", "1-2-6"}
+    row = manshu_compare.compare_row({"race_key": "r", "race_date": "2026-10-20", "tri_probs": probs}, odds,
+                                     None, [("1-2-5", 15000)])
+    v, t = row["variants"]["pre"], row["variant_tickets"]["pre"]
+    for name in "JK":
+        assert len(t[name]) == 10 and v[name]["stake"] == 1000
+        assert [x["tier"] for x in t[name]].count("万舟") == 5
+    assert {x["combo"] for x in t["J"] if x["combo"][0] == "1"} == {"1-3-2", "1-2-3"}
+    assert {x["combo"] for x in t["K"] if x["combo"][0] == "1"} == {"1-2-5", "1-2-6"}
+    assert v["K"]["hit"] is True and v["K"]["return"] == 15000 and v["J"]["hit"] is False
+    assert v["A"]["hit"] is False  # 今の作り方は1号艇1着を買わない
 
 
 def _vside(p1, hit_a, prob=0.1, ret=15000, top2_hit=False):
@@ -166,7 +193,7 @@ def test_variant_summary_same_races_and_skip():
     assert manshu.variant_summary(rows[2:]) == []
     # A〜D だけの古い行は、作り直すまで数えない
     old = {"race_date": "2026-10-20", "is_manshu": True,
-           "variants": {s: {k: v for k, v in _vside(0.2, True).items() if k not in "EFGHI"} for s in ("pre", "post")}}
+           "variants": {s: {k: v for k, v in _vside(0.2, True).items() if k not in "EFGHIJK"} for s in ("pre", "post")}}
     assert manshu.variant_summary([old]) == []
 
 

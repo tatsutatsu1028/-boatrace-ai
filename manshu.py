@@ -489,10 +489,36 @@ def compare_summary(rows):
 VARIANT_NAMES = {"A": "A 確率順 中穴5＋万舟5（今）", "B": "B 期待値順 中穴5＋万舟5",
                  "C": "C 確率順 中穴3＋万舟7", "D": "D 期待値順 中穴3＋万舟7",
                  "E": "E 1着2艇 確率順10点", "F": "F 1着2艇 確率順15点", "G": "G 1着2艇 確率順20点",
-                 "H": "H 1着2艇 30倍以上 確率順10点", "I": "I 1着2艇 30倍以上 確率順20点"}
+                 "H": "H 1着2艇 30倍以上 確率順10点", "I": "I 1着2艇 30倍以上 確率順20点",
+                 "J": "J 1号艇1着は30倍以上の上位2点まで 中穴5＋万舟5", "K": "K 1号艇1着は100〜299倍だけ 中穴5＋万舟5"}
 VARIANT_SKIP_P1 = 0.5       # 見送りあり: その版の1号艇の1着確率がこれ以上のレースは買わない
 # 1着を絞る作り方 {名前: (点数, オッズの下限 or None)}。1着は1号艇以外で1着確率が高い上位2艇（top2_lanes）
 TOP2_VARIANTS = {"E": (10, None), "F": (15, None), "G": (20, None), "H": (10, AIM_MID_MIN), "I": (20, AIM_MID_MIN)}
+# 1号艇の1着を一律には外さない作り方（2026-11 追加。検証 2026-07-07〜10-14・確定オッズでは今の作り方と差が
+# 偶然の範囲だったので、これからのレースで並べて記録する）。どれも今と同じ中穴5点＋万舟5点・確率順（各100円）で、
+# 1号艇1着の組の残し方だけが違う
+#   J: 1号艇1着の組は、オッズ30倍以上の中で3連単の確率が高い上位 n 点だけ残す（{"cap": n}）
+#   K: 1号艇1着の組は、オッズが [下限, 上限) の組だけ残す（{"band": (下限, 上限)}）。
+#      検証では1号艇1着・100〜299倍の組がオッズの示す確率の約1.5倍来ていた
+LANE1_VARIANTS = {"J": {"cap": 2}, "K": {"band": (AIM_HIGH_MIN, 300.0)}}
+
+
+def lane1_kept(probs, odds, rule):
+    """3連単確率 {組番: 確率} のうち、rule（LANE1_VARIANTS の値）で残す組だけの dict（1号艇1着以外は全部残す）。"""
+    def o(c):
+        try:
+            return float((odds or {}).get(c))
+        except (TypeError, ValueError):
+            return float("nan")
+
+    lane1 = {c: p for c, p in (probs or {}).items() if str(c)[:1] == "1"}
+    if "cap" in rule:
+        cand = sorted((c for c in lane1 if o(c) >= AIM_MID_MIN), key=lambda c: (-float(lane1[c]), c))
+        keep = set(cand[:int(rule["cap"])])
+    else:
+        lo, hi = rule["band"]
+        keep = {c for c in lane1 if lo <= o(c) < hi}
+    return {c: p for c, p in (probs or {}).items() if str(c)[:1] != "1" or c in keep}
 
 
 def top2_lanes(probs, exclude=("1",)):
