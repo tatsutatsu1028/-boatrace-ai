@@ -244,7 +244,10 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 記事表示ページには、タイトル・無料部分・有料部分（【有料ライン】の行で分ける。段落が分かれたまま貼れるよう HTML でもコピー）・
   ハッシュタグのコピー、見出し画像（自動下書きを作るときに手動の記事と同じ規則で選んで記録）の保存、公開した note 記事の URL の登録がある。
   URL を登録すると status = PUBLISHED・本日N本目の番号が付き、確定済みの記事・夜のまとめ（的中判定）に入る
-  （`note_view_register`。`supabase/migrations/20261107020000_note_view_publish.sql`）
+  （`note_view_register`。記事ページは `note_view_articles_v2` で読む。`supabase/migrations/20261107020000_note_view_publish.sql`）
+- 1日の締めの結果報告記事: `?view=note&report=YYYY-MM-DD&key=…`（`note_report.py`）。設定タブの「📊 本日のまとめ投稿」と同じ
+  note 用の3パターン（確定済み・公開済みの記事を、記事に載せた買い目で判定）。毎日 JST 22:40 に、その日に確定済みの記事が
+  あれば Discord（厳選10と同じチャンネル）に URL を送る（pg_cron `note-report-notify` → `note_report_notify`）
 - データベース: `supabase/migrations/20261107000000_note_auto_draft.sql`
 ### 一覧からの note記事・スレッズ投稿（管理者だけ）
 「💥 万舟チャンス」「🌅 展示前厳選10」の一覧の各レースに「📝 note記事」「🧵 スレッズ投稿」のボタン（`publish_panel.py`）。

@@ -4,6 +4,7 @@ note 記事の表示ページ（PIN ログインなし）。app.py の一番最�
   ?view=note&race_key=YYYYMMDD_JJ_R&key=…  そのレースの記事（タイトル・本文・価格・締切・生成時刻）
   ?view=note&key=…                         今日（日本時間）の自動下書きを締切順に一覧（各レースのページへのリンク）
   ?view=note&date=YYYY-MM-DD&key=…         その日の一覧
+  ?view=note&report=YYYY-MM-DD&key=…       その日の結果報告記事（1日の締め。note_report.py）
 
 キー（秘密）は Supabase の vault（note_view_key）にだけあり、照合もデータベースの note_view_articles が行う。
 アプリ・リポジトリにキーは無い。キーが無い・違うときは何も表示しない（エラーも出さない）。
@@ -51,7 +52,7 @@ def fetch(key, race_key=None, date_iso=None):
     """note_view_articles を呼ぶ。キーが違えば []。"""
     if not key:
         return []
-    return _rpc("note_view_articles", {"p_key": key, "p_race_key": race_key or None, "p_date": date_iso or None}) or []
+    return _rpc("note_view_articles_v2", {"p_key": key, "p_race_key": race_key or None, "p_date": date_iso or None}) or []
 
 
 def _jst(ts):
@@ -197,6 +198,7 @@ def _register(row, key):
 
 
 def _list(rows, key, date_iso):
+    st.markdown(f"[📊 この日の結果報告記事](?view=note&report={date_iso}&key={key})")
     st.markdown(f"**note 自動下書き（{date_iso}・締切順）**")
     if not rows:
         st.text("自動下書きはまだありません。")
@@ -207,6 +209,44 @@ def _list(rows, key, date_iso):
                     f"({href})（生成 {_jst(r.get('created_at'))[11:16]}・{_status_text(r)}）")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _report(date_iso):
+    """結果報告記事（5分だけ覚えておく）。"""
+    import note_report
+    from result_tracker import supabase_config, supabase_service_config
+
+    url, sb_key = supabase_service_config()
+    if not url or not sb_key:
+        url, sb_key = supabase_config()
+    return note_report.build(url, sb_key, date_iso)
+
+
+def _report_page(date_iso):
+    """1日の締めの結果報告記事。①をそのまま使い、②③は折りたたみ。"""
+    rep = _report(date_iso)
+    st.markdown(f"**📊 結果報告記事（{date_iso}）**")
+    n = len(rep["records"])
+    st.text(f"対象: 確定済み（公開済み）の note 記事 {n}本・結果確定 {rep['settled']}本"
+            + (f"・結果待ち {len(rep['pending'])}本（"
+               + "、".join(f"{r.get('venue')}{r.get('race_no')}R" for r in rep["pending"]) + "）"
+               if rep["pending"] else ""))
+    if rep["pending"]:
+        st.caption("結果待ちのレースは「結果待ち」として載っています。全レースの結果が出てから開き直すと（5分ごとに更新）確定した結果になります。")
+    st.caption("note での手順: タイトルと本文を貼って、無料で公開する")
+    variants = rep["variants"] or []
+    for i, v in enumerate(variants):
+        if i == 0:
+            st.markdown(f"{v['label']}（おすすめ）")
+            st.markdown("タイトル")
+            _copy_block("タイトル", v["title"])
+            st.markdown("本文")
+            _copy_block("本文", v["body"], rich=True)
+        else:
+            with st.expander(f"別のパターン: {v['label']}", expanded=False):
+                _copy_block("タイトル", v["title"])
+                _copy_block("本文", v["body"], rich=True)
+
+
 def render():
     """?view=note のページ。キーが合わなければ何も出さない。"""
     try:
@@ -214,7 +254,15 @@ def render():
     except Exception:  # noqa: BLE001
         pass
     key, race_key, date_iso = _param("key"), _param("race_key"), _param("date")
+    report = _param("report")
     if not key or (race_key and not _RACE_KEY.match(race_key)) or (date_iso and not _DATE.match(date_iso)):
+        return
+    if report:
+        if _DATE.match(report) and _key_ok(key):
+            try:
+                _report_page(report)
+            except Exception as e:  # noqa: BLE001
+                st.text(f"結果報告記事を作れませんでした（{type(e).__name__}）。")
         return
     try:
         rows = fetch(key, race_key=race_key or None, date_iso=date_iso or None)

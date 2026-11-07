@@ -184,3 +184,24 @@ def test_choose_header_rules():
     assert note_auto.choose_header({"sources": ["pre"]}, rough)[0] == "aresuimen"
     assert note_auto.choose_header({"sources": ["pre"]})[0] == "gensen"
     assert note_auto.choose_header({"sources": []})[0] == "shobu"
+
+
+def test_report_builds_note_variants(monkeypatch):
+    """1日の締めの結果報告記事: 確定済みの記事を記事の買い目で判定し、3パターンの文面を作る。"""
+    import official_fetcher
+    import threads_poster as tp
+    import note_report
+
+    recs = [{"section": "note", "race_key": "20261107_04_5", "venue": "平和島", "race_no": 5, "sequence_no": 1,
+             "publication_type": "PAID", "ticket_source": "model", "tickets": ["1-2-3", "1-2-4"], "legacy": {},
+             "trifecta_actual": ""},
+            {"section": "note", "race_key": "20261107_04_9", "venue": "平和島", "race_no": 9, "sequence_no": 2,
+             "publication_type": "PAID", "ticket_source": "model", "tickets": ["2-1-3"], "legacy": {},
+             "trifecta_actual": ""}]
+    monkeypatch.setattr(tp, "fetch_daily_publication_results", lambda u, k, d: [tp.judge_record(dict(r)) for r in recs])
+    monkeypatch.setattr(official_fetcher, "fetch_venue_result_list", lambda d8, code: pd.DataFrame(
+        [{"race_no": 5, "trifecta": "1-2-3", "payout_per_100": 1230}]))
+    rep = note_report.build("u", "k", "2026-11-07")
+    assert rep["settled"] == 1 and [r["race_no"] for r in rep["pending"]] == [9]
+    assert len(rep["variants"]) == 3 and all(v["title"] and v["body"] for v in rep["variants"])
+    assert "平和島" in rep["variants"][0]["body"]
