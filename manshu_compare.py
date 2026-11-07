@@ -14,7 +14,9 @@
 を作る。あわせて1着を絞る作り方（1着 = 1号艇以外で1着確率が高い上位2艇。その2艇が1着の組の中から
 3連単の確率順・各100円）として
   E: 10点 / F: 15点 / G: 20点（オッズの条件なし） / H: 10点 / I: 20点（オッズ30倍以上だけ）
-を作る。どれも variants（成績・1号艇の1着確率・1着に選んだ2艇と、そのどちらかが1着になったか）と
+を作る。1号艇の1着を一律には外さない作り方（中穴5点＋万舟5点・確率順。manshu.LANE1_VARIANTS）として
+  J: 1号艇1着の組はオッズ30倍以上の確率上位2点まで / K: 1号艇1着の組は100〜299倍だけ
+も作る。どれも variants（成績・1号艇の1着確率・1着に選んだ2艇と、そのどちらかが1着になったか）と
 variant_tickets（買い目）に残す。
 「1号艇の1着確率が50%以上なら見送る」版は、variants の p1（その版の確率で見た1号艇の1着確率）で集計時に絞る
 （manshu.variant_summary）。
@@ -47,6 +49,7 @@ MISSING_POST = "事後予想の3連単の確率がまだありません"
 # 比べる作り方 {名前: (並べ方, 中穴の点数, 万舟の点数)}。どれも1号艇1着を外す・30倍以上・計10点・各100円
 VARIANTS = {"A": ("prob", 5, 5), "B": ("ev", 5, 5), "C": ("prob", 3, 7), "D": ("ev", 3, 7)}
 # 1着を絞る作り方 E〜I は manshu.TOP2_VARIANTS
+# 1号艇の1着を一律には外さない作り方 J・K は manshu.LANE1_VARIANTS（中穴5点＋万舟5点・確率順）
 
 
 def log(*a):
@@ -100,6 +103,9 @@ def variant_side(probs, odds, pays, missing):
                                         exclude=("1",))
     for name, (n, odds_min) in manshu.TOP2_VARIANTS.items():
         made[name] = manshu.top2_tickets(probs, odds, n, odds_min, lanes=top2)
+    for name, rule in manshu.LANE1_VARIANTS.items():
+        made[name] = manshu.aim_tickets(manshu.lane1_kept(probs, odds, rule), odds, method="MIX",
+                                        mix={"中穴": 5, "万舟": 5}, order="prob", exclude=())
     tickets = {}
     for name, t in made.items():
         hit, stake, ret = ticket_result(t, pays)
@@ -150,8 +156,8 @@ def done(row, variants=True):
     if ok and variants:
         post = (row.get("variants") or {}).get("post") or {}
         ok = bool(post) and post.get("error") != MISSING_POST
-        if ok and not post.get("error"):  # 後から足した作り方（E〜I）が無ければ作り直す
-            ok = all(k in post for k in [*VARIANTS, *manshu.TOP2_VARIANTS, "top2_hit"])
+        if ok and not post.get("error"):  # 後から足した作り方（E〜K）が無ければ作り直す
+            ok = all(k in post for k in [*VARIANTS, *manshu.TOP2_VARIANTS, *manshu.LANE1_VARIANTS, "top2_hit"])
     return ok
 
 

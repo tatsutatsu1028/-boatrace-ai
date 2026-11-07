@@ -784,7 +784,7 @@ def _render_compare(today, key="manshu_variant_period"):
 
 
 def _render_variants(rows, today, key="manshu_variant_period"):
-    """作り方ごと（A〜D・見送りあり/なし）の成績を、朝版・展示後版で並べる（検証だけ）。"""
+    """作り方ごと（A〜K・見送りあり/なし）の成績を、朝版・展示後版で並べる（検証だけ）。"""
     st.markdown(f"**{manshu.AIM_LABEL}: 作り方の比較（確定オッズ・同じレースで比較・検証用）**")
     period = st.radio("期間", ("全期間", "直近30日", "直近7日"), horizontal=True, key=key)
     sub = in_period(rows, {"直近7日": 7, "直近30日": 30}.get(period), today)
@@ -801,6 +801,8 @@ def _render_variants(rows, today, key="manshu_variant_period"):
                "片方の組が足りなければもう片方で埋めます。"
                "E〜I: 1着を「1号艇以外で1着確率が高い上位2艇」に固定し、その2艇が1着の組から確率順に選ぶ（各100円。"
                "E・F・G はオッズの条件なし、H・I は確定オッズ30倍以上だけ。足りなければ点数が減ります）。"
+               "J・K: A と同じ（中穴5点＋万舟5点・確率順）で、1号艇の1着を一律には外さない。"
+               "J は1号艇1着の組を30倍以上の確率上位2点まで、K は1号艇1着の組を100〜299倍だけ残します。"
                "朝版・展示後版の両方が作れたレースだけを数えています。"
                f"見送りあり = その版の確率で1号艇の1着確率が{manshu.VARIANT_SKIP_P1:.0%}以上のレースは買わない"
                "（レース数は買ったレースの数）。確率の合計 = 買い目の確率の合計（当たるはずの本数。的中数と比べる）。"
