@@ -530,7 +530,10 @@ def handle_window(ctx, t, prev):
         log(f"締切 {t.get('deadline')}: 予想・保存でエラー {type(e).__name__}: {str(e)[:200]}")
         return write_log(t, prev, "waiting", f"予想・保存でエラー（{type(e).__name__}）", tried=True)["status"]
     if status == "auto_fixed":
-        return write_log(t, prev, "already", "自動固定で保存済み", tried=True, snapshot_status=status)["status"]
+        # 予想の直前に自動固定が保存していた: 保存された（自動固定の）予想で記事を作る
+        note = make_note_from_saved(ctx, t)
+        return write_log(t, prev, "already", "自動固定で保存済み", tried=True, snapshot_status=status,
+                         **note_extra(note))["status"]
     if status == "closed":
         return write_log(t, prev, "skipped", "締切後のため保存されませんでした", tried=True,
                          snapshot_status=status)["status"]

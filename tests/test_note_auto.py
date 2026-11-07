@@ -148,3 +148,20 @@ def test_make_note_off_returns_none():
 
     assert ap.make_note(Ctx(), T, _final(), TICKETS) is None
     assert ap.make_note_from_saved(Ctx(), T) is None
+
+
+def test_note_made_when_auto_fix_saved_first(monkeypatch):
+    """予想の直前に自動固定が保存していた（save_snapshot が auto_fixed）ときも、保存された予想で記事を作る。"""
+    written, made = [], []
+    race = pd.DataFrame({"exhibition_time": [6.8] * 6})
+    monkeypatch.setattr(ap, "snapshot_meta", lambda rk: None)
+    monkeypatch.setattr(ap, "predict_race", lambda ctx, t, race, odds: ({"final": _final(), "tickets": TICKETS}, "{}", "h"))
+    monkeypatch.setattr(ap, "save_snapshot", lambda t, pj, ph: "auto_fixed")
+    monkeypatch.setattr(ap, "make_note_from_saved", lambda ctx, t: made.append(t["race_key"]) or {"status": "ok"})
+    monkeypatch.setattr(ap, "write_log", lambda t, prev, status, reason=None, **k: written.append((status, k)) or
+                        {"status": status})
+    import official_fetcher
+    monkeypatch.setattr(official_fetcher, "fetch_official_race", lambda *a: race)
+    monkeypatch.setattr(official_fetcher, "fetch_odds3t", lambda *a: None)
+    assert ap.handle_window(object(), T, None) == "already"
+    assert made == [T["race_key"]] and written[-1][1]["note"] == {"status": "ok"}
