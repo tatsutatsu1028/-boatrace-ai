@@ -235,7 +235,9 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
   予想タブで「note記事用に確定」を押すとその行が手動の記事（DRAFT・正の番号）に置き換わる。手動の記事があるレースは作らない
 - 結果は `auto_post_log.note_status`（ok / template = Claude 失敗で買い目だけの型 / manual / failed）と `note_seconds`（かかった秒数）
 - 通知は ON のとき記事ができるのを待つ（展示後の予想の保存から最大3分・締切7分前まで）。通知に記事表示ページの URL
-  （キー付き）か「記事生成失敗」を載せる
+  （キー付き）か「記事生成失敗」を載せる。展示後の予想が無いまま締切7分前に送った通知は「記事はまだありません（展示後の予想待ち）」。
+  記事を載せられなかった通知は、後で記事ができたら締切前に同じチャンネルへ追いかけ通知を1回送る
+  （`race_notifications.note_sent`・`note_followup_at`。`supabase/migrations/20261107010000_note_auto_followup.sql`）
 - 記事表示ページ: `アプリのURL/?view=note&race_key=YYYYMMDD_JJ_R&key=…`（1レース）、`?view=note&key=…`（今日の自動下書きの一覧）。
   PIN ログインなし。キーは Supabase の vault（`note_view_key`。マイグレーションが乱数で作る）にだけあり、照合はデータベースの
   `note_view_articles` が行う。キーが無い・違うときは何も表示しない。アプリの URL は設定タブで登録する（`app_settings.note_view_base_url`）
