@@ -1440,6 +1440,13 @@ with tab3:
 
             st.divider()
             threads_auto_view.render_settings(_today_jst())
+            st.divider()
+            try:
+                import note_auto_view
+
+                note_auto_view.render_settings(_today_jst())
+            except Exception as e:
+                st.caption(f"note 自動下書きの設定を表示できませんでした: {type(e).__name__}")
 
             # -------------------------------------------------
             # 1日の発信まとめ

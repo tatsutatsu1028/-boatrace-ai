@@ -222,6 +222,24 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 予想カード画像（会場・レース・締切、本線と抑え、1着確率のグラフ、スタート〜1マークの展開図）を作って保存できる
   （`pick_card.py`。買い目・1着確率は記事と同じ予想。日本語フォントは `packages.txt`）
 
+
+### note 自動下書きと記事表示ページ（PIN なし）
+締切前の Discord 通知（`notify_due_races`）のレース（展示前厳選10・万舟チャンス）で、note の有料記事の下書きを自動で作る
+（`note_auto.py`。設定タブの「📝 note 自動下書き」で ON にしたときだけ。初期値 OFF）。
+
+- 作るのは展示後の自動予想（`auto_post_predict.py`・GitHub Actions）。展示後の予想を保存して（万舟チャンスは買い目を作り直して）
+  すぐ、時間のかかる予想3種の比較より先に作る。展示後の予想が保存済み（手動・自動固定）のレースは保存された予想で作る
+- 本文は手動の記事と同じ `note_article`（Claude Haiku・フレンドリーな文体・買い目と予想展開）。無料部分と有料部分の境目に
+  「【有料ライン】」の行を入れる。買い目は設定の既定（モデルのみ予想〔初期値〕／両方の予想平均）
+- 保存先は `note_publications`（`status = AUTO_DRAFT`・`sequence_no` は負の番号）。確定済みの記事・本日N本目・夜のまとめには数えない。
+  予想タブで「note記事用に確定」を押すとその行が手動の記事（DRAFT・正の番号）に置き換わる。手動の記事があるレースは作らない
+- 結果は `auto_post_log.note_status`（ok / template = Claude 失敗で買い目だけの型 / manual / failed）と `note_seconds`（かかった秒数）
+- 通知は ON のとき記事ができるのを待つ（展示後の予想の保存から最大3分・締切7分前まで）。通知に記事表示ページの URL
+  （キー付き）か「記事生成失敗」を載せる
+- 記事表示ページ: `アプリのURL/?view=note&race_key=YYYYMMDD_JJ_R&key=…`（1レース）、`?view=note&key=…`（今日の自動下書きの一覧）。
+  PIN ログインなし。キーは Supabase の vault（`note_view_key`。マイグレーションが乱数で作る）にだけあり、照合はデータベースの
+  `note_view_articles` が行う。キーが無い・違うときは何も表示しない。アプリの URL は設定タブで登録する（`app_settings.note_view_base_url`）
+- データベース: `supabase/migrations/20261107000000_note_auto_draft.sql`
 ### 一覧からの note記事・スレッズ投稿（管理者だけ）
 「💥 万舟チャンス」「🌅 展示前厳選10」の一覧の各レースに「📝 note記事」「🧵 スレッズ投稿」のボタン（`publish_panel.py`）。
 押すとそのレースの欄の中に、予想タブと同じ欄（`note_view.render`・`threads_view.render`）が開く（開くまでは読み込まない）。

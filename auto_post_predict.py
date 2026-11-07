@@ -26,6 +26,10 @@
     （manshu_memos）があれば作り、無ければ「記録なし」。記録の後・締切前にメモが保存・変更されたら作り直す（メモの保存が task=memo を起動。
     取りこぼしは task=run が毎回確かめる）。メモは比較にだけ使い、保存する予想・買い目・ログには入れない。
     作ったとき・作り直したときは、オーナー専用の Discord（DISCORD_MEMO_WEBHOOK_URL）にだけメモ入り予想を通知する（memo_notify.py）
+  - note の自動下書き（note_auto.py。アプリの設定 note_auto_enabled が ON のときだけ）: 展示後の予想を保存して
+    （万舟チャンスは買い目を作り直して）すぐ、予想3種の比較より先に記事を作って note_publications（status = AUTO_DRAFT）に
+    保存し、結果を auto_post_log.note_status に残す。締切前の通知はこれを待って、記事表示ページの URL か「記事生成失敗」を載せる。
+    展示後の予想が保存済みでスキップしたレースは、保存された予想で作る
 
 ログは誰でも見られるので、会場名・確率・買い目は出さない（件数・締切時刻・理由・合否だけ）。
 レースごとの記録は Supabase の auto_post_log にある。
@@ -214,6 +218,11 @@ def write_log(t, prev, status, reason=None, tried=False, **extra):
         "aim_status": extra.get("aim_status", (prev or {}).get("aim_status")),
         "updated_at": now,
     }
+    # note の自動下書き（note_auto.py）。書いたときだけ送る（前の値はデータベースに残る）
+    if "note" in extra:
+        n = extra["note"] or {}
+        row.update({"note_status": n.get("status"), "note_reason": (n.get("reason") or None),
+                    "note_seconds": n.get("seconds"), "note_at": now})
     _sb("POST", f"{LOG_TABLE}?on_conflict=race_key", prefer="resolution=merge-duplicates,return=minimal", json=row)
     return row
 
@@ -454,6 +463,42 @@ def sync_memos(ctx, targets, race_key=None):
     return ctx
 
 
+def make_note(ctx, t, final, tickets, work=None, odds=None):
+    """note の自動下書きを作って保存する（note_auto.py）。OFF なら None。戻り値は note_auto.generate の結果。"""
+    import note_auto
+
+    if not note_auto.enabled(getattr(ctx, "settings", None)):
+        return None
+    note = note_auto.generate_from_env(_sb, t, final, tickets, work=work, odds=odds, settings=ctx.settings,
+                                       runtime=ctx.runtime)
+    log(f"締切 {t.get('deadline')}: note自動下書き {note['status']}（{note.get('seconds')}秒）"
+        + (f" {note['reason']}" if note.get("status") == "failed" and note.get("reason") else ""))
+    return note
+
+
+def make_note_from_saved(ctx, t):
+    """展示後の予想が保存済み（手動・自動固定）でスキップしたレース: 保存された予想で記事を作る。"""
+    import note_auto
+
+    if not note_auto.enabled(getattr(ctx, "settings", None)):
+        return None
+    try:
+        import race_posts
+
+        rows = _sb("GET", f"prediction_snapshots?race_key=eq.{t['race_key']}&select=*&limit=1").json() or []
+        final, tickets, work = race_posts.frames_from_snapshot(rows[0] if rows else None)
+        if final is None:
+            raise RuntimeError("保存された予想を読めませんでした")
+    except Exception as e:  # noqa: BLE001
+        return {"status": "failed", "reason": f"{type(e).__name__}: {str(e)[:150]}", "seconds": 0.0}
+    return make_note(ctx, t, final, tickets, work)
+
+
+def note_extra(note):
+    """write_log に渡す note の記録（OFF のときは何も書かない）。"""
+    return {"note": note} if note else {}
+
+
 def handle_window(ctx, t, prev):
     """締切20〜5分前の1レース。戻り値は書いた状態。"""
     from official_fetcher import fetch_odds3t, fetch_official_race
@@ -461,7 +506,8 @@ def handle_window(ctx, t, prev):
     meta = snapshot_meta(t["race_key"])
     done = already_reason(meta)
     if done:
-        status = write_log(t, prev, done[0], done[1])["status"]
+        note = make_note_from_saved(ctx, t)
+        status = write_log(t, prev, done[0], done[1], **note_extra(note))["status"]
         if "manshu" in t["sources"]:
             log(f"締切 {t.get('deadline')}: 予想3種の比較 {compare_sources(ctx, t)}")
         return status
@@ -495,11 +541,16 @@ def handle_window(ctx, t, prev):
             aim_status = rebuild_aim(t, res["final"], odds)
         except Exception as e:  # noqa: BLE001
             aim_status = f"作り直しでエラー（{type(e).__name__}）"
+    model = (res.get("model_info") or {}).get("model_used")
+    reason = f"予想して保存（{status}・{model}）"
+    # note の自動下書き。締切前の通知はこれを待つので、時間のかかる予想3種の比較より先に作り、記録する
+    note = make_note(ctx, t, res["final"], res.get("tickets"), res.get("work"), odds)
+    row = write_log(t, prev, "done", reason, tried=True, snapshot_status=status, aim_status=aim_status,
+                    **note_extra(note))
+    if "manshu" in t["sources"]:
         log(f"締切 {t.get('deadline')}: 予想3種の比較 "
             f"{compare_sources(ctx, t, res['final'], res.get('work'), odds)}")
-    model = (res.get("model_info") or {}).get("model_used")
-    return write_log(t, prev, "done", f"予想して保存（{status}・{model}）", tried=True,
-                     snapshot_status=status, aim_status=aim_status)["status"]
+    return row["status"]
 
 
 def handle_late(t, prev):

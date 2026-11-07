@@ -843,6 +843,8 @@ def fetch_daily_publication_results(sb_url, sb_key, publication_date):
     publications = _get(sb_url, sb_key, _PUBLICATIONS_TABLE, {
         "select": "race_key,venue,race_no,sequence_no,publication_type,ticket_source,article_tickets",
         "publication_date": f"eq.{_date_text(publication_date)}",
+        # 締切前の通知で自動で作った下書き（AUTO_DRAFT）は、確定した記事ではないので数えない
+        "status": "neq.AUTO_DRAFT",
         "order": "sequence_no.asc",
     }, "note確定レース")
     actuals, legacy = _db_actuals(sb_url, sb_key, [str(p.get("race_key") or "").strip() for p in publications])
