@@ -26,7 +26,8 @@
     （manshu_memos）があれば作り、無ければ「記録なし」。記録の後・締切前にメモが保存・変更されたら作り直す（メモの保存が task=memo を起動。
     取りこぼしは task=run が毎回確かめる）。メモは比較にだけ使い、保存する予想・買い目・ログには入れない。
     作ったとき・作り直したときは、オーナー専用の Discord（DISCORD_MEMO_WEBHOOK_URL）にだけメモ入り予想を通知する（memo_notify.py）
-  - note の自動下書き（note_auto.py。アプリの設定 note_auto_enabled が ON のときだけ）: 展示後の予想を保存して
+  - note の自動下書き（note_auto.py。アプリの設定 note_auto_enabled が ON のときだけ。対象は厳選10のレース。
+    設定 note_auto_scope が「厳選＋万舟」なら万舟チャンスのレースも）: 展示後の予想を保存して
     （万舟チャンスは買い目を作り直して）すぐ、予想3種の比較より先に記事を作って note_publications（status = AUTO_DRAFT）に
     保存し、結果を auto_post_log.note_status に残す。締切前の通知はこれを待って、記事表示ページの URL か「記事生成失敗」を載せる。
     展示後の予想が保存済みでスキップしたレースは、保存された予想で作る
@@ -467,7 +468,7 @@ def make_note(ctx, t, final, tickets, work=None, odds=None):
     """note の自動下書きを作って保存する（note_auto.py）。OFF なら None。戻り値は note_auto.generate の結果。"""
     import note_auto
 
-    if not note_auto.enabled(getattr(ctx, "settings", None)):
+    if not note_auto.applies(getattr(ctx, "settings", None), t):
         return None
     note = note_auto.generate_from_env(_sb, t, final, tickets, work=work, odds=odds, settings=ctx.settings,
                                        runtime=ctx.runtime)
@@ -480,7 +481,7 @@ def make_note_from_saved(ctx, t):
     """展示後の予想が保存済み（手動・自動固定）でスキップしたレース: 保存された予想で記事を作る。"""
     import note_auto
 
-    if not note_auto.enabled(getattr(ctx, "settings", None)):
+    if not note_auto.applies(getattr(ctx, "settings", None), t):
         return None
     try:
         import race_posts

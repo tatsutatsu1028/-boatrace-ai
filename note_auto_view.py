@@ -18,6 +18,7 @@ from result_tracker import supabase_config, supabase_service_config
 STATUS_LABELS = {"ok": "✅ 作成", "template": "⚠️ 記事生成失敗（買い目だけの型で保存）", "manual": "📝 手動の記事あり",
                  "failed": "❌ 記事生成失敗"}
 SOURCE_LABELS = {"model": "モデルのみ予想", "avg": "両方の予想平均"}
+SCOPE_LABELS = {"pre": "厳選のみ", "pre_manshu": "厳選＋万舟"}
 
 
 def _h(key, prefer=None):
@@ -29,7 +30,7 @@ def _h(key, prefer=None):
 
 def _load():
     url, key = supabase_config()
-    r = requests.get(f"{url}/rest/v1/app_settings?id=eq.1&select=note_auto_enabled,note_auto_ticket_source,"
+    r = requests.get(f"{url}/rest/v1/app_settings?id=eq.1&select=note_auto_enabled,note_auto_ticket_source,note_auto_scope,"
                      "note_view_base_url", headers=_h(key), timeout=10)
     r.raise_for_status()
     rows = r.json() or []
@@ -63,7 +64,7 @@ def _today_log(date_iso):
 
 def render_settings(today):
     st.markdown("#### 📝 note 自動下書き（締切前の通知と同時）")
-    st.caption("締切前の Discord 通知（展示前厳選10・万舟チャンス）のレースで、展示後の予想を保存したらすぐに note の有料記事の"
+    st.caption("締切前の Discord 通知の対象のレース（下の「対象」で選ぶ）で、展示後の予想を保存したらすぐに note の有料記事の"
                "下書き（本文は Claude Haiku・無料部分と有料部分の境目に「【有料ライン】」の行）を作ります。通知は記事ができるのを"
                "待って（最大3分）、記事表示ページの URL を載せます。作れなかったレースは通知に「記事生成失敗」と出ます。"
                "下書きは「確定済みの記事」（本日N本目・夜のまとめ）には数えません。予想タブで「note記事用に確定」を押すと手動の記事に置き換わります。")
@@ -76,6 +77,14 @@ def render_settings(today):
         st.caption("設定（app_settings）がありません。")
         return
     on = st.toggle("note 自動下書きをONにする", value=bool(cfg.get("note_auto_enabled")), key="note_auto_enabled")
+    scope_now = cfg.get("note_auto_scope") if cfg.get("note_auto_scope") in SCOPE_LABELS else "pre"
+    scope = st.radio("対象", list(SCOPE_LABELS), index=list(SCOPE_LABELS).index(scope_now),
+                     format_func=SCOPE_LABELS.get, horizontal=True, key="note_auto_scope")
+    if scope == "pre":
+        st.caption("厳選10（朝一厳選）のレースだけ記事を作ります。万舟チャンスだけのレースは作らず、万舟チャンスの通知にも"
+                   "記事の URL を載せません（厳選10にも入ったレースは、厳選10の通知に載ります）。")
+    else:
+        st.caption("厳選10と万舟チャンスの両方のレースで記事を作り、それぞれの通知に記事の URL を載せます。")
     src_now = cfg.get("note_auto_ticket_source") if cfg.get("note_auto_ticket_source") in SOURCE_LABELS else "model"
     src = st.radio("記事に載せる買い目（既定）", list(SOURCE_LABELS), index=list(SOURCE_LABELS).index(src_now),
                    format_func=SOURCE_LABELS.get, horizontal=True, key="note_auto_ticket_source")
@@ -84,9 +93,10 @@ def render_settings(today):
                    "数十秒長くかかり、費用も増えます。読みを取れなかったレースはモデルのみ予想にします。")
     base = st.text_input("記事表示ページの URL（このアプリの URL。例 https://xxxx.streamlit.app）",
                          value=cfg.get("note_view_base_url") or "", key="note_view_base_url")
-    changed = {k: v for k, v in (("note_auto_enabled", on), ("note_auto_ticket_source", src),
-                                 ("note_view_base_url", base.strip() or None))
-               if v != (cfg.get(k) if k != "note_auto_ticket_source" else src_now)}
+    now = {**cfg, "note_auto_ticket_source": src_now, "note_auto_scope": scope_now}
+    changed = {k: v for k, v in (("note_auto_enabled", on), ("note_auto_scope", scope),
+                                 ("note_auto_ticket_source", src), ("note_view_base_url", base.strip() or None))
+               if v != now.get(k)}
     if changed:
         try:
             _save(changed)

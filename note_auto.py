@@ -7,7 +7,8 @@ note 有料記事の自動下書き（締切前の Discord 通知と同じタイ
 記事表示ページ（app.py の ?view=note。秘密のキー付き）の URL か「記事生成失敗」を載せる
 （supabase/migrations/20261107000000_note_auto_draft.sql）。
 
-  - 対象: 通知するレース（🌅 展示前厳選10・💥 万舟チャンス）。アプリの設定 app_settings.note_auto_enabled が ON のときだけ
+  - 対象: アプリの設定 app_settings.note_auto_enabled が ON のとき、厳選10（朝一厳選）のレース。設定 note_auto_scope が
+    「厳選＋万舟」（pre_manshu）なら万舟チャンスのレースも（既定は「厳選のみ」= pre）
   - 買い目: app_settings.note_auto_ticket_source（model = モデルのみ予想（既定）/ avg = 両方の予想平均）。
     両方の予想平均は、ここで Claude の読み（claude_reader.read_race）を取り、予想タブの「両方の予想平均」と同じ手順で作る。
     取れなければモデルのみ予想にする（理由を残す）
@@ -35,6 +36,21 @@ READ_PURPOSE = "note_article_auto_read"
 
 def enabled(settings):
     return bool((settings or {}).get("note_auto_enabled"))
+
+
+SCOPES = ("pre", "pre_manshu")
+SCOPE_LABELS = {"pre": "厳選のみ", "pre_manshu": "厳選＋万舟"}
+
+
+def scope(settings):
+    """記事を作る対象: pre = 厳選10（朝一厳選）だけ（既定）/ pre_manshu = 厳選10＋万舟チャンス。"""
+    return "pre_manshu" if (settings or {}).get("note_auto_scope") == "pre_manshu" else "pre"
+
+
+def applies(settings, t):
+    """このレースの記事を作るか。ON で、厳選10のレース（対象が「厳選＋万舟」なら万舟チャンスのレースも）。"""
+    sources = (t or {}).get("sources") or []
+    return enabled(settings) and ("pre" in sources or (scope(settings) == "pre_manshu" and "manshu" in sources))
 
 
 def ticket_source(settings):
@@ -140,7 +156,7 @@ def generate(sb, t, final, tickets, work=None, odds=None, settings=None, runtime
     """
     t0 = time.time()
     out = {"status": "failed", "reason": None, "source": None, "writer": None}
-    if not enabled(settings):
+    if not applies(settings, t):
         out.update(status="off", seconds=0.0)
         return out
     try:

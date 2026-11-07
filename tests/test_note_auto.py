@@ -205,3 +205,27 @@ def test_report_builds_note_variants(monkeypatch):
     assert rep["settled"] == 1 and [r["race_no"] for r in rep["pending"]] == [9]
     assert len(rep["variants"]) == 3 and all(v["title"] and v["body"] for v in rep["variants"])
     assert "平和島" in rep["variants"][0]["body"]
+
+
+def test_scope_pre_only_by_default(monkeypatch):
+    """対象は既定で「厳選のみ」: 万舟チャンスだけのレースは記事を作らない。厳選10にも入ったレースは作る。"""
+    _claude_ok(monkeypatch)
+    manshu_only, both = {**T, "sources": ["manshu"]}, {**T, "sources": ["pre", "manshu"]}
+    assert note_auto.scope(ON) == "pre" and note_auto.scope({"note_auto_scope": "x"}) == "pre"
+    sb = FakeSb()
+    assert note_auto.generate(sb, manshu_only, _final(), TICKETS, settings=ON, api_key="x")["status"] == "off"
+    assert sb.calls == []
+    assert note_auto.applies(ON, both) and note_auto.applies(ON, T)
+    wide = {**ON, "note_auto_scope": "pre_manshu"}
+    assert note_auto.applies(wide, manshu_only)
+    assert note_auto.generate(FakeSb(), manshu_only, _final(), TICKETS, settings=wide, api_key="x")["status"] == "ok"
+    assert not note_auto.applies({"note_auto_enabled": False, "note_auto_scope": "pre_manshu"}, manshu_only)
+
+
+def test_make_note_skips_manshu_only_race():
+    class Ctx:
+        settings = ON
+        runtime = {}
+
+    assert ap.make_note(Ctx(), {**T, "sources": ["manshu"]}, _final(), TICKETS) is None
+    assert ap.make_note_from_saved(Ctx(), {**T, "sources": ["manshu"]}) is None
