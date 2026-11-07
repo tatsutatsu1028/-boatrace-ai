@@ -593,6 +593,31 @@ def load_demo_history():
     return pd.read_csv(_data_paths.data_path("sample_history.csv"))
 
 
+def _file_stamp(name):
+    """データフォルダ内ファイルの (更新日時, サイズ)。無ければ (None, None)。"""
+    try:
+        stt = _data_paths.data_path(name).stat()
+        return (stt.st_mtime_ns, stt.st_size)
+    except OSError:
+        return (None, None)
+
+
+@st.cache_resource(show_spinner=False, max_entries=3)
+def _cached_train(_history, history_key, history_full_stamp):
+    """train(history) の結果を使い回す。
+
+    キャッシュキーは history_full.csv の (更新日時, サイズ) と、1着モデルに使う
+    学習CSVの識別子（history_key）。history_full.csv が差し替わったときだけ
+    学習し直す。_history は先頭が _ なのでハッシュ対象外（毎回の巨大な
+    DataFrame ハッシュを避ける）。
+    """
+    return train(_history)
+
+
+def train_cached(history, history_key):
+    return _cached_train(history, history_key, _file_stamp("history_full.csv"))
+
+
 def _default_history_caption(history):
     """既定の学習データ（sample_history.csv: 公式の過去成績）の説明。"""
     text = f"既定の学習データ（BOAT RACE公式の過去成績）{len(history):,}行を使用中"
@@ -1159,6 +1184,10 @@ with tab2:
     if IS_ADMIN:
         hist_up = st.file_uploader("過去成績CSV", type="csv", key="hist")
         history = pd.read_csv(hist_up) if hist_up else load_demo_history()
+        history_key = (
+            ("upload", hashlib.sha256(hist_up.getvalue()).hexdigest())
+            if hist_up else ("default", _file_stamp("sample_history.csv"))
+        )
         if hist_up:
             st.success(f"アップロードした学習データ：{len(history):,}行")
         else:
@@ -1167,6 +1196,7 @@ with tab2:
             st.dataframe(history.head(12), use_container_width=True, hide_index=True)
     else:
         history = load_demo_history()
+        history_key = ("default", _file_stamp("sample_history.csv"))
         st.info("🔒 収集スタッフは学習データを変更できません。管理者と同じ既定データを使用します。")
 
 with tab3:
@@ -2740,7 +2770,7 @@ with tab1:
             if _press_model or _press_claude or _press_avg:
                 try:
                     with st.spinner("AI解析中…"):
-                        model = train(history)
+                        model = train_cached(history, history_key)
                         _mo = model_only_prediction(
                             model, work, odds,
                             {
