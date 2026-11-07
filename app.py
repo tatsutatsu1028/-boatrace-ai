@@ -11,6 +11,13 @@ import prediction as _prediction
 import result_tracker as _result_tracker
 import stake_allocator as _stake_allocator
 
+# note 記事の表示ページ（?view=note。PIN ログインなし・秘密のキー必須）。学習データの取得より前に出して止める
+if st.query_params.get("view") == "note":
+    import note_page as _note_page
+
+    _note_page.render()
+    st.stop()
+
 # 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
 # 予想ロジック本体は変更せず、手動固定と自動固定が同じ「保存済み本番設定」を使うよう入口だけ統一する。
 if not hasattr(st, "_boat_ai_original_subheader"):

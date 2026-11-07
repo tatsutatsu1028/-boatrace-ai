@@ -64,6 +64,8 @@ jobs:
           # CLAUDE_READ_MODEL が無ければアプリと同じ既定のモデル。1日の上限は app_settings
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_READ_MODEL: ${{ secrets.CLAUDE_READ_MODEL }}
+          # note の自動下書き（note_auto.py）の本文を書くモデル。無ければ Haiku（note_article.ARTICLE_MODEL）
+          CLAUDE_ARTICLE_MODEL: ${{ secrets.CLAUDE_ARTICLE_MODEL }}
           RACE_KEY: ${{ inputs.race_key }}
           # メモ入り予想（claude_memo・blend_memo）の通知先。オーナー専用のチャンネル（memo_notify.py）。未設定なら送らない
           DISCORD_MEMO_WEBHOOK_URL: ${{ secrets.DISCORD_MEMO_WEBHOOK_URL }}

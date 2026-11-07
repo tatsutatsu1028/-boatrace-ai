@@ -60,9 +60,14 @@ def _get(path):
     return r.json() or []
 
 
+# 締切前の通知で自動で作った下書き（note_auto.py）。確定済みの記事とは別扱いにし、ここでは読まない
+# （「note記事用に確定」を押すと reserve_note_publication_v2 がその行を手動の記事に置き換える）
+AUTO_DRAFT = "AUTO_DRAFT"
+
+
 def load_publication(race_key):
     try:
-        rows = _get(f"note_publications?race_key=eq.{race_key}&select=*")
+        rows = _get(f"note_publications?race_key=eq.{race_key}&status=neq.{AUTO_DRAFT}&select=*")
         return rows[0] if rows else None
     except Exception:  # noqa: BLE001
         return None
@@ -389,7 +394,8 @@ def posted_at_text(pub):
 def load_day_publications(date_iso):
     """その日に確定した記事（一覧の「確定済み（時刻）」に使う）。読めなければ空。"""
     try:
-        return _get(f"note_publications?publication_date=eq.{date_iso}&select=race_key,created_at,ticket_source,"
+        return _get(f"note_publications?publication_date=eq.{date_iso}&status=neq.{AUTO_DRAFT}"
+                    "&select=race_key,created_at,ticket_source,"
                     "sequence_no,publication_type")
     except Exception:  # noqa: BLE001
         return []
