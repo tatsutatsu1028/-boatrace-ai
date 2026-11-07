@@ -15,6 +15,7 @@ note 有料記事の自動下書き（締切前の Discord 通知と同じタイ
     無料部分と有料部分の境目に「【有料ライン】」の行を入れる（note_article.split_article と同じ分け方）
   - Claude が失敗したときは、手動と同じ決まった型（買い目だけ）で保存し、note_status = template（通知に「記事生成失敗」）
   - アプリで「note記事用に確定」した記事（手動の記事）が既にあれば書かない（note_status = manual）
+  - 見出し画像も手動の記事と同じ規則（note_header.py）で選んで記録する（note_publications.header_image*）
 
 Streamlit には依存しない（tests で確かめられるように）。
 """
@@ -107,6 +108,28 @@ def avg_prediction(sb, t, work, final, odds, runtime, api_key, read_model=None):
     return (na.tickets_list(tickets), {int(r.lane): float(r.p_first) for r in avg_final.itertuples()}), None
 
 
+def choose_header(t, work=None):
+    """手動の記事と同じ規則（note_header.choose）で見出し画像を選ぶ (key, 理由)。買い目は中穴〜万舟狙いではない。"""
+    import note_header as nh
+
+    wind, wave = nh.water(work)
+    sources = t.get("sources") or []
+    return nh.choose(manshu_chance="manshu" in sources, with_aim=False, wind=wind, wave=wave,
+                     pre_pick="pre" in sources)
+
+
+def record_header(sb, t, work=None):
+    """自動下書きの見出し画像を選んで記録する（set_note_header_image）。失敗しても記事は止めない。戻り値は key（失敗は None）。"""
+    try:
+        key, why = choose_header(t, work)
+        sb("POST", "rpc/set_note_header_image",
+           json={"p_race_key": t["race_key"], "p_image": key, "p_auto": key, "p_reason": why[:200]})
+        return key
+    except Exception as e:  # noqa: BLE001
+        print("[NOTE_AUTO] 見出し画像の記録に失敗:", type(e).__name__, flush=True)
+        return None
+
+
 def generate(sb, t, final, tickets, work=None, odds=None, settings=None, runtime=None, api_key="",
              article_model=None, read_model=None):
     """
@@ -167,6 +190,7 @@ def generate(sb, t, final, tickets, work=None, odds=None, settings=None, runtime
             notes.insert(0, "手動で確定した記事があるため自動下書きは作りませんでした")
         else:
             out["status"] = "ok" if writer == "claude" else "template"
+            out["header"] = record_header(sb, t, work)
         out["reason"] = "・".join(notes) or None
     except Exception as e:  # noqa: BLE001  記事が作れなくても予想・通知は止めない
         out.update(status="failed", reason=f"{type(e).__name__}: {str(e)[:150]}")

@@ -241,6 +241,10 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 記事表示ページ: `アプリのURL/?view=note&race_key=YYYYMMDD_JJ_R&key=…`（1レース）、`?view=note&key=…`（今日の自動下書きの一覧）。
   PIN ログインなし。キーは Supabase の vault（`note_view_key`。マイグレーションが乱数で作る）にだけあり、照合はデータベースの
   `note_view_articles` が行う。キーが無い・違うときは何も表示しない。アプリの URL は設定タブで登録する（`app_settings.note_view_base_url`）
+- 記事表示ページには、タイトル・無料部分・有料部分（【有料ライン】の行で分ける。段落が分かれたまま貼れるよう HTML でもコピー）・
+  ハッシュタグのコピー、見出し画像（自動下書きを作るときに手動の記事と同じ規則で選んで記録）の保存、公開した note 記事の URL の登録がある。
+  URL を登録すると status = PUBLISHED・本日N本目の番号が付き、確定済みの記事・夜のまとめ（的中判定）に入る
+  （`note_view_register`。`supabase/migrations/20261107020000_note_view_publish.sql`）
 - データベース: `supabase/migrations/20261107000000_note_auto_draft.sql`
 ### 一覧からの note記事・スレッズ投稿（管理者だけ）
 「💥 万舟チャンス」「🌅 展示前厳選10」の一覧の各レースに「📝 note記事」「🧵 スレッズ投稿」のボタン（`publish_panel.py`）。

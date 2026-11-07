@@ -165,3 +165,22 @@ def test_note_made_when_auto_fix_saved_first(monkeypatch):
     monkeypatch.setattr(official_fetcher, "fetch_odds3t", lambda *a: None)
     assert ap.handle_window(object(), T, None) == "already"
     assert made == [T["race_key"]] and written[-1][1]["note"] == {"status": "ok"}
+
+
+def test_header_recorded_for_auto_draft(monkeypatch):
+    _claude_ok(monkeypatch)
+    sb = FakeSb()
+    out = note_auto.generate(sb, {**T, "sources": ["pre"]}, _final(), TICKETS, settings=ON, api_key="x")
+    row = next(kw["json"] for m, p, kw in sb.calls if p == "rpc/set_note_header_image")
+    assert out["header"] == "gensen" and row["p_image"] == row["p_auto"] == "gensen"
+    # 手動の記事があるレースは見出し画像も書かない
+    sb2 = FakeSb(save_result="manual")
+    note_auto.generate(sb2, T, _final(), TICKETS, settings=ON, api_key="x")
+    assert not any(p == "rpc/set_note_header_image" for m, p, kw in sb2.calls)
+
+
+def test_choose_header_rules():
+    rough = pd.DataFrame({"wind_speed": [7.0] * 6, "wave_height": [3.0] * 6})
+    assert note_auto.choose_header({"sources": ["pre"]}, rough)[0] == "aresuimen"
+    assert note_auto.choose_header({"sources": ["pre"]})[0] == "gensen"
+    assert note_auto.choose_header({"sources": []})[0] == "shobu"

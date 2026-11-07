@@ -7,7 +7,9 @@ note 記事の表示ページ（PIN ログインなし）。app.py の一番最�
 
 キー（秘密）は Supabase の vault（note_view_key）にだけあり、照合もデータベースの note_view_articles が行う。
 アプリ・リポジトリにキーは無い。キーが無い・違うときは何も表示しない（エラーも出さない）。
-ブラウザ操作でコピーしやすいよう、余計な UI は置かずタイトル・本文をプレーンテキストとコピーボタンで出す。
+ブラウザ操作でコピーしやすいよう、タイトル・無料部分・有料部分・ハッシュタグをプレーンテキストとコピーボタンで出す
+（無料部分・有料部分は【有料ライン】の行で分ける。段落が分かれたまま貼れるよう HTML でもコピーする）。
+見出し画像（保存ボタン）と、公開した note 記事の URL の登録（note_view_register。確定済みの記事・夜のまとめに入る）もある。
 """
 
 from __future__ import annotations
@@ -32,19 +34,24 @@ def _param(name):
     return str(v).strip() if v else ""
 
 
-def fetch(key, race_key=None, date_iso=None):
-    """note_view_articles を呼ぶ。キーが違えば []。"""
+def _rpc(name, payload):
     from result_tracker import supabase_config
 
     url, api_key = supabase_config()
-    if not url or not api_key or not key:
-        return []
-    r = requests.post(f"{url}/rest/v1/rpc/note_view_articles",
+    if not url or not api_key:
+        raise RuntimeError("Supabase の設定がありません")
+    r = requests.post(f"{url}/rest/v1/rpc/{name}",
                       headers={"apikey": api_key, "Authorization": f"Bearer {api_key}",
-                               "Content-Type": "application/json"},
-                      json={"p_key": key, "p_race_key": race_key or None, "p_date": date_iso or None}, timeout=10)
+                               "Content-Type": "application/json"}, json=payload, timeout=10)
     r.raise_for_status()
-    return r.json() or []
+    return r.json()
+
+
+def fetch(key, race_key=None, date_iso=None):
+    """note_view_articles を呼ぶ。キーが違えば []。"""
+    if not key:
+        return []
+    return _rpc("note_view_articles", {"p_key": key, "p_race_key": race_key or None, "p_date": date_iso or None}) or []
 
 
 def _jst(ts):
@@ -55,9 +62,16 @@ def _jst(ts):
         return "—"
 
 
-def _copy_block(label, text):
-    """コピーボタンと、プレーンテキスト（ページ本体に出すので、選んでコピーもできる）。"""
-    payload = json.dumps(text, ensure_ascii=False).replace("</", "<\\/")
+def _paste_html(text):
+    """空行で区切った段落 → 段落ごとの <p>（note に貼っても段落が分かれたままになる）。"""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", str(text or "").strip()) if p.strip()]
+    return "".join("<p>" + "<br>".join(html.escape(ln) for ln in p.splitlines()) + "</p>" for p in paras)
+
+
+def _copy_block(label, text, rich=False):
+    """コピーボタンと、プレーンテキスト（ページ本体に出すので、選んでコピーもできる）。
+    rich=True は段落ごとの <p>（HTML）も一緒にコピーする（note の本文に貼る用）。"""
+    payload = json.dumps([text, _paste_html(text) if rich else ""], ensure_ascii=False).replace("</", "<\\/")
     components.html(
         f"""
         <style>
@@ -67,11 +81,23 @@ def _copy_block(label, text):
         </style>
         <button id="b">📋 {html.escape(label)}をコピー</button><span id="s"></span>
         <script>
-        const v = {payload};
+        const [plain, rich] = {payload};
         document.getElementById("b").onclick = async () => {{
           const s = document.getElementById("s");
-          try {{ await navigator.clipboard.writeText(v); s.textContent = "コピーしました"; }}
-          catch (e) {{ s.textContent = "コピーできませんでした（下の文字を選んでコピーしてください）"; }}
+          try {{
+            if (rich && window.ClipboardItem && navigator.clipboard.write) {{
+              await navigator.clipboard.write([new ClipboardItem({{
+                "text/plain": new Blob([plain], {{type: "text/plain"}}),
+                "text/html": new Blob([rich], {{type: "text/html"}}),
+              }})]);
+            }} else {{
+              await navigator.clipboard.writeText(plain);
+            }}
+            s.textContent = "コピーしました";
+          }} catch (e) {{
+            try {{ await navigator.clipboard.writeText(plain); s.textContent = "コピーしました"; }}
+            catch (e2) {{ s.textContent = "コピーできませんでした（下の文字を選んでコピーしてください）"; }}
+          }}
           setTimeout(() => s.textContent = "", 2500);
         }};
         </script>
@@ -84,18 +110,90 @@ def _copy_block(label, text):
         st.code(text, language=None)
 
 
-def _article(row):
+STEPS = ("note での手順: ① タイトルを貼る → ② 無料部分を貼る → ③ 改行して有料部分を貼る → "
+         "④ 公開設定で有料・価格を設定し、有料ラインを無料部分と有料部分の境目に置く → "
+         "⑤ ハッシュタグ・見出し画像を設定 → ⑥ 公開したら、下の欄に記事の URL を登録")
+
+
+def _header(row):
+    """見出し画像 (key, 理由)。記録が無ければ手動の記事と同じ規則で選ぶ（風・波は分からないので見ない）。"""
+    import note_header as nh
+
+    key = row.get("header_image")
+    if key in nh.HEADERS and nh.HEADERS[key].exists():
+        return key, row.get("header_image_reason") or ""
+    return nh.choose(manshu_chance=bool(row.get("is_manshu")), pre_pick=bool(row.get("is_pre")))
+
+
+def _status_text(row):
+    if row.get("note_url"):
+        return f"公開済み（{_jst(row.get('published_at'))[11:16]}）"
+    return "自動下書き" if row.get("status") == "AUTO_DRAFT" else "手動で確定した記事"
+
+
+def _article(row, key):
+    import note_article as na
+    import note_auto
+    import note_header as nh
+
     title, body = str(row.get("title") or ""), str(row.get("article_text") or "")
+    free, paid = note_auto.split_by_mark(body)
     st.markdown(f"**{html.escape(str(row.get('venue') or ''))} {row.get('race_no')}R**")
     st.text(f"価格: {int(row.get('price') or 0)}円\n"
             f"締切: {row.get('deadline') or '—'}\n"
             f"記事の生成時刻: {_jst(row.get('created_at'))}\n"
-            f"種類: {'自動下書き' if row.get('status') == 'AUTO_DRAFT' else '手動で確定した記事'}"
+            f"状態: {_status_text(row)}"
             f"・本文: {'Claude' if row.get('article_writer') == 'claude' else '決まった型'}")
+    st.caption(STEPS)
     st.markdown("タイトル")
     _copy_block("タイトル", title)
-    st.markdown("本文")
-    _copy_block("本文", body)
+    if paid:
+        st.markdown("無料部分（有料ラインより上）")
+        _copy_block("無料部分", free, rich=True)
+        st.markdown("有料部分（有料ラインより下）")
+        _copy_block("有料部分", paid, rich=True)
+    else:
+        st.markdown("本文（【有料ライン】の目印がありません）")
+        _copy_block("本文", body, rich=True)
+    with st.expander("本文全体（【有料ライン】の目印つき）", expanded=False):
+        _copy_block("本文全体", body)
+    st.markdown("ハッシュタグ")
+    _copy_block("ハッシュタグ", na.HASHTAGS)
+
+    hk, why = _header(row)
+    st.markdown(f"見出し画像: {nh.HEADERS[hk].label}")
+    if why:
+        st.caption(f"選んだ理由: {why}")
+    data = nh.HEADERS[hk].path.read_bytes()
+    st.image(data, use_container_width=True)
+    st.download_button("💾 見出し画像を保存", data=data, mime="image/jpeg",
+                       file_name=nh.file_name(hk, str(row.get("publication_date") or ""),
+                                              f"{row.get('venue') or ''}{row.get('race_no')}R"))
+    _register(row, key)
+
+
+def _register(row, key):
+    """公開した note 記事の URL を登録する（確定済みの記事・本日N本目・夜のまとめに入る）。"""
+    st.markdown("公開した記事の URL を登録")
+    if row.get("note_url"):
+        st.text(f"登録済み: {row['note_url']}")
+    with st.form(f"note_register_{row['race_key']}", clear_on_submit=False):
+        url = st.text_input("note 記事の URL（https://note.com/…/n/…）", value=row.get("note_url") or "")
+        sent = st.form_submit_button("登録する")
+    if not sent:
+        return
+    try:
+        res = _rpc("note_view_register", {"p_key": key, "p_race_key": row["race_key"], "p_note_url": url.strip()})
+    except Exception as e:  # noqa: BLE001
+        st.error(f"登録できませんでした（{type(e).__name__}）")
+        return
+    if res in ("registered", "updated"):
+        st.success("登録しました。確定済みの記事として、本日N本目・夜のまとめに入ります。" if res == "registered"
+                   else "URL を変更しました。")
+    elif res == "invalid_url":
+        st.error("note 記事の URL（https://note.com/名前/n/記事ID）を入れてください。")
+    else:
+        st.error("このレースの記事が見つかりませんでした。")
 
 
 def _list(rows, key, date_iso):
@@ -106,7 +204,7 @@ def _list(rows, key, date_iso):
     for r in rows:
         href = f"?view=note&race_key={r['race_key']}&key={key}"
         st.markdown(f"- [{html.escape(str(r.get('venue') or ''))} {r.get('race_no')}R｜締切 {r.get('deadline') or '—'}]"
-                    f"({href})（生成 {_jst(r.get('created_at'))[11:16]}）")
+                    f"({href})（生成 {_jst(r.get('created_at'))[11:16]}・{_status_text(r)}）")
 
 
 def render():
@@ -124,7 +222,7 @@ def render():
         return
     if race_key:
         if rows:
-            _article(rows[0])
+            _article(rows[0], key)
         return
     # 一覧: キーが違うときも0行なので、キーが正しいと分かったとき（照合用に1回）だけ出す
     if not rows and not _key_ok(key):
@@ -133,16 +231,8 @@ def render():
 
 
 def _key_ok(key):
-    """一覧が0行のとき、キー自体が正しいか（存在しないレースを1件引いて確かめることはできないので、関数で照合）。"""
-    from result_tracker import supabase_config
-
-    url, api_key = supabase_config()
+    """一覧が0行のとき、キー自体が正しいか。"""
     try:
-        r = requests.post(f"{url}/rest/v1/rpc/note_view_key_ok",
-                          headers={"apikey": api_key, "Authorization": f"Bearer {api_key}",
-                                   "Content-Type": "application/json"},
-                          json={"p_key": key}, timeout=10)
-        r.raise_for_status()
-        return r.json() is True
+        return _rpc("note_view_key_ok", {"p_key": key}) is True
     except Exception:  # noqa: BLE001
         return False
