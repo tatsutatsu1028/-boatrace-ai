@@ -1,0 +1,50 @@
+name: Note Morning Articles
+
+# note の「朝の記事＋自動更新」（note_morning.py）。厳選10のレースごとに展示前の記事を作り、note_publications に保存する。
+# 設定タブの「note の形」が「朝の記事＋自動更新」で、自動下書きが ON の日だけ作る（OFF の日は何もせずに終わる）。
+# 起動は Supabase の pg_cron から毎朝 JST 9:02（supabase/migrations/20261108020000_note_morning.sql）。手動でも動かせる。
+# 厳選10が確定していなければ最大40分待つ。同じ日に何度動かしても、記事は1レース1本（まだ公開前の朝の記事は書き直す）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "対象の日 (YYYYMMDD)。空なら今日（JST）"
+        required: false
+        default: ""
+
+concurrency:
+  group: note-morning
+  cancel-in-progress: false
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ログは誰でも見られるため、note_morning.py は締切時刻・件数・合否だけを出す
+      - name: Run
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_ARTICLE_MODEL: ${{ secrets.CLAUDE_ARTICLE_MODEL }}
+        run: |
+          ARGS="run"
+          if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi
+          python note_morning.py $ARGS

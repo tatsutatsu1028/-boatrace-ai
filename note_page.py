@@ -52,7 +52,12 @@ def fetch(key, race_key=None, date_iso=None):
     """note_view_articles を呼ぶ。キーが違えば []。"""
     if not key:
         return []
-    return _rpc("note_view_articles_v2", {"p_key": key, "p_race_key": race_key or None, "p_date": date_iso or None}) or []
+    return _rpc("note_view_articles_v3", {"p_key": key, "p_race_key": race_key or None, "p_date": date_iso or None}) or []
+
+
+def fetch_morning(key, date_iso):
+    """その日の朝の記事（締切順）。キーが違えば []。"""
+    return _rpc("note_view_articles_v3", {"p_key": key, "p_date": date_iso, "p_morning": True}) or []
 
 
 def _jst(ts):
@@ -126,10 +131,19 @@ def _header(row):
     return nh.choose(manshu_chance=bool(row.get("is_manshu")), pre_pick=bool(row.get("is_pre")))
 
 
+POST_LABELS = {"pending": "展示後の更新待ち", "updated": "展示後に更新済み", "none": "展示後の更新なし"}
+
+
 def _status_text(row):
     if row.get("note_url"):
-        return f"公開済み（{_jst(row.get('published_at'))[11:16]}）"
-    return "自動下書き" if row.get("status") == "AUTO_DRAFT" else "手動で確定した記事"
+        text = f"公開済み（{_jst(row.get('published_at'))[11:16]}）"
+    elif row.get("article_mode") == "morning":
+        text = "朝の記事"
+    else:
+        text = "自動下書き" if row.get("status") == "AUTO_DRAFT" else "手動で確定した記事"
+    if row.get("article_mode") == "morning" and row.get("post_status"):
+        text += "・" + POST_LABELS.get(row["post_status"], row["post_status"])
+    return text
 
 
 def _article(row, key):
@@ -333,6 +347,70 @@ def _post_threads(date_iso, key, rep, note_url):
         st.error(f"Threads への投稿に失敗しました: {error}（URL を登録し直すと、もう一度投稿します）")
 
 
+def _morning_page(date_iso, key):
+    """朝の記事の一覧（締切順）。レースごとにタイトル・無料部分・有料部分のコピー、見出し画像、締切、URL 登録欄。"""
+    rows = fetch_morning(key, date_iso)
+    st.markdown(f"**🌅 朝の記事（{date_iso}・締切順・{len(rows)}本）**")
+    if not rows:
+        st.text("朝の記事はまだありません。")
+        return
+    for r in rows:
+        with st.expander(f"締切 {r.get('deadline') or '—'}｜{r.get('venue')} {r.get('race_no')}R｜{_status_text(r)}",
+                         expanded=False):
+            _article(r, key)
+
+
+def _md_text(text):
+    """プレーンテキスト → 改行をそのまま出す markdown（記号はそのまま出す）。"""
+    import re as _re
+
+    t = _re.sub(r"([\\*_`#>\[\]|~])", r"\\\1", str(text or ""))
+    return t.replace("\n", "  \n")
+
+
+def render_buy():
+    """購入者向けページ（?view=buy&r=レース&t=乱数）。そのレースの展示前・展示後の買い目だけ。マスターキーは使わない。"""
+    try:
+        st.set_page_config(page_title="最新買い目", layout="centered", initial_sidebar_state="collapsed")
+    except Exception:  # noqa: BLE001
+        pass
+    st.markdown("<style>#MainMenu, header, footer {visibility: hidden;} .block-container {padding-top: 1rem;}</style>",
+                unsafe_allow_html=True)
+    race_key, token = _param("r"), _param("t")
+    if not _RACE_KEY.match(race_key or "") or not re.fullmatch(r"[0-9a-f]{32,64}", token or ""):
+        return
+    try:
+        rows = _rpc("note_buyer_view", {"p_race_key": race_key, "p_token": token}) or []
+    except Exception:  # noqa: BLE001
+        return
+    if not rows:
+        return
+    r = rows[0]
+    deadline = str(r.get("deadline") or "")
+    st.markdown(f"### {r.get('venue')} {r.get('race_no')}R" + (f"｜締切 {deadline}" if deadline else ""))
+    closed = False
+    try:
+        closed = datetime.strptime(f"{r['publication_date']} {deadline}", "%Y-%m-%d %H:%M").replace(tzinfo=JST) \
+            <= datetime.now(JST)
+    except (KeyError, TypeError, ValueError):
+        pass
+    status = r.get("post_status")
+    if status == "updated" and r.get("post_text"):
+        st.success(f"✅ 展示後の最新買い目（{_jst(r.get('post_updated_at'))[11:16]} 更新）")
+        st.markdown(_md_text(r["post_text"]))
+        with st.expander("展示前（朝）の予想と買い目", expanded=False):
+            st.markdown(_md_text(r.get("pre_text")))
+        return
+    if status == "none" or closed:
+        st.warning("展示後の更新はありません。展示前の買い目をご利用ください。")
+    else:
+        import note_morning
+
+        st.info(f"⏳ 展示後に更新予定です（{note_morning.UPDATE_LEAD}）。このページを開き直すと最新になります。")
+    st.markdown("**展示前（朝）の予想と買い目**")
+    st.markdown(_md_text(r.get("pre_text")))
+
+
 def render():
     """?view=note のページ。キーが合わなければ何も出さない。"""
     try:
@@ -340,8 +418,12 @@ def render():
     except Exception:  # noqa: BLE001
         pass
     key, race_key, date_iso = _param("key"), _param("race_key"), _param("date")
-    report = _param("report")
+    report, morning = _param("report"), _param("morning")
     if not key or (race_key and not _RACE_KEY.match(race_key)) or (date_iso and not _DATE.match(date_iso)):
+        return
+    if morning:
+        if _DATE.match(morning) and _key_ok(key):
+            _morning_page(morning, key)
         return
     if report:
         if _DATE.match(report) and _key_ok(key):

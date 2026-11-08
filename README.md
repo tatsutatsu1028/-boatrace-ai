@@ -259,6 +259,14 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 1日の締めの結果報告記事: `?view=note&report=YYYY-MM-DD&key=…`（`note_report.py`）。設定タブの「📊 本日のまとめ投稿」と同じ
   note 用の3パターン（確定済み・公開済みの記事を、記事に載せた買い目で判定）。毎日 JST 22:40 に、その日に確定済みの記事が
   あれば Discord（厳選10と同じチャンネル）に URL を送る（pg_cron `note-report-notify` → `note_report_notify`）
+- 朝の記事＋自動更新（`note_morning.py`。厳選10だけ。設定タブの「厳選10の記事の形」で切り替え、既定は「展示後の記事（今まで通り）」）:
+  毎朝 JST 9:02（pg_cron `note-morning` → `note_morning.yml`）に厳選10の確定を待ち、締切まで10分以上あるレースの展示前の記事
+  （展示前の予想展開と本線・抑え。300円）を作って `note_publications`（`article_mode = morning`）に保存し、厳選のチャンネルに
+  「🌅 朝の記事N本ができました」と一覧ページ（`?view=note&morning=日付&key=…`）の URL を送る。有料部分の最後に購入者向けページ
+  （`?view=buy&r=レース&t=レースごとの乱数`。マスターキーなし・そのレースだけ）の URL を付ける。展示後は展示後の自動予想が
+  そのページを展示後の予想展開と買い目に切り替え（`note_morning_post_update`）、更新できなかったレースは「更新なし」にする。
+  夜の的中判定は、更新できたレースは展示後の買い目、できなかったレースは展示前の買い目。この形の間は、厳選10の展示後の記事は作らない
+  （`supabase/migrations/20261108020000_note_morning.sql`）
 - 結果報告記事の Threads 自動投稿（`note_report_threads.py`。設定タブで ON/OFF、既定 OFF）: 結果報告ページの一番下に note の URL を
   登録すると、その日の結果（記事本数・的中数・的中したレースと配当。結果報告記事と同じ集計）と note の URL を Threads に投稿する。
   あいさつと締めの一言は Claude Haiku（数字は書かせない）、500文字を超えるときは外れ・結果待ちの行から省く。

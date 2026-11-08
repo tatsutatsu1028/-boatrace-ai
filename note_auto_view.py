@@ -19,6 +19,7 @@ STATUS_LABELS = {"ok": "✅ 作成", "template": "⚠️ 記事生成失敗（�
                  "failed": "❌ 記事生成失敗"}
 SOURCE_LABELS = {"model": "モデルのみ予想", "avg": "両方の予想平均"}
 SCOPE_LABELS = {"pre": "厳選のみ", "pre_manshu": "厳選＋万舟"}
+MODE_LABELS = {"post": "展示後の記事（今まで通り）", "morning": "朝の記事＋自動更新"}
 
 
 def _h(key, prefer=None):
@@ -31,7 +32,7 @@ def _h(key, prefer=None):
 def _load():
     url, key = supabase_config()
     r = requests.get(f"{url}/rest/v1/app_settings?id=eq.1&select=note_auto_enabled,note_auto_ticket_source,note_auto_scope,"
-                     "note_auto_price_manshu,note_report_threads_enabled,"
+                     "note_auto_price_manshu,note_report_threads_enabled,note_mode,"
                      "note_view_base_url", headers=_h(key), timeout=10)
     r.raise_for_status()
     rows = r.json() or []
@@ -78,6 +79,13 @@ def render_settings(today):
         st.caption("設定（app_settings）がありません。")
         return
     on = st.toggle("note 自動下書きをONにする", value=bool(cfg.get("note_auto_enabled")), key="note_auto_enabled")
+    mode_now = cfg.get("note_mode") if cfg.get("note_mode") in MODE_LABELS else "post"
+    mode = st.radio("厳選10の記事の形", list(MODE_LABELS), index=list(MODE_LABELS).index(mode_now),
+                    format_func=MODE_LABELS.get, horizontal=True, key="note_mode")
+    if mode == "morning":
+        st.caption("毎朝9:02に、厳選10の確定を待って展示前の記事を10本作り、厳選のチャンネルに一覧ページの URL を送ります。"
+                   "展示後は、記事の有料部分にある購入者向けページ（レースごとの URL）を展示後の予想と買い目に自動で切り替えます。"
+                   "厳選10の展示後の記事（締切前の通知の記事 URL）は作りません。万舟チャンスは今まで通りです。")
     scope_now = cfg.get("note_auto_scope") if cfg.get("note_auto_scope") in SCOPE_LABELS else "pre"
     scope = st.radio("対象", list(SCOPE_LABELS), index=list(SCOPE_LABELS).index(scope_now),
                      format_func=SCOPE_LABELS.get, horizontal=True, key="note_auto_scope")
@@ -109,8 +117,9 @@ def render_settings(today):
     if scope == "pre_manshu":
         now["note_auto_price_manshu"] = price_now
     now["note_report_threads_enabled"] = bool(cfg.get("note_report_threads_enabled"))
+    now["note_mode"] = mode_now
     changed = {k: v for k, v in (("note_auto_enabled", on), ("note_auto_scope", scope),
-                                 ("note_report_threads_enabled", threads_on),
+                                 ("note_report_threads_enabled", threads_on), ("note_mode", mode),
                                  *((("note_auto_price_manshu", price),) if scope == "pre_manshu" else ()),
                                  ("note_auto_ticket_source", src), ("note_view_base_url", base.strip() or None))
                if v != now.get(k)}

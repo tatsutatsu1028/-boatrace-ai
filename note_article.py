@@ -228,8 +228,11 @@ def compose(parts, tickets):
 _COMBO_RE = re.compile(r"(?<![\d-])[1-6]-[1-6]-[1-6](?![\d-])|[1-6]-[1-6]{2,}|[1-6]=[1-6]")
 _PAID_HEADS = ("■ 買い目の考え方", "【本線買い目】", "【抑え買い目】", "【中穴", "【万舟", "※",
                # 万舟チャンスのレースの自動下書き（note_auto.py）だけが使う見出し
-               "■ 万舟チャンスの買い目", "■ 通常の予想")
+               "■ 万舟チャンスの買い目", "■ 通常の予想",
+               # 朝の記事（note_morning.py）だけが使う見出し
+               "■ 展示後の最新買い目")
 _DEV_HEAD = "■ 展示後の予想展開"
+_DEV_HEADS = (_DEV_HEAD, "■ 展示前の予想展開")  # 展示前は朝の記事（note_morning.py）だけ
 PAYWALL_LEAD = "ここから先は有料部分です。展示後の詳しい予想展開と、買い目（本線・抑え）をお届けします。"
 PAYWALL_LEAD_AIM = "ここから先は有料部分です。荒れる展開の読みと、中穴〜万舟狙いの買い目をお届けします。"
 
@@ -261,13 +264,14 @@ def split_article(body, race_label="", deadline="", paywall_lead=None):
         if in_paid or p.startswith(_PAID_HEADS):
             in_paid = True
             paid.append(p)
-        elif p.startswith(_DEV_HEAD):
+        elif p.startswith(_DEV_HEADS):
             in_paid = True
-            dev = p[len(_DEV_HEAD):].strip()
+            dh = next(h for h in _DEV_HEADS if p.startswith(h))
+            dev = p[len(dh):].strip()
             intro, rest = _first_sentence(dev)
             if intro and not _has_combo(intro):
-                free.append(f"{_DEV_HEAD}\n{intro}")
-                paid.append(f"{_DEV_HEAD}（続き）\n{rest}")
+                free.append(f"{dh}\n{intro}")
+                paid.append(f"{dh}（続き）\n{rest}")
             else:
                 paid.append(p)
         elif _has_combo(p):

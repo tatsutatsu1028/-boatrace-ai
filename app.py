@@ -17,6 +17,12 @@ if st.query_params.get("view") == "note":
 
     _note_page.render()
     st.stop()
+# 購入者向けの展示後の買い目ページ（?view=buy&r=レース&t=レースごとの乱数。PIN・マスターキーなし。そのレースだけ）
+if st.query_params.get("view") == "buy":
+    import note_page as _note_page
+
+    _note_page.render_buy()
+    st.stop()
 
 # 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
 # 予想ロジック本体は変更せず、手動固定と自動固定が同じ「保存済み本番設定」を使うよう入口だけ統一する。

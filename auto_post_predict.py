@@ -467,8 +467,20 @@ def sync_memos(ctx, targets, race_key=None):
 def make_note(ctx, t, final, tickets, work=None, odds=None):
     """note の自動下書きを作って保存する（note_auto.py）。OFF なら None。戻り値は note_auto.generate の結果。"""
     import note_auto
+    import note_morning
 
-    if not note_auto.applies(getattr(ctx, "settings", None), t):
+    settings = getattr(ctx, "settings", None)
+    if note_morning.applies(settings, t):
+        # 朝の記事＋自動更新（厳選10）: 展示後の記事は作らず、朝の記事の購入者向けページを展示後の予想に切り替える
+        m = note_morning.update_post_from_env(_sb, t, final, tickets, work)
+        log(f"締切 {t.get('deadline')}: 朝の記事の展示後更新 {m['status']}（{m.get('seconds')}秒）"
+            + (f" {m['error'][:80]}" if m.get("error") else ""))
+        if "manshu" in (t.get("sources") or []) and note_auto.applies(settings, {**t, "sources": ["manshu"]}):
+            # 万舟チャンスにも入ったレース: 朝の記事の行があるので展示後の記事は作らない（万舟チャンスの通知は待たせない）
+            return {"status": "manual", "reason": "朝の記事があるため展示後の記事は作りませんでした",
+                    "seconds": m.get("seconds")}
+        return None
+    if not note_auto.applies(settings, t):
         return None
     note = note_auto.generate_from_env(_sb, t, final, tickets, work=work, odds=odds, settings=ctx.settings,
                                        runtime=ctx.runtime)
@@ -480,8 +492,10 @@ def make_note(ctx, t, final, tickets, work=None, odds=None):
 def make_note_from_saved(ctx, t):
     """展示後の予想が保存済み（手動・自動固定）でスキップしたレース: 保存された予想で記事を作る。"""
     import note_auto
+    import note_morning
 
-    if not note_auto.applies(getattr(ctx, "settings", None), t):
+    settings = getattr(ctx, "settings", None)
+    if not (note_auto.applies(settings, t) or note_morning.applies(settings, t)):
         return None
     try:
         import race_posts
@@ -557,16 +571,26 @@ def handle_window(ctx, t, prev):
     return row["status"]
 
 
-def handle_late(t, prev):
-    """締切5分前を過ぎても予想していないレース: 見送りとして記録する（展示後の予想が保存済みならそれを記録）。"""
+def handle_late(t, prev, ctx=None):
+    """締切5分前を過ぎても予想していないレース: 見送りとして記録する（展示後の予想が保存済みならそれを記録）。
+    朝の記事＋自動更新の厳選10のレースは、購入者向けページを「展示後の更新なし」にする（保存済みならそれで更新）。"""
+    import note_morning
+
+    morning = note_morning.applies(getattr(ctx, "settings", None), t)
     if t.get("cancelled"):
+        if morning:
+            note_morning.mark_none(_sb, t)
         return write_log(t, prev, "skipped", "中止")["status"]
     try:
         done = already_reason(snapshot_meta(t["race_key"]))
     except Exception:  # noqa: BLE001
         done = None
     if done:
+        if morning:
+            make_note_from_saved(ctx, t)
         return write_log(t, prev, done[0], done[1])["status"]
+    if morning:
+        note_morning.mark_none(_sb, t)
     why = (prev or {}).get("reason") if (prev or {}).get("attempts") else None
     return write_log(t, prev, "skipped", f"見送り: {why}" if why else NEVER_RAN)["status"]
 
@@ -649,7 +673,8 @@ def run(date8=None, now=None):
         if p in ("early", "unknown"):
             continue
         if p == "late":
-            st = handle_late(t, prev)
+            ctx = ctx or Context()
+            st = handle_late(t, prev, ctx)
         else:
             ctx = ctx or Context()
             began = datetime.now(JST)
