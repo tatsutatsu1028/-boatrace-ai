@@ -31,7 +31,7 @@ def _h(key, prefer=None):
 def _load():
     url, key = supabase_config()
     r = requests.get(f"{url}/rest/v1/app_settings?id=eq.1&select=note_auto_enabled,note_auto_ticket_source,note_auto_scope,"
-                     "note_auto_price_manshu,"
+                     "note_auto_price_manshu,note_report_threads_enabled,"
                      "note_view_base_url", headers=_h(key), timeout=10)
     r.raise_for_status()
     rows = r.json() or []
@@ -98,12 +98,19 @@ def render_settings(today):
     if src == "avg":
         st.caption("両方の予想平均は、レースごとに Claude の読み（予想タブの 🧠 と同じモデル）を取るため、記事ができるまで"
                    "数十秒長くかかり、費用も増えます。読みを取れなかったレースはモデルのみ予想にします。")
+    threads_on = st.toggle("結果報告記事を note に公開したら Threads にも自動投稿する",
+                           value=bool(cfg.get("note_report_threads_enabled")), key="note_report_threads_enabled")
+    st.caption("結果報告ページ（22:40 の通知の URL）の一番下に note の URL を登録すると、その日の結果のまとめ（記事本数・的中数・"
+               "的中したレースと配当）と note の URL を Threads に1回だけ投稿します（あいさつと締めの一言は Claude Haiku）。"
+               "成功・失敗は結果報告ページと Discord に出ます。")
     base = st.text_input("記事表示ページの URL（このアプリの URL。例 https://xxxx.streamlit.app）",
                          value=cfg.get("note_view_base_url") or "", key="note_view_base_url")
     now = {**cfg, "note_auto_ticket_source": src_now, "note_auto_scope": scope_now}
     if scope == "pre_manshu":
         now["note_auto_price_manshu"] = price_now
+    now["note_report_threads_enabled"] = bool(cfg.get("note_report_threads_enabled"))
     changed = {k: v for k, v in (("note_auto_enabled", on), ("note_auto_scope", scope),
+                                 ("note_report_threads_enabled", threads_on),
                                  *((("note_auto_price_manshu", price),) if scope == "pre_manshu" else ()),
                                  ("note_auto_ticket_source", src), ("note_view_base_url", base.strip() or None))
                if v != now.get(k)}

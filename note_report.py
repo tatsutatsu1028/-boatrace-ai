@@ -49,5 +49,5 @@ def build(sb_url, sb_key, day):
     variants = tp.build_daily_summary_note_texts(race_date=day, records=records, payouts=payouts,
                                                  include_pending=True)
     pending = [r for r in records if not r.get("settled")]
-    return {"variants": variants, "records": records, "pending": pending,
+    return {"variants": variants, "records": records, "pending": pending, "payouts": payouts,
             "settled": len(records) - len(pending)}

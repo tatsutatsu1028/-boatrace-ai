@@ -221,7 +221,7 @@ def _report(date_iso):
     return note_report.build(url, sb_key, date_iso)
 
 
-def _report_page(date_iso):
+def _report_page(date_iso, key):
     """1日の締めの結果報告記事。①をそのまま使い、②③は折りたたみ。"""
     rep = _report(date_iso)
     st.markdown(f"**📊 結果報告記事（{date_iso}）**")
@@ -245,6 +245,92 @@ def _report_page(date_iso):
             with st.expander(f"別のパターン: {v['label']}", expanded=False):
                 _copy_block("タイトル", v["title"])
                 _copy_block("本文", v["body"], rich=True)
+    _report_register(date_iso, key, rep)
+
+
+POST_STATUS = {"posted": "✅ Threads に投稿済み", "failed": "❌ Threads への投稿に失敗", "posting": "⏳ Threads に投稿中"}
+
+
+def _secret(name):
+    try:
+        return str(st.secrets.get(name, "") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _report_register(date_iso, key, rep):
+    """結果報告記事の note の URL を登録し、ON なら Threads に自動投稿する（1日1回だけ。note_report_threads.py）。"""
+    st.markdown("公開した結果報告記事の URL を登録")
+    try:
+        cur = (_rpc("note_report_status", {"p_key": key, "p_date": date_iso}) or [None])[0]
+    except Exception:  # noqa: BLE001
+        cur = None
+    if cur and cur.get("note_url"):
+        st.text(f"登録済み: {cur['note_url']}")
+    if cur and cur.get("status"):
+        st.text(POST_STATUS.get(cur["status"], cur["status"])
+                + (f"（{_jst(cur.get('posted_at'))[11:16]}）" if cur.get("status") == "posted" else "")
+                + (f": {cur.get('error')}" if cur.get("status") == "failed" and cur.get("error") else ""))
+    with st.form(f"note_report_register_{date_iso}", clear_on_submit=False):
+        url = st.text_input("note 記事の URL（https://note.com/…/n/…）", value=(cur or {}).get("note_url") or "")
+        sent = st.form_submit_button("登録する")
+    if not sent:
+        return
+    try:
+        res = _rpc("note_report_register", {"p_key": key, "p_date": date_iso, "p_note_url": url.strip()}) or {}
+    except Exception as e:  # noqa: BLE001
+        st.error(f"登録できませんでした（{type(e).__name__}）")
+        return
+    if res.get("result") == "invalid_url":
+        st.error("note 記事の URL（https://note.com/名前/n/記事ID）を入れてください。")
+        return
+    if res.get("result") not in ("registered", "updated"):
+        st.error("登録できませんでした。")
+        return
+    st.success("URL を登録しました。")
+    state = res.get("post")
+    if state == "posted":
+        st.info("この日の結果報告は Threads に投稿済みです（URL を登録し直しても、もう一度は投稿しません）。")
+    elif state == "posting":
+        st.info("Threads に投稿中です。少し待ってからページを開き直してください。")
+    elif state == "off":
+        st.info("Threads への自動投稿は OFF です（設定タブで ON にできます）。")
+    elif state == "claimed":
+        _post_threads(date_iso, key, rep, url.strip())
+
+
+def _post_threads(date_iso, key, rep, note_url):
+    import note_report_threads as nrt
+    from result_tracker import supabase_service_config
+
+    ok, post_id, text, error = False, None, "", None
+    with st.spinner("Threads に結果を投稿しています…"):
+        try:
+            text, cres = nrt.build_text(date_iso, rep["records"], rep.get("payouts"), note_url,
+                                        api_key=_secret("ANTHROPIC_API_KEY"),
+                                        model=_secret("CLAUDE_ARTICLE_MODEL") or None)
+            if cres.get("called_api"):
+                try:
+                    import claude_usage
+
+                    claude_usage.log_call(cres, f"report_{date_iso}", purpose="note_report_threads")
+                except Exception:  # noqa: BLE001
+                    pass
+            url, service_key = supabase_service_config()
+            post_id = nrt.post(url, service_key, text)
+            ok = True
+        except Exception as e:  # noqa: BLE001
+            error = f"{type(e).__name__}: {str(e)[:200]}"
+    try:
+        _rpc("note_report_post_done", {"p_key": key, "p_date": date_iso, "p_ok": ok, "p_post_id": post_id,
+                                       "p_text": text, "p_error": error})
+    except Exception:  # noqa: BLE001
+        pass
+    if ok:
+        st.success("Threads に投稿しました（Discord にも知らせました）。")
+        st.code(text, language=None)
+    else:
+        st.error(f"Threads への投稿に失敗しました: {error}（URL を登録し直すと、もう一度投稿します）")
 
 
 def render():
@@ -260,7 +346,7 @@ def render():
     if report:
         if _DATE.match(report) and _key_ok(key):
             try:
-                _report_page(report)
+                _report_page(report, key)
             except Exception as e:  # noqa: BLE001
                 st.text(f"結果報告記事を作れませんでした（{type(e).__name__}）。")
         return

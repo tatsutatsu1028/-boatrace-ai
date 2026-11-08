@@ -259,6 +259,11 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 1日の締めの結果報告記事: `?view=note&report=YYYY-MM-DD&key=…`（`note_report.py`）。設定タブの「📊 本日のまとめ投稿」と同じ
   note 用の3パターン（確定済み・公開済みの記事を、記事に載せた買い目で判定）。毎日 JST 22:40 に、その日に確定済みの記事が
   あれば Discord（厳選10と同じチャンネル）に URL を送る（pg_cron `note-report-notify` → `note_report_notify`）
+- 結果報告記事の Threads 自動投稿（`note_report_threads.py`。設定タブで ON/OFF、既定 OFF）: 結果報告ページの一番下に note の URL を
+  登録すると、その日の結果（記事本数・的中数・的中したレースと配当。結果報告記事と同じ集計）と note の URL を Threads に投稿する。
+  あいさつと締めの一言は Claude Haiku（数字は書かせない）、500文字を超えるときは外れ・結果待ちの行から省く。
+  1日1回だけ（`note_report_posts`・`note_report_register`。投稿済みの日は URL を登録し直しても再投稿しない。失敗した日は登録し直すとやり直す）。
+  成否は結果報告ページと Discord（厳選10のチャンネル）に出す（`supabase/migrations/20261108010000_note_report_threads.sql`）
 - データベース: `supabase/migrations/20261107000000_note_auto_draft.sql`
 ### 一覧からの note記事・スレッズ投稿（管理者だけ）
 「💥 万舟チャンス」「🌅 展示前厳選10」の一覧の各レースに「📝 note記事」「🧵 スレッズ投稿」のボタン（`publish_panel.py`）。
