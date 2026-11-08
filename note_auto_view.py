@@ -31,6 +31,7 @@ def _h(key, prefer=None):
 def _load():
     url, key = supabase_config()
     r = requests.get(f"{url}/rest/v1/app_settings?id=eq.1&select=note_auto_enabled,note_auto_ticket_source,note_auto_scope,"
+                     "note_auto_price_manshu,"
                      "note_view_base_url", headers=_h(key), timeout=10)
     r.raise_for_status()
     rows = r.json() or []
@@ -84,7 +85,13 @@ def render_settings(today):
         st.caption("厳選10（朝一厳選）のレースだけ記事を作ります。万舟チャンスだけのレースは作らず、万舟チャンスの通知にも"
                    "記事の URL を載せません（厳選10にも入ったレースは、厳選10の通知に載ります）。")
     else:
-        st.caption("厳選10と万舟チャンスの両方のレースで記事を作り、それぞれの通知に記事の URL を載せます。")
+        st.caption("厳選10と万舟チャンスの両方のレースで記事を作り、それぞれの通知に記事の URL を載せます。"
+                   "万舟チャンスのレースの記事には、万舟チャンスの買い目（展示後に作り直したもの）と通常の予想（本線・抑え）の"
+                   "2種類を載せます（タイトルの頭に【万舟チャンス】）。")
+    price_now = int(cfg.get("note_auto_price_manshu") or 300)
+    price = int(st.number_input("万舟チャンスの記事の価格（円）", min_value=100, max_value=50000, step=100,
+                                value=price_now, key="note_auto_price_manshu"))
+    st.caption("厳選10の記事は300円のままです。")
     src_now = cfg.get("note_auto_ticket_source") if cfg.get("note_auto_ticket_source") in SOURCE_LABELS else "model"
     src = st.radio("記事に載せる買い目（既定）", list(SOURCE_LABELS), index=list(SOURCE_LABELS).index(src_now),
                    format_func=SOURCE_LABELS.get, horizontal=True, key="note_auto_ticket_source")
@@ -94,7 +101,10 @@ def render_settings(today):
     base = st.text_input("記事表示ページの URL（このアプリの URL。例 https://xxxx.streamlit.app）",
                          value=cfg.get("note_view_base_url") or "", key="note_view_base_url")
     now = {**cfg, "note_auto_ticket_source": src_now, "note_auto_scope": scope_now}
+    if scope == "pre_manshu":
+        now["note_auto_price_manshu"] = price_now
     changed = {k: v for k, v in (("note_auto_enabled", on), ("note_auto_scope", scope),
+                                 *((("note_auto_price_manshu", price),) if scope == "pre_manshu" else ()),
                                  ("note_auto_ticket_source", src), ("note_view_base_url", base.strip() or None))
                if v != now.get(k)}
     if changed:

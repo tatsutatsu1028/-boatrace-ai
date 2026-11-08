@@ -57,9 +57,9 @@ def ticket_source(settings):
     return "avg" if (settings or {}).get("note_auto_ticket_source") == "avg" else "model"
 
 
-def with_paywall_mark(body, race_label="", deadline=""):
+def with_paywall_mark(body, race_label="", deadline="", paywall_lead=None):
     """本文 → 無料部分・【有料ライン】・有料部分 をつないだ記事の本文（段落は空行で区切る）。"""
-    free, paid = na.split_article(body, race_label, deadline)
+    free, paid = na.split_article(body, race_label, deadline, paywall_lead)
     return f"{free}\n\n{PAYWALL_MARK}\n\n{paid}"
 
 
@@ -146,6 +146,156 @@ def record_header(sb, t, work=None):
         return None
 
 
+# ---------------------------------------------------------------
+# 万舟チャンスのレース: 万舟チャンスの買い目（展示後に作り直したもの）と通常の予想（本線・抑え）の2種類を載せる
+# ---------------------------------------------------------------
+MANSHU_TITLE_HEAD = "【万舟チャンス】"
+MANSHU_INTRO = "💥 このレースは「万舟チャンス」に選ばれたレースです。モデルが、3連単100倍以上の高配当（万舟）が出やすいと見ています。"
+MANSHU_AIM_HEAD = "■ 万舟チャンスの買い目（中穴〜万舟狙い）"
+MANSHU_NO_AIM = ("■ 万舟チャンスの買い目\n展示後に万舟チャンスの買い目を作り直せなかったため、今回は載せていません。"
+                 "通常の予想の買い目をお届けします。")
+MANSHU_MODEL_HEAD = "■ 通常の予想（本線・抑え）"
+OVERLAP_NOTE = "※重複：万舟チャンスの買い目と通常の予想の両方に入っている組です。"
+PAYWALL_MANSHU = "ここから先は有料部分です。展示後の詳しい予想展開と、万舟チャンスの買い目（中穴〜万舟狙い）・通常の予想（本線・抑え）の2種類の買い目をお届けします。"
+PAYWALL_MANSHU_NO_AIM = "ここから先は有料部分です。展示後の詳しい予想展開と、通常の予想（本線・抑え）の買い目をお届けします。"
+MANSHU_PROMPT_VERSION = "note-article-manshu-v1"
+MANSHU_KEYS = ("lead", "development", "aim_comment", "ticket_comment")
+MANSHU_SCHEMA = {
+    "type": "object",
+    "properties": {k: {"type": "string"} for k in MANSHU_KEYS},
+    "required": list(MANSHU_KEYS),
+    "additionalProperties": False,
+}
+MANSHU_SYSTEM = """あなたはボートレース予想の note 記事を書くライターです。展示航走のあとに出す有料記事の本文を書きます。
+このレースは「万舟チャンス」（モデルが、3連単100倍以上の高配当が出やすいと見ているレース）に選ばれています。
+渡されるのは、1レース分のデータ（出走表・展示・気象）、各艇の1着確率、想定ST・1マークの想定の並び、
+「万舟チャンス」の情報（万舟になる確率・本命と本命の1着確率・頭本命（1着軸）・展示後の注意）、
+記事に載せる2種類の3連単の買い目（万舟チャンスの買い目＝中穴・万舟、通常の予想＝本線・抑え）です。
+
+書くもの:
+- lead: 読者へのあいさつと、このレースの見どころ（60〜100字）。万舟チャンスのレースであることに触れる
+- development: 展示後の予想展開。スタート → 1マーク → 2着・3着争いの順に（200〜350字）
+- aim_comment: 万舟チャンスの買い目の解説（2〜3文）。なぜ荒れそうと見ているかを、本命の1着確率から見た信頼度や、
+  展示で気になった点など、渡されたデータにあることで書く。頭本命（1着軸）が渡されていれば、その艇に必ず触れる
+- ticket_comment: 通常の予想（本線・抑え）の組み立ての考え方（80〜150字）
+
+守ること:
+- フレンドリーで読みやすい口調（です・ます）。絵文字は使ってもよいが多くしない（全体で3つまで）。
+- 渡されたデータに書かれていることだけを使う。データに無いこと（選手の評判・過去の対戦・記者コメント・
+  ピットの様子・オッズ・モーターの整備内容など）は書かない。値が空欄の項目には触れない。
+- 数値を挙げるときは入力の値をそのまま使う。
+- 断定しすぎない（「〜と見ます」「〜が有力」「〜に期待」など）。「絶対」「鉄板」「確実」「間違いない」は使わない。
+- 3連単の組番（1-2-3 の形）を書くときは、渡された買い目に入っている組番だけにする。
+  組番を書いてよいのは aim_comment と ticket_comment だけ（lead・development は無料で読める部分に載るため、組番は書かない）。
+- development の最初の1文は、組番や本命を明かさない「展開の入り」（スタートの見立てなど）にする。
+- 買い目の一覧そのものは書かない（記事の後ろにこちらで付ける）。
+- 万舟チャンスの買い目は高配当狙いで当たる確率は低めであることに触れてよい。当たりやすいとは書かない。"""
+
+
+def manshu_price(settings):
+    """万舟チャンスの記事の価格（設定タブ。初期値は厳選と同じ300円）。"""
+    try:
+        v = int((settings or {}).get("note_auto_price_manshu") or na.PRICE_YEN)
+    except (TypeError, ValueError):
+        v = na.PRICE_YEN
+    return v if 100 <= v <= 50000 else na.PRICE_YEN
+
+
+def load_manshu(sb, t):
+    """このレースの万舟チャンスの行（manshu_chance_picks）。万舟チャンスでなければ None。"""
+    if "manshu" not in ((t or {}).get("sources") or []):
+        return None
+    rows = sb("GET", f"manshu_chance_picks?race_key=eq.{t['race_key']}&select=aim_tickets,aim_saved_at,aim_source,"
+                     "post_saved_at,post_head_axis_lane,head_axis_lane,manshu_prob,post_manshu_prob,"
+                     "post_flag_reasons&limit=1").json() or []
+    return rows[0] if rows else None
+
+
+def _ts(v):
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def rebuilt_aim(mark):
+    """展示後に作り直した万舟チャンスの買い目 [{combo, group: 中穴/万舟}]。作り直していなければ None。
+    「作り直した」は、買い目の保存が展示後の予想の保存より後（締切前の通知の判定と同じ）。"""
+    aim = na.aim_option(mark)
+    a, p = _ts((mark or {}).get("aim_saved_at")), _ts((mark or {}).get("post_saved_at"))
+    if not aim or a is None or p is None or a < p:
+        return None
+    return aim
+
+
+def _combos(tickets):
+    return [x["combo"] for x in na.tickets_list(tickets)]
+
+
+def _block(groups, overlap):
+    """[(見出し, 組番)] → 買い目の欄。重なる組は1組ずつ「※重複」を付け、それ以外は厳選の記事と同じくまとめる。"""
+    from threads_poster import compact_combos
+
+    lines = []
+    for head, combos in groups:
+        plain = [c for c in combos if c not in overlap]
+        dup = [f"{c} ※重複" for c in combos if c in overlap]
+        lines += ([""] if lines else []) + [f"【{head}】"] + ((compact_combos(plain) + dup) or ["なし"])
+    return "\n".join(lines)
+
+
+def compose_manshu(parts, aim, model):
+    """万舟チャンスの記事の本文。parts は Claude の文章（無ければ空の dict = 決まった型）。aim が None なら万舟チャンスの欄を省く。"""
+    from threads_poster import split_main_cover
+
+    parts = parts or {}
+    model_main, model_cover = split_main_cover(model)
+    overlap = set(_combos(aim)) & set(_combos(model)) if aim else set()
+    paras = [MANSHU_INTRO]
+    if str(parts.get("lead") or "").strip():
+        paras.append(parts["lead"].strip())
+    if str(parts.get("development") or "").strip():
+        paras.append("■ 展示後の予想展開\n" + parts["development"].strip())
+    if aim:
+        comment = str(parts.get("aim_comment") or "").strip()
+        mid, high = na.aim_groups(aim)
+        paras += [MANSHU_AIM_HEAD + ("\n" + comment if comment else ""),
+                  _block([(na.AIM_GROUPS["中穴"], mid), (na.AIM_GROUPS["万舟"], high)], overlap), na.AIM_NOTE]
+    else:
+        paras.append(MANSHU_NO_AIM)
+    comment = str(parts.get("ticket_comment") or "").strip()
+    paras += [MANSHU_MODEL_HEAD + ("\n" + comment if comment else ""),
+              _block([("本線買い目", model_main), ("抑え買い目", model_cover)], overlap)]
+    if overlap:
+        paras.append(OVERLAP_NOTE)
+    paras.append("\n".join(na.DISCLAIMER))
+    return "\n\n".join(paras)
+
+
+def manshu_brief(brief, mark, aim, model, probs):
+    """厳選と同じ brief に、万舟チャンスの情報と2種類の買い目を足す。"""
+    from threads_poster import split_main_cover
+
+    b = dict(brief)
+    mid, high = na.aim_groups(aim)
+    main, cover = split_main_cover(model)
+    b["載せる買い目"] = {"万舟チャンスの買い目": {na.AIM_GROUPS["中穴"]: mid, na.AIM_GROUPS["万舟"]: high},
+                     "通常の予想": {"本線": main, "抑え": cover}}
+    fav = max(probs, key=lambda k: probs[k]) if probs else None
+    head = (mark or {}).get("post_head_axis_lane") or (mark or {}).get("head_axis_lane")
+    mp = (mark or {}).get("post_manshu_prob") or (mark or {}).get("manshu_prob")
+    b["万舟チャンス"] = {
+        "万舟になる確率": round(float(mp), 3) if mp is not None else None,
+        "本命": f"{fav}号艇" if fav else None,
+        "本命の1着確率": round(float(probs[fav]), 3) if fav else None,
+        "頭本命（1着軸）": f"{int(head)}号艇" if head else None,
+        "展示後の注意": "、".join((mark or {}).get("post_flag_reasons") or []) or None,
+    }
+    return b
+
+
 def generate(sb, t, final, tickets, work=None, odds=None, settings=None, runtime=None, api_key="",
              article_model=None, read_model=None):
     """
@@ -183,23 +333,44 @@ def generate(sb, t, final, tickets, work=None, odds=None, settings=None, runtime
         final_used = _final_with(final, probs)
         visual = build_visual_rows(final_used, work, top_combo=_top_combo(rows_t))
         brief = na.build_brief(work, final_used, rows_t, probs, visual, label, deadline, source)
-        res = na.write_with_claude(api_key, t["race_key"], brief, rows_t,
-                                   model=article_model or na.ARTICLE_MODEL)
+        model = article_model or na.ARTICLE_MODEL
+        mark = load_manshu(sb, t)
+        title, price, paywall, article_tickets = na.article_title(venue, rno, deadline), na.PRICE_YEN, None, rows_t
+        if mark is None:
+            # 厳選10の記事（今までと同じ）
+            res = na.write_with_claude(api_key, t["race_key"], brief, rows_t, model=model)
+            template = na.template_article
+        else:
+            # 万舟チャンスの記事: 万舟チャンスの買い目（展示後に作り直したもの）と通常の予想の2種類
+            aim = rebuilt_aim(mark)
+            title, price = MANSHU_TITLE_HEAD + title, manshu_price(settings)
+            paywall = PAYWALL_MANSHU if aim else PAYWALL_MANSHU_NO_AIM
+            article_tickets = (aim or []) + rows_t
+            out["manshu_aim"] = bool(aim)
+            if not aim:
+                notes.append("万舟チャンスの買い目を展示後に作り直せなかったため、通常の予想だけを載せました")
+            res = na.write_with_claude(
+                api_key, t["race_key"], manshu_brief(brief, mark, aim, rows_t, probs) if aim else brief,
+                article_tickets, model=model,
+                **({"system": MANSHU_SYSTEM, "schema": MANSHU_SCHEMA, "keys": MANSHU_KEYS,
+                    "prompt_version": MANSHU_PROMPT_VERSION} if aim else {}),
+                compose_fn=lambda parts: compose_manshu(parts, aim, rows_t))
+            template = lambda _t: compose_manshu({}, aim, rows_t)  # noqa: E731
         if res.get("called_api"):
             _log_usage(sb, res, t["race_key"], USAGE_PURPOSE)
         if res.get("status") == "ok":
             body, writer = res["body"], "claude"
         else:
-            body, writer = na.template_article(rows_t), "template"
+            body, writer = template(rows_t), "template"
             notes.insert(0, f"Claude: {res.get('error') or '不明'}")
         out["writer"] = writer
         p1 = max(probs, key=lambda k: probs[k]) if probs else None
         saved = sb("POST", "rpc/note_auto_save_draft", json={
             "p_race_key": t["race_key"], "p_publication_date": t["race_date"], "p_venue": venue,
-            "p_race_no": rno, "p_title": na.article_title(venue, rno, deadline),
-            "p_article_text": with_paywall_mark(body, label, deadline), "p_ticket_source": source,
-            "p_article_tickets": rows_t, "p_article_writer": writer, "p_p1_lane": p1,
-            "p_p1_prob": float(probs[p1]) if p1 else None, "p_price": na.PRICE_YEN,
+            "p_race_no": rno, "p_title": title,
+            "p_article_text": with_paywall_mark(body, label, deadline, paywall), "p_ticket_source": source,
+            "p_article_tickets": article_tickets, "p_article_writer": writer, "p_p1_lane": p1,
+            "p_p1_prob": float(probs[p1]) if p1 else None, "p_price": price,
         }).json()
         if saved == "manual":
             out["status"] = "manual"

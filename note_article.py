@@ -226,7 +226,9 @@ def compose(parts, tickets):
 
 
 _COMBO_RE = re.compile(r"(?<![\d-])[1-6]-[1-6]-[1-6](?![\d-])|[1-6]-[1-6]{2,}|[1-6]=[1-6]")
-_PAID_HEADS = ("■ 買い目の考え方", "【本線買い目】", "【抑え買い目】", "【中穴", "【万舟", "※")
+_PAID_HEADS = ("■ 買い目の考え方", "【本線買い目】", "【抑え買い目】", "【中穴", "【万舟", "※",
+               # 万舟チャンスのレースの自動下書き（note_auto.py）だけが使う見出し
+               "■ 万舟チャンスの買い目", "■ 通常の予想")
 _DEV_HEAD = "■ 展示後の予想展開"
 PAYWALL_LEAD = "ここから先は有料部分です。展示後の詳しい予想展開と、買い目（本線・抑え）をお届けします。"
 PAYWALL_LEAD_AIM = "ここから先は有料部分です。荒れる展開の読みと、中穴〜万舟狙いの買い目をお届けします。"
@@ -244,7 +246,7 @@ def _first_sentence(text):
     return text[:m.end()].strip(), text[m.end():].strip()
 
 
-def split_article(body, race_label="", deadline=""):
+def split_article(body, race_label="", deadline="", paywall_lead=None):
     """
     本文を note に貼るための (無料部分, 有料部分) に分ける。どちらも段落を空行1つで区切った文字列。
       無料: 【レース名｜締切】・あいさつ/見どころ・展開の入り（予想展開の最初の1文）・有料部分への案内
@@ -274,17 +276,27 @@ def split_article(body, race_label="", deadline=""):
             free.append(p)
     if len(free) <= (1 if head else 0):
         free.append("展示航走を見たうえでの予想です。")
-    free.append(PAYWALL_LEAD_AIM if any(p.startswith(("【中穴", "【万舟")) for p in paid) else PAYWALL_LEAD)
+    if paywall_lead:
+        free.append(paywall_lead)
+    else:
+        free.append(PAYWALL_LEAD_AIM if any(p.startswith(("【中穴", "【万舟")) for p in paid) else PAYWALL_LEAD)
     return "\n\n".join(free), "\n\n".join(paid)
 
 
-def write_with_claude(api_key, race_key, brief, tickets, model=ARTICLE_MODEL, force=False):
+def write_with_claude(api_key, race_key, brief, tickets, model=ARTICLE_MODEL, force=False,
+                      system=None, schema=None, keys=("lead", "development", "ticket_comment"), compose_fn=None,
+                      prompt_version=None):
     """
     Claude（Haiku）で本文を書く。例外は出さない。
       {"status": "ok"|"error", "body", "model", "served_model", "usage", "cost", "seconds", "error", "called_api"}
     同じレース・同じデータ・同じ買い目なら、このプロセスの中では1回だけ呼ぶ（force=True で書き直す）。
+    system・schema・keys・compose_fn・prompt_version を渡すと別の型の記事を書く（万舟チャンスの自動下書き。note_auto.py）。
+    省略したときは今までの記事と同じ。tickets は本文に書いてよい組番（check_text）にも使う。
     """
-    key = (str(race_key), model, json.dumps(brief, ensure_ascii=False, sort_keys=True), ARTICLE_PROMPT_VERSION)
+    system = system or SYSTEM_PROMPT
+    schema = schema or OUTPUT_SCHEMA
+    prompt_version = prompt_version or ARTICLE_PROMPT_VERSION
+    key = (str(race_key), model, json.dumps(brief, ensure_ascii=False, sort_keys=True), prompt_version)
     if key in _CACHE and not force:
         return _CACHE[key]
     out = {"status": "error", "model": model}
@@ -299,8 +311,8 @@ def write_with_claude(api_key, race_key, brief, tickets, model=ARTICLE_MODEL, fo
         resp = client.messages.create(
             model=model,
             max_tokens=ARTICLE_MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+            system=system,
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
             messages=[{"role": "user", "content": json.dumps(brief, ensure_ascii=False)}],
         )
         out["seconds"] = round(time.time() - t0, 1)
@@ -319,14 +331,15 @@ def write_with_claude(api_key, race_key, brief, tickets, model=ARTICLE_MODEL, fo
             return out
         text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
         parts = json.loads(text)
-        if not all(str(parts.get(k) or "").strip() for k in ("lead", "development", "ticket_comment")):
+        if not all(str(parts.get(k) or "").strip() for k in keys):
             out["error"] = "本文が空でした"
             return out
-        problem = check_text(" ".join(str(parts[k]) for k in ("lead", "development", "ticket_comment")), tickets)
+        problem = check_text(" ".join(str(parts[k]) for k in keys), tickets)
         if problem:
             out["error"] = f"守るべきことを破っていたため使いません: {problem}"
             return out
-        out.update({"status": "ok", "body": compose(parts, tickets), "parts": parts})
+        out.update({"status": "ok", "body": compose_fn(parts) if compose_fn else compose(parts, tickets),
+                    "parts": parts})
         _CACHE[key] = out
         return out
     except Exception as e:  # noqa: BLE001  失敗しても記事は決まった型で作れる

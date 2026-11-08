@@ -229,3 +229,108 @@ def test_make_note_skips_manshu_only_race():
 
     assert ap.make_note(Ctx(), {**T, "sources": ["manshu"]}, _final(), TICKETS) is None
     assert ap.make_note_from_saved(Ctx(), {**T, "sources": ["manshu"]}) is None
+
+
+# ---------------------------------------------------------------
+# 万舟チャンスのレース: 2種類の買い目
+# ---------------------------------------------------------------
+WIDE = {**ON, "note_auto_scope": "pre_manshu", "note_auto_price_manshu": 500}
+TM = {**T, "race_key": "20261107_14_7", "venue": "鳴門", "race_no": 7, "deadline": "13:36", "sources": ["manshu"]}
+AIM = [{"combo": "2-1-4", "tier": "中穴", "odds": 59.5}, {"combo": "1-3-2", "tier": "中穴", "odds": 31.0},
+       {"combo": "2-1-5", "tier": "万舟", "odds": 178.7}]
+MARK = {"aim_tickets": AIM, "aim_saved_at": "2026-11-07 04:26:30+00", "post_saved_at": "2026-11-07T13:26:26+09:00",
+        "post_head_axis_lane": 2, "head_axis_lane": 5, "manshu_prob": 0.25, "post_manshu_prob": 0.29,
+        "post_flag_reasons": ["本命 1→5号艇"]}
+
+
+class MarkSb(FakeSb):
+    def __init__(self, mark, **kw):
+        super().__init__(**kw)
+        self.mark = mark
+
+    def __call__(self, method, path, **kw):
+        if path.startswith("manshu_chance_picks"):
+            self.calls.append((method, path, kw))
+            return _Resp([self.mark] if self.mark else [])
+        return super().__call__(method, path, **kw)
+
+
+def _claude_manshu(monkeypatch, seen):
+    def fake(api_key, race_key, brief, tickets, model=na.ARTICLE_MODEL, force=False, system=None, schema=None,
+             keys=("lead", "development", "ticket_comment"), compose_fn=None, prompt_version=None):
+        seen.update(brief=brief, keys=keys, tickets=tickets)
+        parts = {"lead": "こんにちは！万舟チャンスの鳴門7Rです。", "development": "スタートは5号艇が速そうです。2号艇の差しに期待します。",
+                 "aim_comment": "本命の1着確率が低めで荒れる余地があります。頭本命の2号艇から 2-1-4 を狙います。",
+                 "ticket_comment": "1-3-2 を本線にしました。"}
+        problem = na.check_text(" ".join(parts[k] for k in keys), tickets)
+        assert problem is None, problem
+        return {"status": "ok", "body": compose_fn(parts), "called_api": False}
+    monkeypatch.setattr(na, "write_with_claude", fake)
+
+
+def test_manshu_article_has_both_tickets(monkeypatch):
+    seen = {}
+    _claude_manshu(monkeypatch, seen)
+    sb = MarkSb(MARK)
+    out = note_auto.generate(sb, TM, _final(), TICKETS, settings=WIDE, api_key="x")
+    assert out["status"] == "ok" and out["manshu_aim"] is True
+    row = sb.saved()
+    text = row["p_article_text"]
+    free, paid = note_auto.split_by_mark(text)
+    assert row["p_title"] == "【万舟チャンス】【有料予想】鳴門 7R｜締切 13:36" and row["p_price"] == 500
+    # 無料部分: 万舟チャンスのレースと分かる一言・組番なし
+    assert note_auto.MANSHU_INTRO in free and "万舟チャンスの買い目" in free and not na._has_combo(free)
+    # 有料部分: 2種類の買い目が見出しつきで両方入り、重なる組（1-3-2）には ※重複
+    assert note_auto.MANSHU_AIM_HEAD in paid and note_auto.MANSHU_MODEL_HEAD in paid
+    assert paid.index(note_auto.MANSHU_AIM_HEAD) < paid.index(note_auto.MANSHU_MODEL_HEAD)
+    assert "【中穴（オッズ30〜99倍）】" in paid and "【万舟（オッズ100倍以上）】" in paid
+    assert "【本線買い目】" in paid and "【抑え買い目】" in paid
+    assert paid.count("1-3-2 ※重複") == 2 and note_auto.OVERLAP_NOTE in paid
+    assert "2-1-4" in paid and "2-1-5" in paid and "1-2-34" in paid
+    assert "頭本命の2号艇" in paid
+    # 夜のまとめの的中判定には両方の買い目を使う
+    assert [t["combo"] for t in row["p_article_tickets"]] == ["2-1-4", "1-3-2", "2-1-5", "1-2-3", "1-2-4", "1-3-2"]
+    # Claude に渡すデータ: 2種類の買い目と万舟チャンスの情報（頭本命は展示後）
+    assert seen["keys"] == note_auto.MANSHU_KEYS
+    assert seen["brief"]["万舟チャンス"]["頭本命（1着軸）"] == "2号艇"
+    assert seen["brief"]["万舟チャンス"]["展示後の注意"] == "本命 1→5号艇"
+    assert set(seen["brief"]["載せる買い目"]) == {"万舟チャンスの買い目", "通常の予想"}
+
+
+def test_manshu_without_rebuilt_aim_omits_aim(monkeypatch):
+    """万舟チャンスの買い目を展示後に作り直せなかった（朝の買い目のまま）レースは、その欄を省いて一言書く。"""
+    seen = {}
+    _claude_manshu(monkeypatch, seen)
+    morning = {**MARK, "aim_saved_at": "2026-11-06 23:15:39+00", "aim_source": "morning"}
+    sb = MarkSb(morning)
+    out = note_auto.generate(sb, TM, _final(), TICKETS, settings=WIDE, api_key="x")
+    paid = note_auto.split_by_mark(sb.saved()["p_article_text"])[1]
+    assert out["manshu_aim"] is False and "作り直せなかった" in out["reason"]
+    assert "展示後に万舟チャンスの買い目を作り直せなかったため" in paid and "【中穴" not in paid
+    assert note_auto.MANSHU_MODEL_HEAD in paid and "【本線買い目】" in paid
+    assert sb.saved()["p_title"].startswith("【万舟チャンス】")
+    assert seen["keys"] == ("lead", "development", "ticket_comment") and "万舟チャンス" not in seen["brief"]
+    assert [t["combo"] for t in sb.saved()["p_article_tickets"]] == ["1-2-3", "1-2-4", "1-3-2"]
+
+
+def test_manshu_template_when_claude_fails():
+    sb = MarkSb(MARK)
+    out = note_auto.generate(sb, TM, _final(), TICKETS, settings=WIDE, api_key="")
+    paid = note_auto.split_by_mark(sb.saved()["p_article_text"])[1]
+    assert out["status"] == "template"
+    assert note_auto.MANSHU_AIM_HEAD in paid and note_auto.MANSHU_MODEL_HEAD in paid and "1-3-2 ※重複" in paid
+
+
+def test_pre_race_article_unchanged(monkeypatch):
+    """厳選10のレースの記事は今までと同じ（万舟チャンスの行を読まない・タイトル・価格・本文の形）。"""
+    _claude_ok(monkeypatch)
+    sb = MarkSb(MARK)
+    note_auto.generate(sb, T, _final(), TICKETS, settings=WIDE, api_key="x")
+    row = sb.saved()
+    assert not any(p.startswith("manshu_chance_picks") for m, p, kw in sb.calls)
+    assert row["p_title"] == "【有料予想】平和島 5R｜締切 11:30" and row["p_price"] == 300
+    parts = {"lead": "こんにちは！平和島5Rの見どころです。",
+             "development": "スタートは内がそろいそうです。1号艇が先に回る展開を本線に見ます。",
+             "ticket_comment": "1-2-3 を本線にしました。"}
+    expected = note_auto.with_paywall_mark(na.compose(parts, na.tickets_list(TICKETS)), "平和島 5R", "11:30")
+    assert row["p_article_text"] == expected and "万舟" not in row["p_article_text"]
