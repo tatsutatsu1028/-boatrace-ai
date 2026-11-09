@@ -129,6 +129,20 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - データベース: `supabase/migrations/20261025000000_auto_post_predict.sql`
 - 止めるとき: `select cron.unschedule('trigger-auto-post-predict');`（夜の集計は `trigger-auto-post-report`）
 
+## 🧭 万舟チャンスのオリジナル展示（自動記録）
+万舟チャンスのレースだけ、各場の公式サイトのオリジナル展示（一周・まわり足・直線）を自動で取って記録します
+（`original_exhibition_fetcher.py`）。**記録のみ**で、予想・頭本命・買い目・通知には使いません。予想タブの手入力はそのままです。
+
+- いつ: 展示後の自動予想（`auto_post_predict.py run`）の毎回の最後。そのレースの展示後予想が済んだら（`auto_post_log` が done / already）1回取る。
+  予想・買い目・通知の後に動かすので、取れない・遅れても展示後予想と Discord 通知は止まらない
+- 1レース1回。未公開・取得失敗のときだけ、4分以上あと（次の起動）に1回だけ取り直す。形式違い・対象外の場は取り直さない
+- 対象の場: 文字（HTML の表）で載せている場だけ（多摩川・常滑・津・三国・鳴門・下関・芦屋）。それ以外は通信せず「対象外」と理由を残す。
+  場ごとの調査は `docs/data_investigation/ORIGINAL_EXHIBITION.md`
+- 通信は `polite_http.get`（開始間隔 3.4 秒以上）。URL は各場のページ自身が読み込むものだけ
+- 記録: `original_exhibition`（1艇1行: race_key, lane, original_lap, original_turn, original_straight, source_url, fetched_at）と
+  `original_exhibition_log`（1レース1行: status = ok / unpublished（未公開）/ format（形式違い）/ error（取得失敗）/ unsupported（対象外）と理由・回数）
+- データベース: `supabase/migrations/20261110000000_original_exhibition.sql`（SQL Editor で実行する。実行するまでは記録をスキップするだけで、ほかは動く）
+
 ## 💥 万舟チャンスの予想3種比較（自動記録）
 万舟チャンスのレースで、中穴〜万舟の買い目を「モデルのみ」「Claudeのみ」「両方の予想平均」の3種類の確率で作り、
 毎日 Supabase の `manshu_source_compare` に1レース3行（source = model / claude / blend）で残します（`manshu_source.py`）。
