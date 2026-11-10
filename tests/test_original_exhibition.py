@@ -57,6 +57,7 @@ def test_parse_unpublished_and_format():
     empty = [(lane, "-", "-", "-") for lane in range(1, 7)]
     assert oe.parse(_page(empty))[0] == "unpublished"
     assert oe.parse(_page(ROWS, head=("半周", "まわり足", "直線")))[0] == "format"
+    assert oe.parse("<p>表がない</p>")[0] == "format"
     assert oe.parse(_page(ROWS[:5]))[0] == "format"
     bad = [(1, "52.0", "5.47", "6.87")] + ROWS[1:]   # 一周の範囲外（体重などのずれ）
     assert oe.parse(_page(bad))[0] == "format"
@@ -68,6 +69,43 @@ def test_source_url_and_unsupported():
                                        "?day=20261110&race=12&jo=05&if=1")
     assert "kind=2" in oe.source_url("8", "20261110_08_3") and "race=3" in oe.source_url("8", "20261110_08_3")
     assert oe.source_url("03", "20261110_03_1") is None
+    assert oe.source_url("04", "20261110_04_3").endswith("/yoso0503.htm")      # 2桁のレース番号
+    assert oe.source_url("12", "20261110_12_11").endswith("/st0211.htm")
+    assert oe.UNSUPPORTED["07"].startswith("対象外")
+
+
+def _row_html(lane, cells, lane_cell=None):
+    lane_cell = lane_cell or f"<td class='waku0{lane}'>{lane}</td>"
+    return "<tr>" + lane_cell + "<td>選手</td>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+
+
+def test_parse_trailing_columns_and_two_labels():
+    head = "<table><tr><th>枠</th><th>一周</th><th>まわり足</th><th>直線</th><th>展示</th><th>体重</th><th>部品</th></tr>"
+    rows = "".join(_row_html(l, ["36.6%d" % l, "5.50", "7.37", "6.79", "52.1", "リング×4"]) for l in range(1, 7))
+    st, out, _ = oe.parse(head + rows + "</table>", trailing=3)        # 平和島: 後ろに3列
+    assert st == "ok" and out[1] == {"original_lap": 36.61, "original_turn": 5.5, "original_straight": 7.37}
+    assert oe.parse(head + rows + "</table>")[0] == "format"           # 列の数を間違えると形式違い
+    head2 = "<table><tr><th>枠</th><th>展示</th><th>一周</th><th>まわり足</th></tr>"
+    rows2 = "".join(_row_html(l, ["6.70", "37.10", "5.40"]) for l in range(1, 7))
+    st, out, _ = oe.parse(head2 + rows2 + "</table>", labels=("一周", "まわり足"))   # 住之江: 直線なし
+    assert st == "ok" and out[2] == {"original_lap": 37.1, "original_turn": 5.4, "original_straight": None}
+
+
+def test_parse_wakuban_cell_and_no_lap():
+    head = "<table><tbody><tr><td>枠</td><td>展示</td><td>一周</td><td>まわり足</td><td>直線</td></tr>"
+    rows = "".join(_row_html(l, ["6.92", "<i>--.--</i>", "5.97", "7.26"],
+                             lane_cell=f"<td rowspan='2'><p class='wakuban'>{l}</p></td>") for l in range(1, 7))
+    st, out, _ = oe.parse(head + rows + "</tbody></table>")             # 宮島: 周回短縮で一周なし
+    assert st == "ok" and out[1] == {"original_lap": None, "original_turn": 5.97, "original_straight": 7.26}
+
+
+def test_miyajima_race_mark():
+    import re
+    mark = oe._fill(oe.VENUES["17"]["race_mark"], "20261110_17_1")
+    tabs = "1R 2R 3R 4R 5R 6R 7R 8R 9R 10R 11R 12R"
+    assert re.search(mark, tabs + " 1 R ファースト")
+    assert not re.search(mark, tabs + " 11 R 一般")
+    assert not re.search(mark, tabs + " 5 R 予選")
 
 
 def _t(jcd="05", deadline="15:30", sources=("manshu",), **kw):
@@ -110,7 +148,7 @@ class FakeSB:
 
 
 def test_record_ok_writes_lanes_and_log(monkeypatch):
-    monkeypatch.setattr(oe, "fetch", lambda url: oe.parse(_page(ROWS)))
+    monkeypatch.setattr(oe, "fetch", lambda jcd, rk: oe.parse(_page(ROWS)))
     sb = FakeSB()
     assert oe.record(sb, _t(), None) == "ok"
     (m1, p1, k1), (m2, p2, k2) = sb.calls
@@ -120,7 +158,7 @@ def test_record_ok_writes_lanes_and_log(monkeypatch):
 
 
 def test_record_unsupported_does_not_fetch(monkeypatch):
-    def boom(url):
+    def boom(jcd, rk):
         raise AssertionError("通信しない")
 
     monkeypatch.setattr(oe, "fetch", boom)
@@ -131,7 +169,7 @@ def test_record_unsupported_does_not_fetch(monkeypatch):
 
 
 def test_record_unpublished_notes_retry(monkeypatch):
-    monkeypatch.setattr(oe, "fetch", lambda url: ("unpublished", None, "未公開（値が入っていない）"))
+    monkeypatch.setattr(oe, "fetch", lambda jcd, rk: ("unpublished", None, "未公開（値が入っていない）"))
     sb = FakeSB()
     assert oe.record(sb, _t(), None) == "unpublished"
     assert "取り直す" in sb.calls[-1][2]["json"]["reason"]

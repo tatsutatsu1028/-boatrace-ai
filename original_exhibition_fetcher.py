@@ -7,7 +7,7 @@
   - 1レースにつき取得は1回。まだ出ていなければ（未公開）、次の起動（RETRY_AFTER 分以上あと）に1回だけ取り直す。
     通信の失敗も同じく1回だけ取り直す。形式違い・対象外の場は取り直さない
   - 文字（HTML の表）で載せている場だけを対象にする（VENUES）。それ以外の場は通信せず「対象外」と理由を残す
-  - 通信は polite_http.get（開始間隔 3.4 秒以上・メンテナンス時間は待つ）。URL は各場のページ自身が
+  - 通信は polite_http.get / post（開始間隔 3.4 秒以上・メンテナンス時間は待つ）。URL は各場のページ自身が
     読み込むものだけを使う（推測した URL は使わない）
 
 保存先（supabase/migrations/20261110000000_original_exhibition.sql）
@@ -31,30 +31,44 @@ RETRY_AFTER = 4           # 取り直しまでの最短の分（auto_post_predic
 GIVE_UP_AFTER = 60        # 締切からこの分を過ぎたら、取り直しはしない
 RETRYABLE = ("unpublished", "error")
 
-# 各場の公式サイトのオリジナル展示。どれも「直前情報」の中のタブ（iframe）で、ページ自身の JavaScript が
-# 組み立てる URL をそのまま使う。{day} = YYYYMMDD, {race} = レース番号
-#   oriten        : /modules/yosou/oriten.php?day=&race=&jo=&if=1（多摩川のタブ「オリジナル展示データ」）
-#   group-cyokuzen: /modules/yosou/group-cyokuzen.php?day=&race=&kind=2&if=1（直前情報の小タブ「オリジナル展示データ」）
-#   group-tenji   : /modules/yosou/group-tenji.php?type=group-tenji&day=&race=&kind=1&if=1（展示情報の小タブ「オリジナル展示」）
+# 各場の公式サイトのオリジナル展示。どれもページ自身が読み込む URL（タブ・リンク・JavaScript が組み立てるもの）を
+# そのまま使う。{day} = YYYYMMDD, {race} = レース番号, {rr} = 2桁のレース番号
+#   url      : 取る URL
+#   post     : POST で送る値（無ければ GET）。宮島はトップページが POST で全タブ分をまとめて読み込む
+#   section  : 応答を "####" で区切ったときのオリジナル展示の位置（宮島の list_start_02）
+#   labels   : 見出し（住之江は一周・まわり足だけで直線なし）
+#   trailing : 値の後ろに続く列の数（福岡は展示評価、平和島は展示タイム・体重・部品交換）
+#   race_mark: 応答の中にこのレースだと分かる文字（宮島は日付・レースを取り違えていないか確かめる）
+_XOOPS_C = "/modules/yosou/group-cyokuzen.php?day={day}&race={race}&kind=2&if=1"
 VENUES = {
-    "05": "https://www.boatrace-tamagawa.com/modules/yosou/oriten.php?day={day}&race={race}&jo=05&if=1",
-    "08": "https://www.boatrace-tokoname.jp/modules/yosou/group-cyokuzen.php?day={day}&race={race}&kind=2&if=1",
-    "09": "https://www.boatrace-tsu.com/modules/yosou/group-tenji.php?type=group-tenji&day={day}&race={race}&kind=1&if=1",
-    "10": "https://www.boatrace-mikuni.jp/modules/yosou/group-cyokuzen.php?day={day}&race={race}&kind=2&if=1",
-    "14": "https://www.n14.jp/modules/yosou/group-cyokuzen.php?day={day}&race={race}&kind=2&if=1",
-    "19": "https://www.boatrace-shimonoseki.jp/modules/yosou/group-cyokuzen.php?day={day}&race={race}&kind=2&if=1",
-    "21": "https://www.boatrace-ashiya.com/modules/yosou/group-cyokuzen.php?day={day}&race={race}&kind=2&if=1",
+    "04": {"url": "https://www.heiwajima.gr.jp/asp/kyogi/04/pc/yoso05{rr}.htm", "trailing": 3},
+    "05": {"url": "https://www.boatrace-tamagawa.com/modules/yosou/oriten.php?day={day}&race={race}&jo=05&if=1"},
+    "08": {"url": "https://www.boatrace-tokoname.jp" + _XOOPS_C},
+    "09": {"url": "https://www.boatrace-tsu.com/modules/yosou/group-tenji.php?type=group-tenji&day={day}&race={race}"
+                  "&kind=1&if=1"},
+    "10": {"url": "https://www.boatrace-mikuni.jp" + _XOOPS_C},
+    "11": {"url": "https://www.boatrace-biwako.jp/modules/yosou/cyokuzen.php?day={day}&race={race}&if=1&kind=2"},
+    "12": {"url": "https://www.boatrace-suminoe.jp/asp/kyogi/12/pc/st02{rr}.htm", "labels": ("一周", "まわり足")},
+    "14": {"url": "https://www.n14.jp" + _XOOPS_C},
+    "17": {"url": "https://www.boatrace-miyajima.com/race_common/require/kaisai_reload.php",
+           "post": {"race": "{race}", "date": "{day}"}, "section": 7, "race_mark": r"(?<![0-9]){race}\s+R"},
+    "19": {"url": "https://www.boatrace-shimonoseki.jp" + _XOOPS_C},
+    "21": {"url": "https://www.boatrace-ashiya.com" + _XOOPS_C},
+    "22": {"url": "https://www.boatrace-fukuoka.com/modules/yosou/tenji_info.php?day={day}&race={race}&if=1&nowmode=1",
+           "trailing": 1},
 }
 
 # 対象外の場の理由（無い場は UNSUPPORTED_DEFAULT）
 UNSUPPORTED = {
     "01": "対象外（一周ではなく半周タイムの公開で、項目が違う）",
     "03": "対象外（オリジナル展示を公開していない）",
+    "07": "対象外（開催中の公式サイトのレース情報にオリジナル展示が見当たらない）",
 }
-UNSUPPORTED_DEFAULT = "対象外（文字で取れる公開ページを確認できていない場）"
+UNSUPPORTED_DEFAULT = "対象外（未確認の場。次の開催時に確認して追加する）"
 
 LABELS = {"一周": "original_lap", "まわり足": "original_turn", "直線": "original_straight"}
-# 値の範囲（外れたら形式違いとみなす。単位は秒）
+DEFAULT_LABELS = ("一周", "まわり足", "直線")
+# 値の範囲（外れたら形式違いとみなす。単位は秒。場によって計測区間が違うので広め）
 RANGES = {"original_lap": (30.0, 45.0), "original_turn": (3.0, 10.0), "original_straight": (5.0, 10.0)}
 NOT_YET = ("ただいまデータはございません", "しばらくお待ちください", "データがありません")
 
@@ -63,11 +77,14 @@ def log(*a):
     print("[ORIGINAL_EXHIBITION]", *a, flush=True)
 
 
+def _fill(v, race_key):
+    race = int(race_key.split("_")[2])
+    return v.format(day=race_key[:8], race=race, rr=f"{race:02d}")
+
+
 def source_url(jcd, race_key):
-    tpl = VENUES.get(str(jcd).zfill(2))
-    if not tpl:
-        return None
-    return tpl.format(day=race_key[:8], race=int(race_key.split("_")[2]))
+    v = VENUES.get(str(jcd).zfill(2))
+    return _fill(v["url"], race_key) if v else None
 
 
 # ---------------------------------------------------------------
@@ -79,7 +96,7 @@ def _text(s):
 
 def _num(s):
     s = _text(s).replace(" ", "")
-    if not s or set(s) <= {"-", "－", "‐", "ー"}:
+    if not s or set(s) <= set("-－‐ー.．"):
         return None
     try:
         return float(s)
@@ -87,66 +104,90 @@ def _num(s):
         raise ValueError(f"数値でない値: {s[:10]}") from None
 
 
-def parse(page):
+def _lane(attrs, inner):
+    """枠番のセルなら 1〜6、違えば None（class に waku / tei、または中に wakuban の印）。"""
+    if not re.search(r"waku|tei", attrs) and "wakuban" not in inner:
+        return None
+    t = _text(inner)
+    return int(t) if t.isdigit() and 1 <= int(t) <= 6 else None
+
+
+def parse(page, labels=DEFAULT_LABELS, trailing=0):
     """オリジナル展示の表 → ("ok", {lane: {original_lap, original_turn, original_straight}}, None)
     または ("unpublished" / "format", None, 理由)。
 
-    表の作り（各場共通）: 枠番のセル（class に waku）がある行の、最後の3つのセルが見出しの順
-    （一周・まわり足・直線。場によって順番が違ってもよい）。値が「-」の艇は計測なし（None）。"""
+    表の作り（各場共通）: 枠番のセルで始まる行の、後ろから trailing 列を除いた最後の len(labels) 個のセルが
+    見出しの順（場によって順番が違ってもよい）。値が「-」「--.--」の艇は計測なし（None）。見出しに無い項目も None。"""
     if not page:
         return "format", None, "空のページ"
     for w in NOT_YET:
         if w in page:
             return "unpublished", None, f"未公開（{w}）"
-    head = page.split("<tbody", 1)[0]
-    pos = {}
-    for label, col in LABELS.items():
-        m = [x.start() for x in re.finditer(label, head)]
-        if m:
-            pos[col] = m[-1]   # 見出しの表の中のもの（タブ名などより後ろ）
-    if len(pos) != 3:
-        return "format", None, "形式違い（一周・まわり足・直線の見出しがそろっていない）"
-    order = sorted(pos, key=pos.get)
-    rows = {}
-    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S):
-        tds = re.findall(r"<td([^>]*)>(.*?)</td>", tr, re.S)
-        if not tds or "waku" not in tds[0][0]:
+    rows, first = {}, None
+    n = len(labels)
+    for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", page, re.S):
+        tds = re.findall(r"<td([^>]*)>(.*?)</td>", m.group(1), re.S)
+        lane = _lane(*tds[0]) if tds else None
+        if lane is None or len(tds) < 2 + n + trailing:
             continue
-        lane = _text(tds[0][1])
-        if not lane.isdigit() or not 1 <= int(lane) <= 6 or len(tds) < 4:
-            continue
+        first = m.start() if first is None else first
+        cells = tds[len(tds) - trailing - n: len(tds) - trailing]
         try:
-            vals = [_num(v) for _, v in tds[-3:]]
+            rows[lane] = [_num(v) for _, v in cells]
         except ValueError as e:
             return "format", None, f"形式違い（{e}）"
-        rows[int(lane)] = dict(zip(order, vals))
+    if first is None:
+        return "format", None, "形式違い（枠の行が見つからない）"
+    head = page[:first]
+    pos = {}
+    for label in labels:
+        found = [x.start() for x in re.finditer(label, head)]
+        if not found:
+            return "format", None, f"形式違い（見出し「{label}」が無い）"
+        pos[LABELS[label]] = found[-1]   # 表の見出しのもの（タブ名などより後ろ）
+    order = sorted(pos, key=pos.get)
     if sorted(rows) != [1, 2, 3, 4, 5, 6]:
         return "format", None, f"形式違い（枠の行が6つそろわない: {len(rows)}）"
-    if all(v is None for r in rows.values() for v in r.values()):
+    out = {lane: {**{c: None for c in LABELS.values()}, **dict(zip(order, vals))} for lane, vals in rows.items()}
+    if all(v is None for r in out.values() for v in r.values()):
         return "unpublished", None, "未公開（値が入っていない）"
-    for r in rows.values():
+    for r in out.values():
         for col, v in r.items():
             lo, hi = RANGES[col]
             if v is not None and not lo <= v <= hi:
                 return "format", None, f"形式違い（{col} の値が範囲外: {v}）"
-    return "ok", rows, None
+    return "ok", out, None
 
 
 # ---------------------------------------------------------------
 # 取る・記録する
 # ---------------------------------------------------------------
-def fetch(url, timeout=15):
+def fetch(jcd, race_key, timeout=15):
     """1回だけ取る。(status, rows, reason)。"""
     import polite_http
 
+    v = VENUES[str(jcd).zfill(2)]
+    url = _fill(v["url"], race_key)
     try:
-        r = polite_http.get(url, timeout=timeout, binary=True)
+        if v.get("post"):
+            data = {k: _fill(x, race_key) for k, x in v["post"].items()}
+            r = polite_http.post(url, data, timeout=timeout, referer=url.split("/race_common/")[0] + "/")
+        else:
+            r = polite_http.get(url, timeout=timeout, binary=True)
     except Exception as e:  # noqa: BLE001
         return "error", None, f"取得失敗（{type(e).__name__}）"
     if r.status_code != 200:
         return "error", None, f"取得失敗（HTTP {r.status_code}）"
     try:
-        return parse(r.content.decode("utf-8", errors="replace"))
+        page = r.content.decode("utf-8", errors="replace")
+        if v.get("section") is not None:
+            parts = page.split("####")
+            if len(parts) <= v["section"]:
+                return "format", None, "形式違い（応答の区切りが足りない）"
+            page = parts[v["section"]]
+        if v.get("race_mark") and not re.search(_fill(v["race_mark"], race_key), _text(page)):
+            return "format", None, "形式違い（別のレースの表）"
+        return parse(page, v.get("labels", DEFAULT_LABELS), v.get("trailing", 0))
     except Exception as e:  # noqa: BLE001
         return "format", None, f"形式違い（読み取りでエラー {type(e).__name__}）"
 
@@ -186,7 +227,7 @@ def record(sb, t, prev, now=None):
         status, rows, reason = "unsupported", None, UNSUPPORTED.get(t["jcd"], UNSUPPORTED_DEFAULT)
         tried = False
     else:
-        status, rows, reason = fetch(url)
+        status, rows, reason = fetch(t["jcd"], t["race_key"])
         tried = True
     fetched_at = datetime.now(JST).isoformat(timespec="seconds")
     if rows:
