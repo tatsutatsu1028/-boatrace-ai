@@ -76,6 +76,15 @@ def get(url, timeout=30, binary=False):
     return r
 
 
+def post(url, data, timeout=30, referer=None):
+    """1回だけ POST する（get と同じ間隔の制限。ページ自身が POST で読み込むものだけに使う）。"""
+    _wait_turn()
+    headers = dict(UA)
+    if referer:
+        headers["Referer"] = referer
+    return requests.post(url, data=data, headers=headers, timeout=timeout)
+
+
 def deadline_from_stop_at(stop_at, max_hours_ahead=10):
     """'03:50' のようなJST時刻 → time.time() 基準の締切。
 
