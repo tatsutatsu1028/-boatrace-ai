@@ -198,3 +198,23 @@ def test_auto_post_hook_swallows_errors(monkeypatch):
     monkeypatch.setattr(ap, "load_log", boom)
     assert ap.record_original_exhibition("20261110", [_t()]) == {}
     assert ap.record_original_exhibition("20261110", [_t(sources=("pre",))]) == {}
+
+
+def test_before_deadline():
+    t = _t(deadline="15:30")
+    assert oe.before_deadline(t, _at("15:17")) is True
+    assert oe.before_deadline(t, _at("15:31")) is False
+    assert oe.before_deadline(_t(deadline=None), _at("15:17")) is None
+
+
+def test_record_writes_deadline_flag(monkeypatch):
+    monkeypatch.setattr(oe, "fetch", lambda jcd, rk: oe.parse(_page(ROWS)))
+    sb = FakeSB()
+    oe.record(sb, {**_t(deadline="23:59"), "race_date": "2099-01-01"}, None)   # 締切はまだ先
+    row = sb.calls[-1][2]["json"]
+    assert row["deadline"] == "23:59" and row["before_deadline"] is True
+    # 取れなかったレースは判定しない（null）
+    monkeypatch.setattr(oe, "fetch", lambda jcd, rk: ("unpublished", None, "未公開（値が入っていない）"))
+    sb = FakeSB()
+    oe.record(sb, _t(deadline="23:59"), None)
+    assert sb.calls[-1][2]["json"]["before_deadline"] is None
