@@ -71,7 +71,8 @@ def test_source_url_and_unsupported():
     assert oe.source_url("03", "20261110_03_1") is None
     assert oe.source_url("04", "20261110_04_3").endswith("/yoso0503.htm")      # 2桁のレース番号
     assert oe.source_url("12", "20261110_12_11").endswith("/st0211.htm")
-    assert oe.UNSUPPORTED["07"].startswith("対象外")
+    assert oe.UNSUPPORTED["07"].startswith("対象外") and oe.UNSUPPORTED["24"].startswith("対象外")
+    assert oe.source_url("16", "20261112_16_7").endswith("/kyogi/16/pc/st0207.htm")
 
 
 def _row_html(lane, cells, lane_cell=None):

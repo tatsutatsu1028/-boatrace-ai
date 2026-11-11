@@ -52,6 +52,7 @@ VENUES = {
     "11": {"url": "https://www.boatrace-biwako.jp/modules/yosou/cyokuzen.php?day={day}&race={race}&if=1&kind=2"},
     "12": {"url": "https://www.boatrace-suminoe.jp/asp/kyogi/12/pc/st02{rr}.htm", "labels": ("一周", "まわり足")},
     "14": {"url": "https://www.n14.jp" + _XOOPS_C},
+    "16": {"url": "https://www.kojimaboat.jp/asp/kyogi/16/pc/st02{rr}.htm"},
     "17": {"url": "https://www.boatrace-miyajima.com/race_common/require/kaisai_reload.php",
            "post": {"race": "{race}", "date": "{day}"}, "section": 7, "race_mark": r"(?<![0-9]){race}\s+R"},
     "19": {"url": "https://www.boatrace-shimonoseki.jp" + _XOOPS_C},
@@ -65,6 +66,7 @@ UNSUPPORTED = {
     "01": "対象外（一周ではなく半周タイムの公開で、項目が違う）",
     "03": "対象外（オリジナル展示を公開していない）",
     "07": "対象外（開催中の公式サイトのレース情報にオリジナル展示が見当たらない）",
+    "24": "対象外（公式サイトの直前情報・スタート展示情報にオリジナル展示が無い）",
 }
 UNSUPPORTED_DEFAULT = "対象外（未確認の場。次の開催時に確認して追加する）"
 
