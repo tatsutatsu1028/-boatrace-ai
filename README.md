@@ -141,8 +141,9 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
   場ごとの調査は `docs/data_investigation/ORIGINAL_EXHIBITION.md`
 - 通信は `polite_http.get` / `post`（開始間隔 3.4 秒以上）。URL は各場のページ自身が読み込むものだけ
 - 記録: `original_exhibition`（1艇1行: race_key, lane, original_lap, original_turn, original_straight, source_url, fetched_at）と
-  `original_exhibition_log`（1レース1行: status = ok / unpublished（未公開）/ format（形式違い）/ error（取得失敗）/ unsupported（対象外）と理由・回数）
-- データベース: `supabase/migrations/20261110000000_original_exhibition.sql`（SQL Editor で実行する。実行するまでは記録をスキップするだけで、ほかは動く）
+  `original_exhibition_log`（1レース1行: status = ok / unpublished（未公開）/ format（形式違い）/ error（取得失敗）/ unsupported（対象外）と理由・回数、
+  締切 `deadline` と値を締切前に取れたか `before_deadline`。取れなかったレースは null）
+- データベース: `supabase/migrations/20261110000000_original_exhibition.sql`・`20261111000000_original_exhibition_before_deadline.sql`（SQL Editor で実行する）
 
 ## 💥 万舟チャンスの予想3種比較（自動記録）
 万舟チャンスのレースで、中穴〜万舟の買い目を「モデルのみ」「Claudeのみ」「両方の予想平均」の3種類の確率で作り、

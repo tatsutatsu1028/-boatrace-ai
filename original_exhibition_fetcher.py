@@ -13,7 +13,9 @@
 保存先（supabase/migrations/20261110000000_original_exhibition.sql）
   original_exhibition     : 1艇1行（race_key, lane, original_lap, original_turn, original_straight, source_url, fetched_at）
   original_exhibition_log : 1レース1行。status = ok / unpublished（未公開）/ format（形式違い）/ error（取得失敗）
-                            / unsupported（対象外の場）と理由・回数
+                            / unsupported（対象外の場）と理由・回数。締切（deadline）と、値を締切前に取れたか
+                            （before_deadline。取れなかったレース・締切が読めないレースは null）
+                            （20261111000000_original_exhibition_before_deadline.sql）
 """
 
 from __future__ import annotations
@@ -200,6 +202,12 @@ def _minutes_from_deadline(t, now):
     return (now - dl).total_seconds() / 60
 
 
+def before_deadline(t, fetched):
+    """値を締切前に取れたか（True / False）。締切が読めなければ None。fetched は取った時刻（JST の datetime）。"""
+    after = _minutes_from_deadline(t, fetched)
+    return None if after is None else after < 0
+
+
 def needs_fetch(t, prev, post_status, now):
     """このレースで今回取るか。
     t: auto_post_predict の対象 / prev: original_exhibition_log の行 / post_status: auto_post_log の status"""
@@ -229,7 +237,8 @@ def record(sb, t, prev, now=None):
     else:
         status, rows, reason = fetch(t["jcd"], t["race_key"])
         tried = True
-    fetched_at = datetime.now(JST).isoformat(timespec="seconds")
+    fetched = datetime.now(JST)
+    fetched_at = fetched.isoformat(timespec="seconds")
     if rows:
         sb("POST", f"{TABLE}?on_conflict=race_key,lane", prefer="resolution=merge-duplicates,return=minimal",
            json=[{"race_key": t["race_key"], "lane": lane, **vals, "source_url": url, "fetched_at": fetched_at}
@@ -241,6 +250,9 @@ def record(sb, t, prev, now=None):
         "race_key": t["race_key"], "race_date": t["race_date"], "jcd": t["jcd"], "race_no": t["race_no"],
         "status": status, "reason": reason, "source_url": url, "attempts": attempts,
         "last_tried_at": fetched_at if tried else (prev or {}).get("last_tried_at"),
+        "deadline": t.get("deadline"),
+        # 値が取れたときだけ判定（取れていなければ null）
+        "before_deadline": before_deadline(t, fetched) if rows else None,
         "updated_at": fetched_at,
     })
     return status
