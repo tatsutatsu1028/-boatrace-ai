@@ -136,8 +136,8 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - いつ: 展示後の自動予想（`auto_post_predict.py run`）の毎回の最後。そのレースの展示後予想が済んだら（`auto_post_log` が done / already）1回取る。
   予想・買い目・通知の後に動かすので、取れない・遅れても展示後予想と Discord 通知は止まらない
 - 1レース1回。未公開・取得失敗のときだけ、4分以上あと（次の起動）に1回だけ取り直す。形式違い・対象外の場は取り直さない
-- 対象の場: 文字（HTML の表）で載せている場だけ（平和島・多摩川・常滑・津・三国・びわこ・住之江・児島・鳴門・宮島・下関・芦屋・福岡の13場。
-  住之江は直線なし）。それ以外は通信せず「対象外」と理由を残す。
+- 対象の場: 文字（HTML の表・XML）で載せている場だけ（戸田・平和島・多摩川・常滑・津・三国・びわこ・住之江・児島・鳴門・宮島・下関・芦屋・福岡の14場。
+  戸田は XML、住之江は直線なし）。それ以外は通信せず「対象外」と理由を残す。
   場ごとの調査は `docs/data_investigation/ORIGINAL_EXHIBITION.md`
 - 通信は `polite_http.get` / `post`（開始間隔 3.4 秒以上）。URL は各場のページ自身が読み込むものだけ
 - 記録: `original_exhibition`（1艇1行: race_key, lane, original_lap, original_turn, original_straight, source_url, fetched_at）と

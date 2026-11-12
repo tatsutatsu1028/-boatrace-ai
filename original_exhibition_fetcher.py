@@ -41,8 +41,11 @@ RETRYABLE = ("unpublished", "error")
 #   labels   : 見出し（住之江は一周・まわり足だけで直線なし）
 #   trailing : 値の後ろに続く列の数（福岡は展示評価、平和島は展示タイム・体重・部品交換）
 #   race_mark: 応答の中にこのレースだと分かる文字（宮島は日付・レースを取り違えていないか確かめる）
+#   xml      : XML で載せている場（戸田。ページが ./xml/kaisai/{日付}/race_table_original_{RR}.xml を読み込む。
+#              まだ無いとき（404）はページも「表示するデータがありません」と出すので未公開として扱う）
 _XOOPS_C = "/modules/yosou/group-cyokuzen.php?day={day}&race={race}&kind=2&if=1"
 VENUES = {
+    "02": {"url": "https://www.boatrace-toda.jp/xml/kaisai/{day}/race_table_original_{rr}.xml", "xml": True},
     "04": {"url": "https://www.heiwajima.gr.jp/asp/kyogi/04/pc/yoso05{rr}.htm", "trailing": 3},
     "05": {"url": "https://www.boatrace-tamagawa.com/modules/yosou/oriten.php?day={day}&race={race}&jo=05&if=1"},
     "08": {"url": "https://www.boatrace-tokoname.jp" + _XOOPS_C},
@@ -163,6 +166,40 @@ def parse(page, labels=DEFAULT_LABELS, trailing=0):
     return "ok", out, None
 
 
+XML_TAGS = {"rnd": "original_lap", "cnr": "original_turn", "str": "original_straight"}
+
+
+def parse_xml(page):
+    """戸田の XML（<record> ごとに teiban・rnd（一周）・cnr（まわり足）・str（直線））→ parse と同じ形。"""
+    import xml.etree.ElementTree as ET
+
+    if not page or not page.strip():
+        return "unpublished", None, "未公開（空のデータ）"
+    try:
+        root = ET.fromstring(page.encode("utf-8"))
+    except ET.ParseError:
+        return "format", None, "形式違い（XML として読めない）"
+    out = {}
+    for rec in root.iter("record"):
+        lane = (rec.findtext("teiban") or "").strip()
+        if not lane.isdigit() or not 1 <= int(lane) <= 6:
+            continue
+        try:
+            out[int(lane)] = {col: _num(rec.findtext(tag) or "") for tag, col in XML_TAGS.items()}
+        except ValueError as e:
+            return "format", None, f"形式違い（{e}）"
+    if sorted(out) != [1, 2, 3, 4, 5, 6]:
+        return "format", None, f"形式違い（艇の記録が6つそろわない: {len(out)}）"
+    if all(v is None for r in out.values() for v in r.values()):
+        return "unpublished", None, "未公開（値が入っていない）"
+    for r in out.values():
+        for col, v in r.items():
+            lo, hi = RANGES[col]
+            if v is not None and not lo <= v <= hi:
+                return "format", None, f"形式違い（{col} の値が範囲外: {v}）"
+    return "ok", out, None
+
+
 # ---------------------------------------------------------------
 # 取る・記録する
 # ---------------------------------------------------------------
@@ -180,10 +217,14 @@ def fetch(jcd, race_key, timeout=15):
             r = polite_http.get(url, timeout=timeout, binary=True)
     except Exception as e:  # noqa: BLE001
         return "error", None, f"取得失敗（{type(e).__name__}）"
+    if r.status_code == 404 and v.get("xml"):
+        return "unpublished", None, "未公開（データのファイルがまだ無い）"
     if r.status_code != 200:
         return "error", None, f"取得失敗（HTTP {r.status_code}）"
     try:
         page = r.content.decode("utf-8", errors="replace")
+        if v.get("xml"):
+            return parse_xml(page)
         if v.get("section") is not None:
             parts = page.split("####")
             if len(parts) <= v["section"]:
