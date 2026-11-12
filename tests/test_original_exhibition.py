@@ -219,3 +219,32 @@ def test_record_writes_deadline_flag(monkeypatch):
     sb = FakeSB()
     oe.record(sb, _t(deadline="23:59"), None)
     assert sb.calls[-1][2]["json"]["before_deadline"] is None
+
+
+def _xml(vals):
+    recs = "".join(f"<record><teiban>{l}</teiban><name>選手</name><ttime>6.73</ttime><str>{c}</str><cnr>{b}</cnr>"
+                   f"<rnd>{a}</rnd></record>" for l, a, b, c in vals)
+    return f'<?xml version="1.0" encoding="utf-8" ?><table>{recs}</table>'
+
+
+def test_parse_xml_toda():
+    st, out, _ = oe.parse_xml(_xml(ROWS))
+    assert st == "ok" and out[1] == {"original_lap": 36.63, "original_turn": 5.47, "original_straight": 6.87}
+    assert out[6]["original_turn"] is None
+    assert oe.parse_xml(_xml([(l, "", "", "") for l in range(1, 7)]))[0] == "unpublished"
+    assert oe.parse_xml(_xml(ROWS[:5]))[0] == "format"
+    assert oe.parse_xml("<table><record>")[0] == "format"
+    assert oe.parse_xml("")[0] == "unpublished"
+    assert oe.source_url("02", "20261112_02_1").endswith("/xml/kaisai/20261112/race_table_original_01.xml")
+
+
+def test_fetch_xml_404_is_unpublished(monkeypatch):
+    import polite_http
+
+    class R:
+        status_code = 404
+        content = b""
+
+    monkeypatch.setattr(polite_http, "get", lambda url, timeout=15, binary=False: R())
+    assert oe.fetch("02", "20261112_02_1")[0] == "unpublished"
+    assert oe.fetch("05", "20261112_05_1")[0] == "error"                 # HTML の場の 404 は取得失敗のまま
