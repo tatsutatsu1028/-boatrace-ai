@@ -129,13 +129,15 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - データベース: `supabase/migrations/20261025000000_auto_post_predict.sql`
 - 止めるとき: `select cron.unschedule('trigger-auto-post-predict');`（夜の集計は `trigger-auto-post-report`）
 
-## 🧭 万舟チャンスのオリジナル展示（自動記録）
-万舟チャンスのレースだけ、各場の公式サイトのオリジナル展示（一周・まわり足・直線）を自動で取って記録します
+## 🧭 万舟チャンス・厳選10のオリジナル展示（自動記録）
+万舟チャンスと展示前厳選10のレースだけ、各場の公式サイトのオリジナル展示（一周・まわり足・直線）を自動で取って記録します
 （`original_exhibition_fetcher.py`）。**記録のみ**で、予想・頭本命・買い目・通知には使いません。予想タブの手入力はそのままです。
 
 - いつ: 展示後の自動予想（`auto_post_predict.py run`）の毎回の最後。そのレースの展示後予想が済んだら（`auto_post_log` が done / already）1回取る。
   予想・買い目・通知の後に動かすので、取れない・遅れても展示後予想と Discord 通知は止まらない
-- 1レース1回。未公開・取得失敗のときだけ、4分以上あと（次の起動）に1回だけ取り直す。形式違い・対象外の場は取り直さない
+- 1レース1回。両方に入っているレースも1回だけ取る（どちらの対象かは `target_kind` = manshu / pick / both）。
+  未公開・取得失敗のときだけ、4分以上あと（次の起動）に1回だけ取り直す。形式違い・対象外の場は取り直さない
+- 1回の起動で取るのは6レースまで（締切前のレースを先に。残りは次の起動）
 - 対象の場: 文字（HTML の表・XML）で載せている場だけ（戸田・平和島・多摩川・常滑・津・三国・びわこ・住之江・児島・鳴門・宮島・下関・芦屋・福岡の14場。
   戸田は XML、住之江は直線なし）。それ以外は通信せず「対象外」と理由を残す。
   場ごとの調査は `docs/data_investigation/ORIGINAL_EXHIBITION.md`
@@ -143,7 +145,7 @@ LightGBM で出します。検証（データ用リポジトリ `reports/manshu/
 - 記録: `original_exhibition`（1艇1行: race_key, lane, original_lap, original_turn, original_straight, source_url, fetched_at）と
   `original_exhibition_log`（1レース1行: status = ok / unpublished（未公開）/ format（形式違い）/ error（取得失敗）/ unsupported（対象外）と理由・回数、
   締切 `deadline` と値を締切前に取れたか `before_deadline`。取れなかったレースは null）
-- データベース: `supabase/migrations/20261110000000_original_exhibition.sql`・`20261111000000_original_exhibition_before_deadline.sql`（SQL Editor で実行する）
+- データベース: `supabase/migrations/20261110000000_original_exhibition.sql`・`20261111000000_original_exhibition_before_deadline.sql`・`20261113000000_original_exhibition_pick.sql`（SQL Editor で実行する）
 
 ## 💥 万舟チャンスの予想3種比較（自動記録）
 万舟チャンスのレースで、中穴〜万舟の買い目を「モデルのみ」「Claudeのみ」「両方の予想平均」の3種類の確率で作り、

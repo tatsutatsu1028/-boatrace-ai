@@ -1,9 +1,12 @@
 """
-万舟チャンスのレースだけ、各場の公式サイトのオリジナル展示（一周・まわり足・直線）を取って記録する。
+万舟チャンスと厳選10のレースだけ、各場の公式サイトのオリジナル展示（一周・まわり足・直線）を取って記録する。
 
-  - 対象は manshu_chance_picks に入っている当日の万舟チャンスのレースだけ。
-    展示後の自動予想（auto_post_predict.py）の run() の最後に、そのレースの展示後予想が済んだら
+  - 対象は当日の万舟チャンス（manshu_chance_picks）と展示前厳選10（pre_exhibition_picks）のレース。
+    両方に入っているレースは1レース1件（auto_post_predict.merge_targets）なので、取るのも1回。
+    どちらの対象として取ったかは log の target_kind（manshu / pick / both）に残す
+  - 展示後の自動予想（auto_post_predict.py）の run() の最後に、そのレースの展示後予想が済んだら
     （auto_post_log が done / already）1回取る。予想・頭本命・買い目・通知には使わない（記録のみ）
+  - 1回の起動で取るのは MAX_PER_RUN レースまで（締切前のレースを先に。残りは次の起動）
   - 1レースにつき取得は1回。まだ出ていなければ（未公開）、次の起動（RETRY_AFTER 分以上あと）に1回だけ取り直す。
     通信の失敗も同じく1回だけ取り直す。形式違い・対象外の場は取り直さない
   - 文字（HTML の表）で載せている場だけを対象にする（VENUES）。それ以外の場は通信せず「対象外」と理由を残す
@@ -12,7 +15,7 @@
 
 保存先（supabase/migrations/20261110000000_original_exhibition.sql）
   original_exhibition     : 1艇1行（race_key, lane, original_lap, original_turn, original_straight, source_url, fetched_at）
-  original_exhibition_log : 1レース1行。status = ok / unpublished（未公開）/ format（形式違い）/ error（取得失敗）
+  original_exhibition_log : 1レース1行。target_kind（manshu / pick / both。20261113000000_original_exhibition_pick.sql）。status = ok / unpublished（未公開）/ format（形式違い）/ error（取得失敗）
                             / unsupported（対象外の場）と理由・回数。締切（deadline）と、値を締切前に取れたか
                             （before_deadline。取れなかったレース・締切が読めないレースは null）
                             （20261111000000_original_exhibition_before_deadline.sql）
@@ -32,6 +35,8 @@ MAX_ATTEMPTS = 2          # 1回 + 取り直し1回
 RETRY_AFTER = 4           # 取り直しまでの最短の分（auto_post_predict の起動は5分おき）
 GIVE_UP_AFTER = 60        # 締切からこの分を過ぎたら、取り直しはしない
 RETRYABLE = ("unpublished", "error")
+MAX_PER_RUN = 6           # 1回の起動で取りに行くレースの上限（3.4 秒間隔 × 6 ≒ 20 秒強。宮島は応答が大きい）
+SOURCES = ("manshu", "pre")   # 万舟チャンス・展示前厳選10
 
 # 各場の公式サイトのオリジナル展示。どれもページ自身が読み込む URL（タブ・リンク・JavaScript が組み立てるもの）を
 # そのまま使う。{day} = YYYYMMDD, {race} = レース番号, {rr} = 2桁のレース番号
@@ -251,10 +256,18 @@ def before_deadline(t, fetched):
     return None if after is None else after < 0
 
 
+def target_kind(t):
+    """どちらの対象か: manshu（万舟チャンスだけ）/ pick（厳選10だけ）/ both（両方）。どちらでもなければ None。"""
+    src = set(t.get("sources") or [])
+    if {"manshu", "pre"} <= src:
+        return "both"
+    return "manshu" if "manshu" in src else "pick" if "pre" in src else None
+
+
 def needs_fetch(t, prev, post_status, now):
     """このレースで今回取るか。
     t: auto_post_predict の対象 / prev: original_exhibition_log の行 / post_status: auto_post_log の status"""
-    if "manshu" not in (t.get("sources") or []) or t.get("cancelled"):
+    if target_kind(t) is None or t.get("cancelled"):
         return False
     if not prev:
         return post_status in ("done", "already")   # 展示後予想が済んでから1回目
@@ -291,7 +304,7 @@ def record(sb, t, prev, now=None):
         reason = f"{reason}・{RETRY_AFTER}分以上あとに1回だけ取り直す"
     sb("POST", f"{LOG_TABLE}?on_conflict=race_key", prefer="resolution=merge-duplicates,return=minimal", json={
         "race_key": t["race_key"], "race_date": t["race_date"], "jcd": t["jcd"], "race_no": t["race_no"],
-        "status": status, "reason": reason, "source_url": url, "attempts": attempts,
+        "target_kind": target_kind(t), "status": status, "reason": reason, "source_url": url, "attempts": attempts,
         "last_tried_at": fetched_at if tried else (prev or {}).get("last_tried_at"),
         "deadline": t.get("deadline"),
         # 値が取れたときだけ判定（取れていなければ null）
@@ -302,23 +315,35 @@ def record(sb, t, prev, now=None):
 
 
 def run_for(sb, targets, post_log, now=None):
-    """auto_post_predict.run() の最後に呼ぶ。万舟チャンスのレースのうち、取る必要があるものだけ取る。
+    """auto_post_predict.run() の最後に呼ぶ。万舟チャンス・厳選10のレースのうち、取る必要があるものだけ取る
+    （1回に MAX_PER_RUN レースまで。締切がまだ先のレースを先に）。
     失敗しても例外を外に出さない（展示後予想・通知には影響させない）。戻り値は {status: 件数}。"""
     now = now or datetime.now(JST)
-    manshu = [t for t in targets if "manshu" in (t.get("sources") or [])]
-    if not manshu:
+    cands = [t for t in targets if target_kind(t)]
+    if not cands:
         return {}
     try:
-        keys = ",".join(t["race_key"] for t in manshu)
+        keys = ",".join(t["race_key"] for t in cands)
         prev = {r["race_key"]: r for r in (sb("GET", f"{LOG_TABLE}?race_key=in.({keys})&select=*").json() or [])}
     except Exception as e:  # noqa: BLE001
         log(f"記録を読めませんでした（{type(e).__name__}）")
         return {}
+    due = [t for t in cands
+           if needs_fetch(t, prev.get(t["race_key"]), (post_log.get(t["race_key"]) or {}).get("status"), now)]
+
+    def order(t):
+        after = _minutes_from_deadline(t, now)
+        # 締切前（まだ間に合う）を先に、その中は締切の早い順。その後に締切後（締切から間もない順。
+        # 取り直しは締切から GIVE_UP_AFTER 分まで）、締切不明は最後
+        # （after は締切からの分。締切前は負で、締切が近いほど 0 に近い）
+        return (0, -after) if after is not None and after < 0 else (1, after if after is not None else 1e9)
+
+    due.sort(key=order)
+    if len(due) > MAX_PER_RUN:
+        log(f"オリジナル展示: {len(due) - MAX_PER_RUN}レースは次の起動で取る")
     counts = {}
-    for t in manshu:
+    for t in due[:MAX_PER_RUN]:
         p = prev.get(t["race_key"])
-        if not needs_fetch(t, p, (post_log.get(t["race_key"]) or {}).get("status"), now):
-            continue
         try:
             st = record(sb, t, p, now)
         except Exception as e:  # noqa: BLE001

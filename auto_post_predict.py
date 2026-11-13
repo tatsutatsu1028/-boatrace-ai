@@ -26,8 +26,8 @@
     （manshu_memos）があれば作り、無ければ「記録なし」。記録の後・締切前にメモが保存・変更されたら作り直す（メモの保存が task=memo を起動。
     取りこぼしは task=run が毎回確かめる）。メモは比較にだけ使い、保存する予想・買い目・ログには入れない。
     作ったとき・作り直したときは、オーナー専用の Discord（DISCORD_MEMO_WEBHOOK_URL）にだけメモ入り予想を通知する（memo_notify.py）
-  - 万舟チャンスのレースだけ、展示後の予想が済んだら各場の公式サイトのオリジナル展示（一周・まわり足・直線）を
-    1回取って記録する（original_exhibition_fetcher.py。記録のみで、予想・買い目・通知には使わない）。
+  - 万舟チャンス・厳選10のレース（両方に入っていれば1回）だけ、展示後の予想が済んだら各場の公式サイトの
+    オリジナル展示（一周・まわり足・直線）を1回取って記録する（original_exhibition_fetcher.py。記録のみで、予想・買い目・通知には使わない）。
     毎回の最後（予想・買い目・メモの後）に動かすので、取れない・遅れても展示後予想と通知は止まらない
   - note の自動下書き（note_auto.py。アプリの設定 note_auto_enabled が ON のときだけ。対象は厳選10のレース。
     設定 note_auto_scope が「厳選＋万舟」なら万舟チャンスのレースも）: 展示後の予想を保存して
@@ -695,12 +695,12 @@ def run(date8=None, now=None):
 
 
 def record_original_exhibition(date8, targets):
-    """万舟チャンスのレースのオリジナル展示を記録する（original_exhibition_fetcher.py。記録のみ）。
+    """万舟チャンス・厳選10のレースのオリジナル展示を記録する（original_exhibition_fetcher.py。記録のみ）。
     予想・買い目・通知の後に動かし、失敗しても何も止めない。"""
     try:
         import original_exhibition_fetcher as oe
 
-        if not any("manshu" in t["sources"] for t in targets):
+        if not any(oe.target_kind(t) for t in targets):
             return {}
         return oe.run_for(_sb, targets, load_log(date8))
     except Exception as e:  # noqa: BLE001
