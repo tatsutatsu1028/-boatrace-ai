@@ -120,7 +120,8 @@ def _at(hhmm):
 
 def test_needs_fetch_once_then_one_retry():
     now = _at("15:15")
-    assert not oe.needs_fetch(_t(sources=("pre",)), None, "done", now)          # 万舟チャンスだけ
+    assert not oe.needs_fetch(_t(sources=()), None, "done", now)                # 万舟チャンス・厳選10だけ
+    assert oe.needs_fetch(_t(sources=("pre",)), None, "done", now)               # 厳選10だけのレースも取る
     assert not oe.needs_fetch(_t(cancelled=True), None, "done", now)
     assert not oe.needs_fetch(_t(), None, "waiting", now)                        # 展示後予想の前は取らない
     assert oe.needs_fetch(_t(), None, "done", now) and oe.needs_fetch(_t(), None, "already", now)
@@ -248,3 +249,36 @@ def test_fetch_xml_404_is_unpublished(monkeypatch):
     monkeypatch.setattr(polite_http, "get", lambda url, timeout=15, binary=False: R())
     assert oe.fetch("02", "20261112_02_1")[0] == "unpublished"
     assert oe.fetch("05", "20261112_05_1")[0] == "error"                 # HTML の場の 404 は取得失敗のまま
+
+
+def test_target_kind():
+    assert oe.target_kind(_t(sources=("manshu",))) == "manshu"
+    assert oe.target_kind(_t(sources=("pre",))) == "pick"
+    assert oe.target_kind(_t(sources=("pre", "manshu"))) == "both"
+    assert oe.target_kind(_t(sources=())) is None
+
+
+def test_record_writes_target_kind(monkeypatch):
+    monkeypatch.setattr(oe, "fetch", lambda jcd, rk: oe.parse(_page(ROWS)))
+    for src, kind in ((("pre",), "pick"), (("pre", "manshu"), "both"), (("manshu",), "manshu")):
+        sb = FakeSB()
+        oe.record(sb, _t(sources=src), None)
+        assert sb.calls[-1][2]["json"]["target_kind"] == kind
+    sb = FakeSB()
+    oe.record(sb, _t(jcd="03", sources=("pre",)), None)                      # 対象外の場も今と同じ（通信しない）
+    assert sb.calls[-1][2]["json"]["status"] == "unsupported" and sb.calls[-1][2]["json"]["target_kind"] == "pick"
+
+
+def test_run_for_both_once_and_cap(monkeypatch):
+    """両方に入っているレースは1件の対象なので1回だけ。1回の起動は MAX_PER_RUN まで、締切前を先に。"""
+    done = []
+    monkeypatch.setattr(oe, "record", lambda sb, t, p, now=None: done.append(t["race_key"]) or "ok")
+    now = _at("15:00")
+    ts = [{**_t(deadline=f"{h}:00", sources=("pre", "manshu") if i == 0 else ("pre",)),
+           "race_key": f"20261110_05_{i + 1}"} for i, h in enumerate([16, 11, 12, 13, 14, 17, 18, 10])]
+    post = {t["race_key"]: {"status": "done"} for t in ts}
+    assert oe.run_for(FakeSB(), ts, post, now) == {"ok": oe.MAX_PER_RUN}
+    assert len(done) == len(set(done)) == oe.MAX_PER_RUN
+    # 締切前（16:00・17:00・18:00）が締切の早い順に先、その後は締切後で締切から間もない順（14:00・13:00・12:00）
+    assert done == ["20261110_05_1", "20261110_05_6", "20261110_05_7",
+                    "20261110_05_5", "20261110_05_4", "20261110_05_3"]
