@@ -282,3 +282,16 @@ def test_run_for_both_once_and_cap(monkeypatch):
     # 締切前（16:00・17:00・18:00）が締切の早い順に先、その後は締切後で締切から間もない順（14:00・13:00・12:00）
     assert done == ["20261110_05_1", "20261110_05_6", "20261110_05_7",
                     "20261110_05_5", "20261110_05_4", "20261110_05_3"]
+
+
+def test_run_for_cap_counts_only_fetching_races(monkeypatch):
+    """対象外の場（通信しない）は上限に数えず、通信する場が6レースあってもすべて記録する。"""
+    done = []
+    monkeypatch.setattr(oe, "record", lambda sb, t, p, now=None: done.append(t["race_key"]) or "ok")
+    now = _at("15:00")
+    online = [{**_t(deadline="16:00", sources=("pre",)), "race_key": f"20261110_05_{i}"} for i in range(1, 9)]
+    offline = [{**_t(jcd="03", deadline="16:00", sources=("pre",)), "race_key": f"20261110_03_{i}"} for i in range(1, 4)]
+    post = {t["race_key"]: {"status": "done"} for t in online + offline}
+    oe.run_for(FakeSB(), online + offline, post, now)
+    assert sum(k.startswith("20261110_03_") for k in done) == 3                  # 対象外はすべて
+    assert sum(k.startswith("20261110_05_") for k in done) == oe.MAX_PER_RUN    # 通信する場は上限まで

@@ -6,7 +6,8 @@
     どちらの対象として取ったかは log の target_kind（manshu / pick / both）に残す
   - 展示後の自動予想（auto_post_predict.py）の run() の最後に、そのレースの展示後予想が済んだら
     （auto_post_log が done / already）1回取る。予想・頭本命・買い目・通知には使わない（記録のみ）
-  - 1回の起動で取るのは MAX_PER_RUN レースまで（締切前のレースを先に。残りは次の起動）
+  - 1回の起動で通信して取るのは MAX_PER_RUN レースまで（締切前のレースを先に。残りは次の起動）。
+    対象外の場（通信しない）は数えず、毎回すべて記録する
   - 1レースにつき取得は1回。まだ出ていなければ（未公開）、次の起動（RETRY_AFTER 分以上あと）に1回だけ取り直す。
     通信の失敗も同じく1回だけ取り直す。形式違い・対象外の場は取り直さない
   - 文字（HTML の表）で載せている場だけを対象にする（VENUES）。それ以外の場は通信せず「対象外」と理由を残す
@@ -35,7 +36,8 @@ MAX_ATTEMPTS = 2          # 1回 + 取り直し1回
 RETRY_AFTER = 4           # 取り直しまでの最短の分（auto_post_predict の起動は5分おき）
 GIVE_UP_AFTER = 60        # 締切からこの分を過ぎたら、取り直しはしない
 RETRYABLE = ("unpublished", "error")
-MAX_PER_RUN = 6           # 1回の起動で取りに行くレースの上限（3.4 秒間隔 × 6 ≒ 20 秒強。宮島は応答が大きい）
+MAX_PER_RUN = 6           # 1回の起動で通信して取りに行くレースの上限（3.4 秒間隔 × 6 ≒ 20 秒強。宮島は応答が大きい。
+                          # 対象外の場は通信しないので数えない）
 SOURCES = ("manshu", "pre")   # 万舟チャンス・展示前厳選10
 
 # 各場の公式サイトのオリジナル展示。どれもページ自身が読み込む URL（タブ・リンク・JavaScript が組み立てるもの）を
@@ -339,10 +341,13 @@ def run_for(sb, targets, post_log, now=None):
         return (0, -after) if after is not None and after < 0 else (1, after if after is not None else 1e9)
 
     due.sort(key=order)
-    if len(due) > MAX_PER_RUN:
-        log(f"オリジナル展示: {len(due) - MAX_PER_RUN}レースは次の起動で取る")
+    # 上限は通信するレースだけに数える（対象外の場は通信せず理由を書くだけなので、毎回すべて記録する）
+    offline = [t for t in due if source_url(t["jcd"], t["race_key"]) is None]
+    online = [t for t in due if source_url(t["jcd"], t["race_key"]) is not None]
+    if len(online) > MAX_PER_RUN:
+        log(f"オリジナル展示: {len(online) - MAX_PER_RUN}レースは次の起動で取る")
     counts = {}
-    for t in due[:MAX_PER_RUN]:
+    for t in offline + online[:MAX_PER_RUN]:
         p = prev.get(t["race_key"])
         try:
             st = record(sb, t, p, now)
