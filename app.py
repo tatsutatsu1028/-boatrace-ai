@@ -65,69 +65,24 @@ _perf.lap("準備（設定の差し替え）")
 if not hasattr(st, "_boat_ai_original_subheader"):
     st._boat_ai_original_subheader = st.subheader
 
+# 予想・買い目・保存内容の差し替え（保存済みの本番設定にそろえる）は predict_runtime.py にまとめた
+# （GitHub Actions で計算する予想 remote_predict.py と同じものを使う）。下の _boat_ai_legacy を入れて有効にする。
+import predict_runtime as _predict_runtime
+
 # 手動固定と自動固定の共通設定。DB側の app_settings にも同名列を持たせる。
-_result_tracker.DEFAULT_SETTINGS.update({
-    "display_weight": 0.32,
-    "weather_weight": 0.10,
-    "venue_course_weight": 0.12,
-    "hedge_enabled": True,
-})
+_result_tracker.DEFAULT_SETTINGS.update(_predict_runtime.EXTRA_DEFAULT_SETTINGS)
 
 if not hasattr(_result_tracker, "_boat_ai_original_save_settings"):
     _result_tracker._boat_ai_original_save_settings = _result_tracker.save_settings
-if not hasattr(_prediction, "_boat_ai_original_train"):
-    _prediction._boat_ai_original_train = _prediction.train
-if not hasattr(_prediction, "_boat_ai_original_predict"):
-    _prediction._boat_ai_original_predict = _prediction.predict
-if not hasattr(_prediction, "_boat_ai_original_rank_tickets"):
-    _prediction._boat_ai_original_rank_tickets = _prediction.rank_tickets
-if not hasattr(_prediction, "_boat_ai_original_research_prediction_variants"):
-    _prediction._boat_ai_original_research_prediction_variants = _prediction.research_prediction_variants
-if not hasattr(_stake_allocator, "_boat_ai_original_allocate_stakes_smart"):
-    _stake_allocator._boat_ai_original_allocate_stakes_smart = _stake_allocator.allocate_stakes_smart
-
-
-# 保存済み設定（app_settings）を読み直す間隔（秒）。予想ボタン1回で予想・買い目の差し替えから十数回
-# 呼ばれ、そのたびに Supabase へ問い合わせていたので、同じ数秒の間は1回の読み込みを使い回す。
-# 設定を保存したら捨てる（保存した設定が次の予想から使われるのは今までどおり）。
-_SETTINGS_REUSE_SECONDS = 5.0
-if not hasattr(_result_tracker, "_boat_ai_settings_memo"):
-    _result_tracker._boat_ai_settings_memo = {}
-
-
-def _load_settings_reused():
-    memo = _result_tracker._boat_ai_settings_memo
-    now = time.monotonic()
-    if memo.get("value") is not None and now - memo.get("at", -1e9) < _SETTINGS_REUSE_SECONDS:
-        return dict(memo["value"])
-    value = _result_tracker.load_settings()
-    memo.update(value=dict(value), at=now)
-    return dict(value)
-
-
-def _clear_settings_memo():
-    _result_tracker._boat_ai_settings_memo.clear()
 
 
 def _runtime_settings():
-    """本番予想で使う保存済み設定を正規化して返す。"""
-    s = _load_settings_reused()
-    style = str(s.get("prediction_style", "バランス"))
-    default_display = 0.42 if style == "展示重視" else 0.32
-    return {
-        "main_n": int(s.get("main_n", 3)),
-        "cover_n": int(s.get("cover_n", 3)),
-        "hole_n": int(s.get("hole_n", 0)),
-        "total_budget": int(s.get("total_budget", 2000)),
-        "min_bet": int(s.get("min_bet", 100)),
-        "longshot_min_prob_pct": float(s.get("longshot_min_prob_pct", 0.30)),
-        "value_bias": float(s.get("value_bias", 0.0)),
-        "prediction_style": style,
-        "display_weight": float(s.get("display_weight", default_display)),
-        "weather_weight": float(s.get("weather_weight", 0.10)),
-        "venue_course_weight": float(s.get("venue_course_weight", 0.12)),
-        "hedge_enabled": bool(s.get("hedge_enabled", True)),
-    }
+    """本番予想で使う保存済み設定を正規化して返す（predict_runtime.runtime_settings）。"""
+    return _predict_runtime.runtime_settings()
+
+
+def _clear_settings_memo():
+    _predict_runtime.clear_settings_memo()
 
 
 def _boat_ai_save_settings(settings):
@@ -289,238 +244,12 @@ def _boat_ai_legacy():
     return _boat_ai_legacy_cached(_boat_ai_legacy_cache_key())
 
 
-def _boat_ai_train(_history):
-    """prediction.train の代わり。保存済みの今までのモデルを返す（読めなければ None。学習はしない）。
-
-    _history（管理者がアップロードしたCSVを含む）は、今までどおり本番の学習器には使わない。
-    """
-    return _boat_ai_legacy()["model"]
-
-
-_prediction.train = _boat_ai_train
-
-
 def _boat_ai_lane_agnostic(race):
-    """艇番なしモデルの最強艇を求める。失敗しても本番予想には影響させない。"""
-    try:
-        model = _boat_ai_legacy()["lane_agnostic"]
-        if model is None:
-            return None
-        return _prediction.lane_agnostic_strongest(model, race)
-    except Exception:
-        return None
+    """艇番なしモデルの最強艇（predict_runtime.lane_agnostic）。"""
+    return _predict_runtime.lane_agnostic(race)
 
 
-# 直近の本番final/raceを保持し、買い目選定時の保険判定も保存設定に統一する。
-_LAST_PRODUCTION_RACE = None
-_LAST_PRODUCTION_FINAL = None
-
-
-def _boat_ai_predict(model, race, *args, **kwargs):
-    global _LAST_PRODUCTION_RACE, _LAST_PRODUCTION_FINAL
-
-    # research_prediction_variants は current_meet_weight 等を明示して呼ぶ。
-    # それ以外の通常予想（展示前比較／最終予想）だけ保存済み本番設定へ固定する。
-    is_research_variant = any(
-        k in kwargs
-        for k in ("current_meet_weight", "course_weight", "class_weight", "kimarite_weight")
-    )
-
-    if not is_research_variant:
-        cfg = _runtime_settings()
-        requested_display = kwargs.get("display_weight", cfg["display_weight"])
-        # 展示前比較の display_weight=0 は維持する。
-        if float(requested_display) != 0.0:
-            kwargs["display_weight"] = cfg["display_weight"]
-        kwargs["weather_weight"] = cfg["weather_weight"]
-        kwargs["venue_course_weight"] = cfg["venue_course_weight"]
-        kwargs["original_display_scale"] = 0.0
-
-    with _perf.section("今までのモデル予想"):
-        out = _prediction._boat_ai_original_predict(model, race, *args, **kwargs)
-
-    if not is_research_variant and float(kwargs.get("display_weight", 0.0)) != 0.0:
-        # 艇番なしモデルの判定は attrs に載せるだけで、確率列には一切触れない。
-        lane_agnostic = _boat_ai_lane_agnostic(race)
-        if lane_agnostic:
-            try:
-                out.attrs["_boat_ai_lane_agnostic"] = lane_agnostic
-            except Exception:
-                pass
-        try:
-            _LAST_PRODUCTION_RACE = race.copy()
-            _LAST_PRODUCTION_FINAL = out.copy()
-        except Exception:
-            _LAST_PRODUCTION_RACE = race
-            _LAST_PRODUCTION_FINAL = out
-
-    return out
-
-
-_prediction.predict = _boat_ai_predict
-
-if not hasattr(_ml_live, "_boat_ai_original_production_final"):
-    _ml_live._boat_ai_original_production_final = _ml_live.production_final
-
-
-def _boat_ai_production_final(settings, race, *args, **kwargs):
-    """新しい予想モデルで予想したときも、保険（hedge）の判定と艇番なしモデルの記録を
-    今のモデルの本番予想と同じように、本番に使う final に合わせる。"""
-    global _LAST_PRODUCTION_RACE, _LAST_PRODUCTION_FINAL
-
-    with _perf.section("新モデル予想"):
-        out, info = _ml_live._boat_ai_original_production_final(settings, race, *args, **kwargs)
-    if out is not None:
-        lane_agnostic = _boat_ai_lane_agnostic(race)
-        if lane_agnostic:
-            try:
-                out.attrs["_boat_ai_lane_agnostic"] = lane_agnostic
-            except Exception:
-                pass
-        try:
-            _LAST_PRODUCTION_RACE = race.copy()
-            _LAST_PRODUCTION_FINAL = out.copy()
-        except Exception:
-            _LAST_PRODUCTION_RACE = race
-            _LAST_PRODUCTION_FINAL = out
-    return out, info
-
-
-_ml_live.production_final = _boat_ai_production_final
-
-if not hasattr(_ml_live, "_boat_ai_original_programs"):
-    _ml_live._boat_ai_original_programs = _ml_live._programs
-
-
-def _boat_ai_programs(date_yyyymmdd):
-    """新しいモデルが使う番組表（公式の B ファイル）の取得。時間を測るだけ。"""
-    with _perf.section("公式データ取得"):
-        return _ml_live._boat_ai_original_programs(date_yyyymmdd)
-
-
-_ml_live._programs = _boat_ai_programs
-
-
-def _boat_ai_research_prediction_variants(model, race, *args, **kwargs):
-    """研究用保存も本番と同じ保存済み重みを起点にする。"""
-    cfg = _runtime_settings()
-    kwargs["display_weight"] = cfg["display_weight"]
-    kwargs["weather_weight"] = cfg["weather_weight"]
-    kwargs["venue_course_weight"] = cfg["venue_course_weight"]
-    with _perf.section("今までのモデル予想"):
-        return _prediction._boat_ai_original_research_prediction_variants(
-            model,
-            race,
-            *args,
-            **kwargs,
-        )
-
-
-_prediction.research_prediction_variants = _boat_ai_research_prediction_variants
-
-
-def _boat_ai_rank_tickets(tri, odds=None, *args, **kwargs):
-    cfg = _runtime_settings()
-    # app_core / 自動固定側が8〜10点の自動構成を明示した場合は、
-    # 保存済みの固定点数で上書きしない。未指定の旧呼び出しだけ設定値を使う。
-    kwargs.setdefault("main_n", cfg["main_n"])
-    kwargs.setdefault("cover_n", cfg["cover_n"])
-    kwargs.setdefault("longshot_n", cfg["hole_n"])
-    kwargs.setdefault(
-        "longshot_min_prob",
-        cfg["longshot_min_prob_pct"] / 100.0,
-    )
-    kwargs["use_odds"] = False
-
-    # hedge_lane は画面の一時トグルではなく保存済み設定から再計算する。
-    hedge_lane = None
-    if cfg["hedge_enabled"] and _LAST_PRODUCTION_RACE is not None and _LAST_PRODUCTION_FINAL is not None:
-        try:
-            fav_lane, risk_score, _ = _prediction.assess_favorite_risk(
-                _LAST_PRODUCTION_RACE,
-                _LAST_PRODUCTION_FINAL,
-            )
-            if risk_score >= 2:
-                hedge_lane = fav_lane
-        except Exception:
-            hedge_lane = None
-    kwargs["hedge_lane"] = hedge_lane
-
-    return _prediction._boat_ai_original_rank_tickets(tri, odds, *args, **kwargs)
-
-
-_prediction.rank_tickets = _boat_ai_rank_tickets
-
-
-def _boat_ai_allocate_stakes_smart(tickets, *args, **kwargs):
-    cfg = _runtime_settings()
-    kwargs["budget"] = cfg["total_budget"]
-    kwargs["unit"] = 100
-    kwargs["min_bet"] = cfg["min_bet"]
-    kwargs["max_longshot_share"] = 0.15
-    kwargs["max_ticket_share"] = 0.35
-    kwargs["value_bias"] = cfg["value_bias"]
-    kwargs["use_odds"] = False
-    return _stake_allocator._boat_ai_original_allocate_stakes_smart(
-        tickets,
-        *args,
-        **kwargs,
-    )
-
-
-_stake_allocator.allocate_stakes_smart = _boat_ai_allocate_stakes_smart
-
-# AI総合信頼度(A/B/C)は、固定時点の表示値をそのまま検証できるよう
-# prediction_snapshots.payload_json に保存する。
-if not hasattr(_prediction, "_boat_ai_original_confidence"):
-    _prediction._boat_ai_original_confidence = _prediction.confidence
-
-if not hasattr(_result_tracker, "_boat_ai_original_snapshot_payload"):
-    _result_tracker._boat_ai_original_snapshot_payload = _result_tracker._snapshot_payload
-
-
-def _boat_ai_confidence(first, race):
-    label = _prediction._boat_ai_original_confidence(first, race)
-    try:
-        first.attrs["_boat_ai_confidence_label"] = str(label)
-    except Exception:
-        pass
-    return label
-
-
-def _boat_ai_snapshot_payload(
-    final,
-    tickets,
-    research_variants=None,
-    race_features=None,
-):
-    payload = _result_tracker._boat_ai_original_snapshot_payload(
-        final,
-        tickets,
-        research_variants=research_variants,
-        race_features=race_features,
-    )
-    try:
-        label = str(final.attrs.get("_boat_ai_confidence_label", "")).strip()
-    except Exception:
-        label = ""
-    if label in {"A", "B", "C"}:
-        payload["confidence"] = label
-    # 艇番なしモデルの最強艇（表示専用の判定）を後日の効果検証用に保存する。
-    try:
-        lane_agnostic = _prediction.lane_agnostic_snapshot(
-            final,
-            final.attrs.get("_boat_ai_lane_agnostic"),
-        )
-    except Exception:
-        lane_agnostic = None
-    if lane_agnostic:
-        payload["lane_agnostic"] = lane_agnostic
-    return payload
-
-
-_prediction.confidence = _boat_ai_confidence
-_result_tracker._snapshot_payload = _boat_ai_snapshot_payload
+_predict_runtime.install(_boat_ai_legacy)
 
 JST = ZoneInfo("Asia/Tokyo")
 

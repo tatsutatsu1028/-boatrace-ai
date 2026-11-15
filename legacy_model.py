@@ -97,7 +97,10 @@ def build(model_path=None, info_path=None, log=print, force=False):
         return prev
 
     history = pd.read_csv(data_path("sample_history.csv"))
-    model = prediction.train(history)
+    # 同じ処理の中で predict_runtime.install() が prediction.train を「保存済みを返す」ものに差し替えていても、
+    # 本物の学習を使う
+    train = getattr(prediction, "_boat_ai_original_train", prediction.train)
+    model = train(history)
     t_train = time.time() - t0
     lane_agnostic = prediction.train_lane_agnostic(history)
 
