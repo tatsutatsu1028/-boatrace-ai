@@ -6,6 +6,7 @@ import pandas as pd
 import requests
 import streamlit as st
 import data_paths as _data_paths
+import legacy_model as _legacy_model
 import ml_live as _ml_live
 import prediction as _prediction
 import result_tracker as _result_tracker
@@ -97,12 +98,11 @@ _result_tracker.save_settings = _boat_ai_save_settings
 # 学習データは本番固定では常に sample_history.csv を使う。
 # 管理画面のCSVアップロードは確認・研究用として残すが、本番固定の学習器は自動固定と同一にする。
 #
-# train()自体はsample_history.csv（約3.1万行）に加え、内部でhistory_full.csv
-# （約8.6万行）も読んで2着・3着モデル等を学習するため、予想のたびに毎回
-# 全量再学習すると重い。学習に使うCSVの更新日時・サイズが変わっていなければ
-# st.cache_resourceでプロセス全体に共有されたモデルを再利用し、変わった
-# ときだけ再学習する。train()自体の挙動・出力は変えず、呼ばれる頻度だけを
-# 最適化する。
+# 今までのモデル（prediction.train / train_lane_agnostic）はアプリの中では学習しない。
+# 毎朝の GitHub Actions（ml_model.yml → ml_nightly.py legacy → legacy_model.py）が
+# sample_history.csv で学習して models/legacy_model.pkl.gz に保存したものを読むだけにする
+# （Streamlit Cloud で CPU を制限されると、学習が終わらず「AI解析中…」が止まるため）。
+# train()自体の挙動・出力は変えず、学習する場所だけを変える。
 _TRAIN_DATA_FILES = _data_paths.APP_FILES
 
 
@@ -160,6 +160,17 @@ def _boat_ai_sync_data():
         )
     except Exception as e:
         print("[DATA] ml sync error", type(e).__name__, flush=True)
+    # 今までのモデル（毎朝 Actions が学習して保存したもの。アプリは読むだけで学習しない）
+    try:
+        legacy = _data_paths.sync_from_github(
+            token, repo=repo, files=_legacy_model.APP_FILES, dest=result["dir"]
+        )
+        print(
+            "[DATA] legacy synced", "updated=", legacy["updated"], "kept=", legacy["kept"],
+            "errors=", legacy["errors"], flush=True,
+        )
+    except Exception as e:
+        print("[DATA] legacy sync error", type(e).__name__, flush=True)
     return result
 
 
@@ -172,55 +183,67 @@ if not all(_data_paths.data_path(n).exists() for n in _TRAIN_DATA_FILES):
     st.stop()
 
 
-def _boat_ai_train_cache_key():
-    """学習に使う各CSVの更新日時とサイズからキャッシュキーを作る。
+def _boat_ai_legacy_cache_key():
+    """保存済みの今までのモデルのキャッシュキー（データ用リポジトリの blob SHA）。
 
-    ファイル内容のハッシュ計算は約8.6万行のCSVを毎回読み直すことになり
-    本末転倒なので、mtime+size（1回のstat呼び出し）で更新検知する。
+    Secrets にトークンが無い手元の実行では blob SHA が無いので、更新日時とサイズを使う。
     """
-    key = []
-    for name in _TRAIN_DATA_FILES:
-        path = _data_paths.data_path(name)
-        try:
-            stat = path.stat()
-            key.append((name, stat.st_mtime_ns, stat.st_size))
-        except FileNotFoundError:
-            key.append((name, None, None))
-    return tuple(key)
+    sha = _data_paths.synced_sha(_legacy_model.MODEL_FILE)
+    if sha:
+        return ("sha", sha, _data_paths.synced_sha(_legacy_model.INFO_FILE))
+    try:
+        stat = _data_paths.data_path(_legacy_model.MODEL_FILE).stat()
+        return ("stat", stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return ("missing",)
 
 
-@st.cache_resource(show_spinner=False)
-def _boat_ai_train_cached(cache_key):
-    # 学習し直した時刻をログに残す（Streamlit の Logs で確認できる）。
-    # 続けて train() 内の [TRAIN] 行に2着・3着モデルの学習件数が出る。
+@st.cache_resource(show_spinner=False, max_entries=1)
+def _boat_ai_legacy_cached(cache_key):
+    """保存済みの今までのモデルを読む（学習はしない）。古い版はメモリに残さない（max_entries=1）。
+
+    戻り値 {"model", "lane_agnostic", "info", "error", "stale"}。読めなければ model は None。
+    """
+    try:
+        model, lane_agnostic, info = _legacy_model.load()
+    except _legacy_model.LegacyModelUnavailable as e:
+        print("[LEGACY] 今までのモデルが読めません:", e, flush=True)
+        return {"model": None, "lane_agnostic": None, "info": _legacy_model.read_info(), "error": str(e),
+                "stale": []}
+    stale = _legacy_model.stale_sources(
+        info, {n: _data_paths.synced_sha(n) for n in _legacy_model.SOURCE_FILES}
+    )
     print(
-        "[TRAIN] 再学習開始",
-        pd.Timestamp.now(tz="Asia/Tokyo").strftime("%Y-%m-%d %H:%M:%S JST"),
+        "[LEGACY] 今までのモデルを読み込み", info.get("created_at"),
+        "sample=", info.get("sample_history_rows"), "position=", info.get("position_model_rows"),
+        "sklearn=", (info.get("versions") or {}).get("sklearn"),
+        ("学習データがアプリの取得分と違う: " + ",".join(stale)) if stale else "",
         flush=True,
     )
-    canonical = pd.read_csv(_data_paths.data_path("sample_history.csv"))
-    return _prediction._boat_ai_original_train(canonical)
+    return {"model": model, "lane_agnostic": lane_agnostic, "info": info, "error": None, "stale": stale}
+
+
+def _boat_ai_legacy():
+    return _boat_ai_legacy_cached(_boat_ai_legacy_cache_key())
 
 
 def _boat_ai_train(_history):
-    return _boat_ai_train_cached(_boat_ai_train_cache_key())
+    """prediction.train の代わり。保存済みの今までのモデルを返す（読めなければ None。学習はしない）。
+
+    _history（管理者がアップロードしたCSVを含む）は、今までどおり本番の学習器には使わない。
+    """
+    return _boat_ai_legacy()["model"]
 
 
 _prediction.train = _boat_ai_train
 
 
-# 艇番なし1着モデル（表示・検証専用）も本番train()と同じキーでキャッシュし、
-# 予想のたびに再学習しない。学習データも本番1着モデルと同じ sample_history.csv。
-@st.cache_resource(show_spinner=False)
-def _boat_ai_train_lane_agnostic_cached(cache_key):
-    canonical = pd.read_csv(_data_paths.data_path("sample_history.csv"))
-    return _prediction.train_lane_agnostic(canonical)
-
-
 def _boat_ai_lane_agnostic(race):
     """艇番なしモデルの最強艇を求める。失敗しても本番予想には影響させない。"""
     try:
-        model = _boat_ai_train_lane_agnostic_cached(_boat_ai_train_cache_key())
+        model = _boat_ai_legacy()["lane_agnostic"]
+        if model is None:
+            return None
         return _prediction.lane_agnostic_strongest(model, race)
     except Exception:
         return None

@@ -5,6 +5,9 @@ name: ML Model
 #   task=train: 2年分で学習し直し models/<版>.joblib と models/latest.json を書く（毎週。数分）。
 #               続けて展示前モデル（ml_pre.py。「🌅 展示前厳選10」用）も学習し直し models/pre_latest.json を書く
 #   task=train_pre: 展示前モデルだけ学習し直す（手動用）
+#   task=legacy: 今までのモデル（prediction.train）を学習し models/legacy_model.pkl.gz と
+#               models/legacy_model.json を書く（手動用。task=state のときも state の後に毎晩作る）。
+#               Streamlit アプリはこれを読むだけで、中では学習しない（CPU 制限で学習が終わらないため）
 # どちらも保存先は非公開のデータ用リポジトリ（models/）。成果物（artifact）には残さない。
 #
 # 本番の予想を新しいモデルに切り替えたので、Supabase の pg_cron から起動する
@@ -15,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "state（集計表）/ train（学習し直し）/ train_pre（展示前モデルだけ）"
+        description: "state（集計表＋今までのモデル）/ train（学習し直し）/ train_pre（展示前モデルだけ）/ legacy（今までのモデルだけ）"
         required: true
         default: "state"
       as_of:
@@ -53,17 +56,28 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # scikit-learn は requirements.txt と同じ版にする（今までのモデルの pickle をアプリが読むため）
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml pandas==3.0.6 numpy==2.4.6 scikit-learn scipy joblib lhafile lightgbm
+        run: pip install requests beautifulsoup4 lxml pandas==3.0.6 numpy==2.4.6 "$(grep -i '^scikit-learn' requirements.txt)" scipy joblib lhafile lightgbm
 
       # ログは誰でも見られるため、ml_nightly.py は日付・件数・所要時間・合否だけを出す。
       - name: Run
+        if: inputs.task != 'legacy'
         env:
           BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
         run: |
           ARGS="${{ inputs.task }}"
           if [ -n "${{ inputs.as_of }}" ]; then ARGS="$ARGS --as-of ${{ inputs.as_of }}"; fi
           python ml_nightly.py $ARGS
+
+      # 今までのモデル（アプリ用）。失敗しても集計表の保存は止めない（最後の手順で失敗にする）
+      - name: Legacy model
+        id: legacy
+        if: inputs.task == 'state' || inputs.task == 'legacy'
+        continue-on-error: true
+        env:
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+        run: python ml_nightly.py legacy
 
       - name: Commit to data repository
         working-directory: _data
@@ -79,3 +93,8 @@ jobs:
             sleep $((i * 10))
           done
           echo "pushに失敗"; exit 1
+
+      - name: Fail if legacy model failed
+        if: steps.legacy.outcome == 'failure'
+        run: |
+          echo "今までのモデルの保存に失敗しました（集計表は保存済み）"; exit 1

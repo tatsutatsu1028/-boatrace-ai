@@ -7,6 +7,10 @@
                                続けて展示前モデル（ml_pre.py）も同じ期間で学習し直し、
                                models/<展示前の版>.joblib と models/pre_latest.json を書く
   python ml_nightly.py train_pre  展示前モデルだけ学習し直す（手動用）
+  python ml_nightly.py legacy  毎晩（state の後）: 今までのモデル（prediction.train・train_lane_agnostic）を
+                               sample_history.csv で学習し、models/legacy_model.pkl.gz と
+                               models/legacy_model.json を書く（legacy_model.py。数十秒）。
+                               アプリはこれを読むだけで、中では学習しない
 
 学習は直近28日を確率の調整（温度）に使い、その前の日までで学習する。
 学習を終えたら直近28日で、新しいモデルの LogLoss が前の版より大きく悪くなっていないかを確かめ、
@@ -154,11 +158,15 @@ def train(as_of=None, main=True, pre=True):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("task", choices=["state", "train", "train_pre"])
+    ap.add_argument("task", choices=["state", "train", "train_pre", "legacy"])
     ap.add_argument("--as-of", default="")
     a = ap.parse_args()
     if a.task == "state":
         build_state(a.as_of or None)
+    elif a.task == "legacy":
+        import legacy_model
+
+        legacy_model.build(log=lambda m: print(m, flush=True))
     elif a.task == "train_pre":
         train(a.as_of or None, main=False)
     else:

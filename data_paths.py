@@ -129,3 +129,12 @@ def sync_from_github(token, repo=DEFAULT_REPO, files=APP_FILES, dest=None,
     if all((dest / name).exists() for name in files):
         os.environ[ENV_NAME] = str(dest)
     return result
+
+
+def synced_sha(name):
+    """sync_from_github で取ったファイルの blob SHA（取っていなければ None）。"""
+    try:
+        state = json.loads((data_dir() / ".sha.json").read_text(encoding="utf-8"))
+        return state.get(name)
+    except (OSError, ValueError):
+        return None
