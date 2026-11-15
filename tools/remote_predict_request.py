@@ -47,7 +47,8 @@ def build_input(date8, jcd, rno, mode):
         odds = None
     work = predict_flow.work_from_race(race, d, venue, rno)
     params = predict_runtime.staff_params(predict_runtime.load_settings_reused())
-    schedule = fetch_daily_schedule_supabase(d.isoformat()) or {}
+    # daily_schedule.race_date は YYYYMMDD（アプリの fetch_daily_schedule と同じ渡し方）
+    schedule = fetch_daily_schedule_supabase(date8) or {}
     deadlines = (schedule.get(jcd) or {}).get("deadlines") or {}
     return frame_codec.encode({
         "date": d.isoformat(), "jcd": jcd, "rno": rno, "venue": venue, "deadlines": deadlines,
