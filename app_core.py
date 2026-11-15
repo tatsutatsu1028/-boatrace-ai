@@ -29,6 +29,7 @@ from hit_calibration import apply_calibration as apply_hit_calibration
 from ml_model import is_ml_final
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 from model_only import complete_adaptive_tickets, model_only_prediction
+import legacy_model as _legacy_model_mod
 import claude_tab
 import claude_usage
 import manshu_view
@@ -602,20 +603,43 @@ def _file_stamp(name):
         return (None, None)
 
 
-@st.cache_resource(show_spinner=False, max_entries=3)
-def _cached_train(_history, history_key, history_full_stamp):
-    """train(history) の結果を使い回す。
-
-    キャッシュキーは history_full.csv の (更新日時, サイズ) と、1着モデルに使う
-    学習CSVの識別子（history_key）。history_full.csv が差し替わったときだけ
-    学習し直す。_history は先頭が _ なのでハッシュ対象外（毎回の巨大な
-    DataFrame ハッシュを避ける）。
-    """
-    return train(_history)
-
-
 def train_cached(history, history_key):
-    return _cached_train(history, history_key, _file_stamp("history_full.csv"))
+    """今までのモデル。app.py が prediction.train を差し替えていて、毎朝 Actions が学習・保存した
+    モデル（models/legacy_model.pkl.gz）を読むだけ（アプリの中では学習しない）。読めなければ None。
+
+    以前はここでも st.cache_resource（max_entries=3）で持っていたが、app.py 側のキャッシュと
+    二重になり古いモデルがメモリに残るので、app.py 側（max_entries=1）だけにした。
+    """
+    return train(history)
+
+
+def _legacy_model_error():
+    """保存済みの今までのモデルが読めなかった理由（app.py から起動したときだけ分かる）。"""
+    try:
+        return (globals()["_boat_ai_legacy"]() or {}).get("error")
+    except Exception:
+        return None
+
+
+def _legacy_model_status_text():
+    """管理者向け: 保存済みの今までのモデルの版（作成日時・行数・scikit-learn の版）。"""
+    try:
+        st_ = globals()["_boat_ai_legacy"]() or {}
+    except Exception:
+        return ""
+    info = st_.get("info") or {}
+    if st_.get("model") is None:
+        return f"⚠️ 今までのモデルが読めません（{st_.get('error') or '理由不明'}）。アプリの中では学習しません。"
+    text = (
+        f"🗂 今までのモデル：毎朝 Actions で学習した保存済みのモデルを使用中"
+        f"（作成 {str(info.get('created_at', ''))[:16].replace('T', ' ')}・"
+        f"sample {int(info.get('sample_history_rows') or 0):,}行・"
+        f"2着/3着 {int(info.get('position_model_rows') or 0):,}行・"
+        f"scikit-learn {(info.get('versions') or {}).get('sklearn', '?')}）"
+    )
+    if st_.get("stale"):
+        text += "。※ 学習後に " + "・".join(st_["stale"]) + " が更新されています（翌朝作り直されます）"
+    return text
 
 
 def _default_history_caption(history):
@@ -1192,6 +1216,9 @@ with tab2:
             st.success(f"アップロードした学習データ：{len(history):,}行")
         else:
             st.info(_default_history_caption(history))
+        _legacy_status = _legacy_model_status_text()
+        if _legacy_status:
+            st.caption(_legacy_status)
         with st.expander("学習データ先頭を見る"):
             st.dataframe(history.head(12), use_container_width=True, hide_index=True)
     else:
@@ -2771,20 +2798,34 @@ with tab1:
                 try:
                     with st.spinner("AI解析中…"):
                         model = train_cached(history, history_key)
-                        _mo = model_only_prediction(
-                            model, work, odds,
-                            {
-                                "display_weight": display_weight,
-                                "weather_weight": weather_weight,
-                                "venue_course_weight": venue_course_weight,
-                                "hedge_enabled": hedge_enabled,
-                                "longshot_min_prob_pct": longshot_min_prob_pct,
-                                "total_budget": total_budget,
-                                "min_bet": min_bet,
-                                "value_bias": value_bias,
-                            },
-                            load_prediction_model_setting(), d.strftime("%Y%m%d"), jcd, rno,
-                        )
+                        _mo_params = {
+                            "display_weight": display_weight,
+                            "weather_weight": weather_weight,
+                            "venue_course_weight": venue_course_weight,
+                            "hedge_enabled": hedge_enabled,
+                            "longshot_min_prob_pct": longshot_min_prob_pct,
+                            "total_budget": total_budget,
+                            "min_bet": min_bet,
+                            "value_bias": value_bias,
+                        }
+                        if model is None:
+                            # 保存済みの今までのモデルが無い・読めない: 学習はせず、新しいモデルで
+                            # 予想できるレースだけ予想を出す（できなければ下の except でエラー表示）
+                            _legacy_err = _legacy_model_error()
+                            st.warning(
+                                "⚠️ 今までのモデルが読めません"
+                                + (f"（{_legacy_err}）" if _legacy_err else "")
+                                + "。新しいモデルで予想できるレースだけ予想を出します。"
+                            )
+                            _mo = _legacy_model_mod.new_model_only_prediction(
+                                work, odds, _mo_params,
+                                load_prediction_model_setting(), d.strftime("%Y%m%d"), jcd, rno,
+                            )
+                        else:
+                            _mo = model_only_prediction(
+                                model, work, odds, _mo_params,
+                                load_prediction_model_setting(), d.strftime("%Y%m%d"), jcd, rno,
+                            )
                         before, before_label, model_info = _mo["before"], _mo["before_label"], _mo["model_info"]
                         final, tickets, hedge_lane = _mo["final"], _mo["tickets"], _mo["hedge_lane"]
                         risk_reasons, research_variants = _mo["risk_reasons"], _mo["research_variants"]
@@ -2829,6 +2870,8 @@ with tab1:
                             ctx, d, jcd, VENUES[jcd], rno, deadlines, odds,
                             st.session_state["result"],
                         )
+                except _legacy_model_mod.LegacyModelUnavailable as e:
+                    st.error(f"今までのモデルが読めません。{e}。管理者は GitHub Actions の ML Model（task=legacy）を実行してください。")
                 except Exception as e:
                     st.error("AI予想でエラーが発生しました。")
                     st.code(str(e))
