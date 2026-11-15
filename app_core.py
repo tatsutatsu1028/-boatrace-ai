@@ -1,4 +1,5 @@
 import json
+import os
 import hmac
 import time
 import re
@@ -30,6 +31,7 @@ from ml_model import is_ml_final
 from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 from model_only import complete_adaptive_tickets, model_only_prediction
 import legacy_model as _legacy_model_mod
+import perf as _perf
 import claude_tab
 import claude_usage
 import manshu_view
@@ -587,7 +589,9 @@ def _login_gate():
         st.rerun()
 
 
+_perf.lap("ログイン")
 _login_gate()
+_perf.lap("画面の準備")
 
 @st.cache_data
 def load_demo_history():
@@ -611,6 +615,26 @@ def train_cached(history, history_key):
     二重になり古いモデルがメモリに残るので、app.py 側（max_entries=1）だけにした。
     """
     return train(history)
+
+
+# 予想ボタンの処理の上限（秒）。超えたら次の段階に入るところで打ち切ってエラーを出す
+PREDICT_TIMEOUT_SEC = float(os.environ.get("BOAT_AI_PREDICT_TIMEOUT_SEC") or 120)
+# 予想ボタンの段階（[TIMING] のログの順・st.status の表示）
+PREDICT_STAGE_LABELS = {
+    "学習読込": "今までのモデルと設定を読み込んでいます",
+    "公式データ取得": "公式データ（番組表）を取得しています",
+    "新モデル予想": "新しいモデルで予想しています",
+    "今までのモデル予想": "今までのモデルで比較用の予想をしています",
+    "買い目": "買い目と資金配分を作っています",
+    "Claude": "Claudeの予想を取得しています",
+    "保存": "予想を保存しています",
+}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_analysis_view(kind):
+    """検証タブの集計ビュー。再実行のたびに読んでいたので5分は使い回す（他の集計の読み込みと同じ間隔）。"""
+    return load_analysis_view(kind)
 
 
 def _legacy_model_error():
@@ -1123,6 +1147,7 @@ if IS_ADMIN:
 _tabs = st.tabs(_tab_labels, **_tab_kwargs)
 tab1, payout_tab, tab2, tab3, tab4 = _tabs[:5]
 
+_perf.lap("タブ: 払戻")
 with payout_tab:
     st.subheader("💴 払戻")
     st.caption(
@@ -1203,6 +1228,7 @@ with payout_tab:
                     "一部会場の確認に失敗しました: " + ", ".join(payout_errors)
                 )
 
+_perf.lap("タブ: 学習データ")
 with tab2:
     st.subheader("学習データ")
     if IS_ADMIN:
@@ -1226,6 +1252,7 @@ with tab2:
         history_key = ("default", _file_stamp("sample_history.csv"))
         st.info("🔒 収集スタッフは学習データを変更できません。管理者と同じ既定データを使用します。")
 
+_perf.lap("タブ: 設定")
 with tab3:
     st.subheader("🤖 自動固定状況")
     _auto_progress = _auto_random_progress()
@@ -1745,6 +1772,7 @@ if not IS_ADMIN:
     hedge_enabled = True
 
 
+_perf.lap("タブ: 検証")
 with tab4:
     st.subheader("📊 検証")
     if not IS_ADMIN:
@@ -1771,7 +1799,7 @@ with tab4:
     with st.expander("🎯 1号艇の予測確率帯・🎫 買い目区分", expanded=False):
         for label, view_name in (("🎯 1号艇予測確率帯", "p1_prob"), ("🎫 買い目区分", "ticket_group")):
             st.markdown(f"**{label}**")
-            analysis_df = load_analysis_view(view_name)
+            analysis_df = _cached_analysis_view(view_name)
             if analysis_df.empty:
                 st.caption(f"{label} の分析データはまだありません。")
             else:
@@ -2075,6 +2103,7 @@ with tab4:
 
 
 # 管理者だけ: 検証タブの一番下に、結果の手動保存（自動で入らなかったときの予備）
+_perf.lap("タブ: 検証（手入力の保存）")
 if IS_ADMIN:
     with tab4:
         daily_review.render_manual_save(VENUES, COLLECTOR_NAME)
@@ -2100,6 +2129,7 @@ def _meeting_time_badge(deadlines):
 
 
 with tab1:
+    _perf.lap("予想: 日付・厳選10・万舟の一覧")
     d = st.date_input("日付", value=_today_jst())
 
     # 毎朝選んだ「💥 万舟チャンス（荒れやすいレース）」。会場選択・Rカード・予想画面・厳選10に印を出す
@@ -2116,6 +2146,7 @@ with tab1:
 
     st.session_state.setdefault("selected_jcd", None)
 
+    _perf.lap("予想: 開催状況の取得")
     st.markdown("### 🏟️ 会場を選択")
     try:
         _date_key = d.strftime("%Y%m%d")
@@ -2151,6 +2182,7 @@ with tab1:
     # 「今より後で最も近いR」を直接求める。
     # 公式開催一覧の next_race_no 更新が遅れても15分前を拾える一方、
     # 発売開始前・中止・開催終了の会場は対象外にする。
+    _perf.lap("予想: 会場ボタン")
     urgent_venues = {}
     for _code, _info in schedule_by_jcd.items():
         _holding = bool(_info.get("holding"))
@@ -2293,6 +2325,7 @@ with tab1:
         + (" / 💥＝万舟チャンス（荒れやすいレース）の数" if _manshu_venues else "")
     )
 
+    _perf.lap("予想: 選択中の会場・Rカード")
     jcd = st.session_state.get("selected_jcd")
     if not jcd:
         st.info("会場を選択してください。")
@@ -2460,6 +2493,7 @@ with tab1:
         if st.session_state.get("race_context") not in (None, ctx) and not fetch_requested:
             st.info("会場・Rが変更されています。Rカードをタップすると公式データを取得します。")
 
+        _perf.lap("予想: 公式データ取得（Rカード）")
         if fetch_requested:
             try:
                 with st.spinner(f"{VENUES[jcd]} {rno}R の公式ページを読み込み中…"):
@@ -2484,6 +2518,7 @@ with tab1:
                 st.error("自動取得できませんでした。手動入力も利用できます。")
                 st.code(str(e))
 
+        _perf.lap("予想: レースの表示（出走表・展示など）")
         race = st.session_state.get("race") if st.session_state.get("race_context") == ctx else None
 
         if race is None and st.query_params.get("fetched_ctx") == ctx:
@@ -2773,6 +2808,7 @@ with tab1:
                     else:
                         st.info("まだ追跡記録がありません。「追跡を開始」を押してから数分待ってください。")
 
+            _perf.lap("予想: 予想ボタン")
             st.divider()
             # 管理者は3つのボタン（モデルのみ／Claudeのみ／両方の平均）。スタッフはモデルのみ。
             if IS_ADMIN:
@@ -2784,20 +2820,46 @@ with tab1:
 
                 _cur = _sel.get(ctx, "model")
                 _pb = st.columns(3)
+                # key を付ける: 新しい Streamlit はボタンの色（type）も識別に使うため、key が無いと押した回に
+                # 色が変わって「押されなかった」扱いになり、1回目の押下で予想が始まらない
                 _press_model = _pb[0].button("🤖 モデルのみ予想", type="primary" if _cur == "model" else "secondary",
-                                             use_container_width=True, on_click=_pick, args=("model",))
+                                             use_container_width=True, on_click=_pick, args=("model",),
+                                             key="pred_btn_model")
                 _press_claude = _pb[1].button("🧠 Claudeのみ予想", type="primary" if _cur == "claude" else "secondary",
-                                              use_container_width=True, on_click=_pick, args=("claude",))
+                                              use_container_width=True, on_click=_pick, args=("claude",),
+                                              key="pred_btn_claude")
                 _press_avg = _pb[2].button("⚖️ 両方の予想平均", type="primary" if _cur == "avg" else "secondary",
-                                           use_container_width=True, on_click=_pick, args=("avg",))
+                                           use_container_width=True, on_click=_pick, args=("avg",),
+                                           key="pred_btn_avg")
             else:
                 _press_model = st.button("🤖 モデルのみ予想", type="primary")
                 _press_claude = _press_avg = False
             _press_mode = "claude" if _press_claude else ("avg" if _press_avg else "model")
             if _press_model or _press_claude or _press_avg:
+                # 段階ごとに時間を測り（Logs に [TIMING] の1行）、今どこまで進んだかを st.status に出す。
+                # 全体が PREDICT_TIMEOUT_SEC 秒を超えたら、次の段階に入るところで打ち切る。
+                _pred_rec = _perf.start("予想ボタン", limit_seconds=PREDICT_TIMEOUT_SEC)
+                _pred_status = st.status("AI解析中…", expanded=True)
+                _pred_seen = set()
+
+                def _pred_stage(name, _status=_pred_status, _seen=_pred_seen, _mode=_press_mode):
+                    label = PREDICT_STAGE_LABELS.get(name)
+                    if name == "Claude" and _mode == "model":
+                        label = "予想を整えています"
+                    if not label:
+                        return
+                    _status.update(label=f"AI解析中…（{label}）")
+                    if name not in _seen:
+                        _seen.add(name)
+                        _status.write(f"⏳ {label}")
+
+                _pred_rec.listener = _pred_stage
+                _pred_ok = False
                 try:
-                    with st.spinner("AI解析中…"):
-                        model = train_cached(history, history_key)
+                    with _pred_status:
+                        with _perf.section("学習読込"):
+                            model = train_cached(history, history_key)
+                            _model_setting = load_prediction_model_setting()
                         _mo_params = {
                             "display_weight": display_weight,
                             "weather_weight": weather_weight,
@@ -2808,24 +2870,26 @@ with tab1:
                             "min_bet": min_bet,
                             "value_bias": value_bias,
                         }
-                        if model is None:
-                            # 保存済みの今までのモデルが無い・読めない: 学習はせず、新しいモデルで
-                            # 予想できるレースだけ予想を出す（できなければ下の except でエラー表示）
-                            _legacy_err = _legacy_model_error()
-                            st.warning(
-                                "⚠️ 今までのモデルが読めません"
-                                + (f"（{_legacy_err}）" if _legacy_err else "")
-                                + "。新しいモデルで予想できるレースだけ予想を出します。"
-                            )
-                            _mo = _legacy_model_mod.new_model_only_prediction(
-                                work, odds, _mo_params,
-                                load_prediction_model_setting(), d.strftime("%Y%m%d"), jcd, rno,
-                            )
-                        else:
-                            _mo = model_only_prediction(
-                                model, work, odds, _mo_params,
-                                load_prediction_model_setting(), d.strftime("%Y%m%d"), jcd, rno,
-                            )
+                        # 「買い目」には、新しいモデル・今までのモデルの予想（入れ子の区間）を引いた残りが入る
+                        with _perf.section("買い目"):
+                            if model is None:
+                                # 保存済みの今までのモデルが無い・読めない: 学習はせず、新しいモデルで
+                                # 予想できるレースだけ予想を出す（できなければ下の except でエラー表示）
+                                _legacy_err = _legacy_model_error()
+                                st.warning(
+                                    "⚠️ 今までのモデルが読めません"
+                                    + (f"（{_legacy_err}）" if _legacy_err else "")
+                                    + "。新しいモデルで予想できるレースだけ予想を出します。"
+                                )
+                                _mo = _legacy_model_mod.new_model_only_prediction(
+                                    work, odds, _mo_params,
+                                    _model_setting, d.strftime("%Y%m%d"), jcd, rno,
+                                )
+                            else:
+                                _mo = model_only_prediction(
+                                    model, work, odds, _mo_params,
+                                    _model_setting, d.strftime("%Y%m%d"), jcd, rno,
+                                )
                         before, before_label, model_info = _mo["before"], _mo["before_label"], _mo["model_info"]
                         final, tickets, hedge_lane = _mo["final"], _mo["tickets"], _mo["hedge_lane"]
                         risk_reasons, research_variants = _mo["risk_reasons"], _mo["research_variants"]
@@ -2845,37 +2909,58 @@ with tab1:
                             # 展示データが揃う前の予想かどうか（保存する予想にも印を付ける）。
                             "pre_exhibition": not _exhibition_ready(work),
                         }
-                    # 管理者だけ: 3つの予想（Claudeのみ・両方の平均を押したときだけ Claude を1回呼ぶ。
-                    # モデルのみのときは呼ばず、前に取った予想があれば一緒に保存する）。
-                    # 失敗してもモデルの予想と買い目はそのまま出す。
-                    if IS_ADMIN:
-                        st.session_state["result"]["mode"] = _press_mode
-                        with st.spinner("Claudeの予想を取得しています…" if _press_mode != "model" else "予想を整えています…"):
-                            st.session_state["result"]["claude"] = _claude_reading(
-                                ctx, d, jcd, rno, work, final, tickets, odds,
-                                {
-                                    "hedge_enabled": hedge_enabled,
-                                    "longshot_min_prob_pct": longshot_min_prob_pct,
-                                    "total_budget": total_budget,
-                                    "min_bet": min_bet,
-                                    "value_bias": value_bias,
-                                },
-                                call_api=_press_mode != "model",
+                        # 管理者だけ: 3つの予想（Claudeのみ・両方の平均を押したときだけ Claude を1回呼ぶ。
+                        # モデルのみのときは呼ばず、前に取った予想があれば一緒に保存する）。
+                        # 失敗してもモデルの予想と買い目はそのまま出す。
+                        if IS_ADMIN:
+                            st.session_state["result"]["mode"] = _press_mode
+                            with _perf.section("Claude"):
+                                st.session_state["result"]["claude"] = _claude_reading(
+                                    ctx, d, jcd, rno, work, final, tickets, odds,
+                                    {
+                                        "hedge_enabled": hedge_enabled,
+                                        "longshot_min_prob_pct": longshot_min_prob_pct,
+                                        "total_budget": total_budget,
+                                        "min_bet": min_bet,
+                                        "value_bias": value_bias,
+                                    },
+                                    call_api=_press_mode != "model",
+                                )
+                            claude_tab.set_mode(ctx, _press_mode)
+                        # 予想を出した時点で自動保存する。締切前の再押下は最新予想で上書きし、
+                        # 締切後は上書きしない（スタッフが押した場合も同じ）。
+                        with _perf.section("保存"):
+                            st.session_state["result"]["save"] = _auto_save_prediction(
+                                ctx, d, jcd, VENUES[jcd], rno, deadlines, odds,
+                                st.session_state["result"],
                             )
-                        claude_tab.set_mode(ctx, _press_mode)
-                    # 予想を出した時点で自動保存する。締切前の再押下は最新予想で上書きし、
-                    # 締切後は上書きしない（スタッフが押した場合も同じ）。
-                    with st.spinner("予想を保存しています…"):
-                        st.session_state["result"]["save"] = _auto_save_prediction(
-                            ctx, d, jcd, VENUES[jcd], rno, deadlines, odds,
-                            st.session_state["result"],
-                        )
+                    _pred_ok = True
+                except _perf.PredictionTimeout as e:
+                    # 途中までの予想は出さない・保存しない（保存の段階に入っていれば保存は済んでいる）
+                    if not (st.session_state.get("result") or {}).get("save"):
+                        st.session_state.pop("result", None)
+                    _pred_status.update(label="⏱ 時間切れ", state="error", expanded=True)
+                    st.error(f"{e}。混み合っている可能性があります。少し待ってからもう一度押してください。")
                 except _legacy_model_mod.LegacyModelUnavailable as e:
+                    _pred_status.update(label="予想できませんでした", state="error", expanded=True)
                     st.error(f"今までのモデルが読めません。{e}。管理者は GitHub Actions の ML Model（task=legacy）を実行してください。")
                 except Exception as e:
+                    _pred_status.update(label="予想できませんでした", state="error", expanded=True)
                     st.error("AI予想でエラーが発生しました。")
                     st.code(str(e))
+                finally:
+                    _pred_line = _perf.finish(
+                        _pred_rec, tag="[TIMING]", order=list(PREDICT_STAGE_LABELS),
+                        extra=f" {ctx} mode={_press_mode} {'管理者' if IS_ADMIN else 'スタッフ'}",
+                    )
+                if _pred_ok:
+                    _pred_status.update(
+                        label=f"✅ 予想ができました（{_pred_rec.totals()[0]:.0f}秒）", state="complete", expanded=False
+                    )
+                    if IS_ADMIN:
+                        _pred_status.caption("かかった時間：" + _perf.stage_text(_pred_rec, PREDICT_STAGE_LABELS))
 
+            _perf.lap("予想: 予想の表示")
             result = st.session_state.get("result")
             if result and result.get("context") == ctx:
                 before, final, tickets, work_result = result["before"], result["final"], result["tickets"], result["work"]
@@ -3318,6 +3403,7 @@ with tab1:
     # スマホで下方向へ引っ張る操作を3秒以上続けた場合だけ、
     # 開催会場・開催状態・締切15分以内判定を公式から取り直す。
     # ページ最上部である必要はない。選択中会場・予想結果は維持する。
+    _perf.lap("予想: 長押し更新")
     def _refresh_venues_from_long_pull():
         _date_key = d.strftime("%Y%m%d")
         st.session_state.pop(f"daily_schedule_{_date_key}", None)
@@ -3439,6 +3525,7 @@ with tab1:
     )
 
 
+_perf.lap("タブ: ＋Claude予想")
 if IS_ADMIN:
     with _tabs[5]:
         claude_usage.render_header()

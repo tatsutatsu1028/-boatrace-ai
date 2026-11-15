@@ -1,3 +1,13 @@
+import os as _os
+
+# 計算ライブラリ（scikit-learn・LightGBM の OpenMP、numpy の BLAS）のスレッドを1本にする。
+# 予想は1レース6艇の小さな表で何百回も呼ぶため、複数スレッドにしても速くならず、待っているスレッドが
+# CPU を空回しして使い切ってしまう（手元の計測で、8レースの予想のプロセス全体の CPU が 89秒→25秒。
+# 予想・買い目は1つも変わらない: tests/test_thread_limit.py）。ライブラリを読み込む前に設定する。
+for _name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    _os.environ.setdefault(_name, "1")
+
+import time
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -12,18 +22,43 @@ import prediction as _prediction
 import result_tracker as _result_tracker
 import stake_allocator as _stake_allocator
 
+# 環境変数より前にライブラリが読み込まれていた場合にも効くよう、読み込み済みのものにも1本を指定する
+try:
+    from threadpoolctl import threadpool_limits as _threadpool_limits
+
+    _threadpool_limits(limits=1)
+except Exception:
+    pass
+
+import perf as _perf
+
+# 1回の実行（ページを開く・ボタンを押す・再実行）ごとに、どこで CPU を使ったかを Logs に1行出す（[CPU]）。
+_perf.abandon_all()
+_BOAT_AI_VIEW = str(st.query_params.get("view") or "")
+
 # note 記事の表示ページ（?view=note。PIN ログインなし・秘密のキー必須）。学習データの取得より前に出して止める
-if st.query_params.get("view") == "note":
+if _BOAT_AI_VIEW == "note":
     import note_page as _note_page
 
-    _note_page.render()
+    _note_rec = _perf.start("記事ページ(view=note)")
+    try:
+        _note_page.render()
+    finally:
+        _perf.finish(_note_rec)
     st.stop()
 # 購入者向けの展示後の買い目ページ（?view=buy&r=レース&t=レースごとの乱数。PIN・マスターキーなし。そのレースだけ）
-if st.query_params.get("view") == "buy":
+if _BOAT_AI_VIEW == "buy":
     import note_page as _note_page
 
-    _note_page.render_buy()
+    _buy_rec = _perf.start("購入者ページ(view=buy)")
+    try:
+        _note_page.render_buy()
+    finally:
+        _perf.finish(_buy_rec)
     st.stop()
+
+_BOAT_AI_RUN = _perf.start("画面")
+_perf.lap("準備（設定の差し替え）")
 
 # 本体は app_core.py。ここでは表示とオーナー専用の自動固定設定だけを追加してから本体を実行する。
 # 予想ロジック本体は変更せず、手動固定と自動固定が同じ「保存済み本番設定」を使うよう入口だけ統一する。
@@ -52,9 +87,31 @@ if not hasattr(_stake_allocator, "_boat_ai_original_allocate_stakes_smart"):
     _stake_allocator._boat_ai_original_allocate_stakes_smart = _stake_allocator.allocate_stakes_smart
 
 
+# 保存済み設定（app_settings）を読み直す間隔（秒）。予想ボタン1回で予想・買い目の差し替えから十数回
+# 呼ばれ、そのたびに Supabase へ問い合わせていたので、同じ数秒の間は1回の読み込みを使い回す。
+# 設定を保存したら捨てる（保存した設定が次の予想から使われるのは今までどおり）。
+_SETTINGS_REUSE_SECONDS = 5.0
+if not hasattr(_result_tracker, "_boat_ai_settings_memo"):
+    _result_tracker._boat_ai_settings_memo = {}
+
+
+def _load_settings_reused():
+    memo = _result_tracker._boat_ai_settings_memo
+    now = time.monotonic()
+    if memo.get("value") is not None and now - memo.get("at", -1e9) < _SETTINGS_REUSE_SECONDS:
+        return dict(memo["value"])
+    value = _result_tracker.load_settings()
+    memo.update(value=dict(value), at=now)
+    return dict(value)
+
+
+def _clear_settings_memo():
+    _result_tracker._boat_ai_settings_memo.clear()
+
+
 def _runtime_settings():
     """本番予想で使う保存済み設定を正規化して返す。"""
-    s = _result_tracker.load_settings()
+    s = _load_settings_reused()
     style = str(s.get("prediction_style", "バランス"))
     default_display = 0.42 if style == "展示重視" else 0.32
     return {
@@ -90,7 +147,10 @@ def _boat_ai_save_settings(settings):
     merged["hedge_enabled"] = bool(
         st.session_state.get(f"hedge_enabled_{style}", True)
     )
-    return _result_tracker._boat_ai_original_save_settings(merged)
+    try:
+        return _result_tracker._boat_ai_original_save_settings(merged)
+    finally:
+        _clear_settings_memo()
 
 
 _result_tracker.save_settings = _boat_ai_save_settings
@@ -174,7 +234,9 @@ def _boat_ai_sync_data():
     return result
 
 
+_perf.lap("データ同期")
 _boat_ai_sync_data()
+_perf.lap("準備（設定の差し替え）")
 if not all(_data_paths.data_path(n).exists() for n in _TRAIN_DATA_FILES):
     st.error(
         "学習データを取得できませんでした。管理者は Streamlit の Secrets の "
@@ -274,7 +336,8 @@ def _boat_ai_predict(model, race, *args, **kwargs):
         kwargs["venue_course_weight"] = cfg["venue_course_weight"]
         kwargs["original_display_scale"] = 0.0
 
-    out = _prediction._boat_ai_original_predict(model, race, *args, **kwargs)
+    with _perf.section("今までのモデル予想"):
+        out = _prediction._boat_ai_original_predict(model, race, *args, **kwargs)
 
     if not is_research_variant and float(kwargs.get("display_weight", 0.0)) != 0.0:
         # 艇番なしモデルの判定は attrs に載せるだけで、確率列には一切触れない。
@@ -305,7 +368,8 @@ def _boat_ai_production_final(settings, race, *args, **kwargs):
     今のモデルの本番予想と同じように、本番に使う final に合わせる。"""
     global _LAST_PRODUCTION_RACE, _LAST_PRODUCTION_FINAL
 
-    out, info = _ml_live._boat_ai_original_production_final(settings, race, *args, **kwargs)
+    with _perf.section("新モデル予想"):
+        out, info = _ml_live._boat_ai_original_production_final(settings, race, *args, **kwargs)
     if out is not None:
         lane_agnostic = _boat_ai_lane_agnostic(race)
         if lane_agnostic:
@@ -324,6 +388,18 @@ def _boat_ai_production_final(settings, race, *args, **kwargs):
 
 _ml_live.production_final = _boat_ai_production_final
 
+if not hasattr(_ml_live, "_boat_ai_original_programs"):
+    _ml_live._boat_ai_original_programs = _ml_live._programs
+
+
+def _boat_ai_programs(date_yyyymmdd):
+    """新しいモデルが使う番組表（公式の B ファイル）の取得。時間を測るだけ。"""
+    with _perf.section("公式データ取得"):
+        return _ml_live._boat_ai_original_programs(date_yyyymmdd)
+
+
+_ml_live._programs = _boat_ai_programs
+
 
 def _boat_ai_research_prediction_variants(model, race, *args, **kwargs):
     """研究用保存も本番と同じ保存済み重みを起点にする。"""
@@ -331,12 +407,13 @@ def _boat_ai_research_prediction_variants(model, race, *args, **kwargs):
     kwargs["display_weight"] = cfg["display_weight"]
     kwargs["weather_weight"] = cfg["weather_weight"]
     kwargs["venue_course_weight"] = cfg["venue_course_weight"]
-    return _prediction._boat_ai_original_research_prediction_variants(
-        model,
-        race,
-        *args,
-        **kwargs,
-    )
+    with _perf.section("今までのモデル予想"):
+        return _prediction._boat_ai_original_research_prediction_variants(
+            model,
+            race,
+            *args,
+            **kwargs,
+        )
 
 
 _prediction.research_prediction_variants = _boat_ai_research_prediction_variants
@@ -458,7 +535,9 @@ def _supabase_settings_config():
         return "", ""
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def _load_random_auto_settings():
+    # 設定タブを描くたび（再実行のたび）に読んでいたので30秒は使い回す。保存したら捨てる
     url, key = _supabase_settings_config()
     if not url or not key:
         return False, 3
@@ -504,6 +583,7 @@ def _save_random_auto_settings(enabled, daily_count, previous_enabled=False):
         timeout=10,
     )
     r.raise_for_status()
+    _load_random_auto_settings.clear()
 
 
 def _render_random_auto_settings():
@@ -631,8 +711,16 @@ except Exception:
     pass
 
 _core = Path(__file__).with_name("app_core.py")
-exec(
-    compile(_core.read_text(encoding="utf-8"), str(_core), "exec"),
-    globals(),
-    globals(),
-)
+_perf.lap("画面の頭（app_core の読み込み）")
+try:
+    exec(
+        compile(_core.read_text(encoding="utf-8"), str(_core), "exec"),
+        globals(),
+        globals(),
+    )
+finally:
+    # st.stop()・st.rerun() で止まったときも出す（止まった時点までの分）
+    _perf.finish(
+        _BOAT_AI_RUN, min_seconds=0.05,
+        extra=f" {st.session_state.get('auth_role') or '未ログイン'}",
+    )
