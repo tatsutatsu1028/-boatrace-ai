@@ -1,0 +1,118 @@
+name: Predict Race
+
+# 予想タブの「予想」ボタンの計算を GitHub Actions で行う（remote_predict.py）。
+# アプリが Supabase の prediction_request_create() で依頼を記録し、そこからこのワークフローを起動する
+# （supabase/migrations/20261116000000_prediction_requests.sql。トークンは pg_cron と同じ vault の
+#  github_track_odds_token）。予想に使う表・設定は依頼（prediction_requests.input）から読み、
+# アプリで計算するときと同じ関数で予想・保存し、結果を prediction_requests.result に書く。
+#
+# 実行記録は誰でも見られるので、アプリからの起動の入力は依頼の id だけ。date / jcd / rno / mode /
+# collector_name は手動で動かすとき用（依頼が無いときに、その場で依頼を作って計算する）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: "prediction_requests.id（アプリからの起動）"
+        required: false
+        default: ""
+      date:
+        description: "手動用: 日付 YYYYMMDD"
+        required: false
+        default: ""
+      jcd:
+        description: "手動用: 場コード（01〜24）"
+        required: false
+        default: ""
+      rno:
+        description: "手動用: レース番号"
+        required: false
+        default: ""
+      mode:
+        description: "手動用: model / claude / avg"
+        required: false
+        default: "model"
+      collector_name:
+        description: "手動用: 保存する予想の collector_name"
+        required: false
+        default: "actions_manual"
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    # このリポジトリへは書き込まない（保存先は Supabase）
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 学習済みモデル（今までのモデル・新しいモデル・集計表・万舟）だけを取る（過去データは取らない）
+      - name: Checkout models (private)
+        uses: actions/checkout@v4
+        with:
+          repository: tatsutatsu1028/-boatrace-ai-data
+          token: ${{ secrets.DATA_REPO_TOKEN }}
+          path: _data
+          sparse-checkout: models
+          sparse-checkout-cone-mode: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # アプリと同じ関数（st.secrets を読むもの）をそのまま使うため、Secrets から secrets.toml を作る
+      - name: Prepare secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_READ_MODEL: ${{ secrets.CLAUDE_READ_MODEL }}
+        run: python tools/write_streamlit_secrets.py .streamlit/secrets.toml
+
+      # 手動で動かしたとき（request_id が無い）は、その場で公式データを取って依頼を作る
+      - name: Create request (manual run)
+        id: manual
+        if: inputs.request_id == ''
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+        run: |
+          python tools/remote_predict_request.py --date "${{ inputs.date }}" --jcd "${{ inputs.jcd }}" \
+            --rno "${{ inputs.rno }}" --mode "${{ inputs.mode }}" --collector-name "${{ inputs.collector_name }}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Predict
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BOATRACE_DATA_DIR: ${{ github.workspace }}/_data
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_READ_MODEL: ${{ secrets.CLAUDE_READ_MODEL }}
+          REQUEST_ID: ${{ inputs.request_id || steps.manual.outputs.request_id }}
+        run: python remote_predict.py --request-id "$REQUEST_ID"
+
+      # 準備（インストールなど）で失敗したときも依頼を失敗にして、アプリが3分待たずに済むようにする
+      # （Python の準備が失敗していても動くよう curl で書く。終わった依頼は書き換えない）
+      - name: Mark request failed
+        if: failure()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          REQUEST_ID: ${{ inputs.request_id || steps.manual.outputs.request_id }}
+        run: |
+          if [[ "$REQUEST_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+            curl -sS -o /dev/null -w "%{http_code}\n" -X PATCH \
+              "$SUPABASE_URL/rest/v1/prediction_requests?id=eq.$REQUEST_ID&status=in.(queued,running)" \
+              -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" -H "Content-Type: application/json" \
+              -d '{"status":"error","finished_at":"now","error":"Actions の実行に失敗しました（ワークフローのログを確認してください）"}'
+          fi

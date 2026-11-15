@@ -32,6 +32,8 @@ from stake_allocator import allocate_stakes_smart, ticket_hit_probability
 from model_only import complete_adaptive_tickets, model_only_prediction
 import legacy_model as _legacy_model_mod
 import perf as _perf
+import predict_flow as _predict_flow
+import remote_predict_view as _remote_view
 import claude_tab
 import claude_usage
 import manshu_view
@@ -950,101 +952,20 @@ def _deadline_passed(d, deadlines, rno):
 
 def _auto_save_prediction(ctx, d, jcd, venue, rno, deadlines, odds, result):
     """
-    「AI最終予想」を押した時点の予想を prediction_snapshots へ保存する。
+    「AI最終予想」を押した時点の予想を prediction_snapshots へ保存する（predict_flow.save。
+    GitHub Actions で計算するときと同じルール）。
 
     締切前なら最新の予想で上書きし、締切後は上書きしない。
     同じ内容の再押下では書き込まず、payload_json も送らない。
     戻り値は表示用の dict（status / message / meta）。
     """
-    # AI総合信頼度(A/B/C)は confidence() を呼んだ時に final へ記録されるので、
-    # 画面表示より先に保存する今は、ここで一度計算して payload に含める。
-    try:
-        confidence(result["final"], result.get("work"))
-    except Exception:
-        pass
-    payload_json, payload_hash = build_snapshot_payload_json(
-        result["final"],
-        result["tickets"],
-        research_variants=result.get("research_variants") or {},
-        race_features=result.get("work"),
-        pre_exhibition=result.get("pre_exhibition", False),
-        extra={
-            **({"claude": result["claude"]} if result.get("claude") else {}),
-            # どちらの予想モデルで出したか（設定値・使った版・新しいモデルを使えなかった理由）
-            **({"prediction_model": result["model_info"]} if result.get("model_info") else {}),
-        } or None,
+    out = _predict_flow.save(
+        ctx, d, jcd, venue, rno, deadlines, odds, result, COLLECTOR_NAME,
+        _cached_snapshot_meta(ctx, refresh=True),
     )
-    result["payload_hash"] = payload_hash
-
-    meta = _cached_snapshot_meta(ctx, refresh=True)
-    if meta is None:
-        return {"status": "error", "message": "保存済み予想の確認に失敗しました。"}
-
-    if meta["exists"] and meta.get("snapshot_kind") == "auto_random":
-        # 自動固定で保存済みのレースは、締切前でも上書きしない。
-        return {"status": "auto_fixed", "meta": meta}
-
-    is_past = d < _today_jst()
-    if _deadline_passed(d, deadlines, rno) and (meta["exists"] or not is_past):
-        # 締切後は上書きしない。過去日で未保存のときだけバックテストとして保存する。
-        return {"status": "closed", "meta": meta}
-    if (
-        meta["exists"]
-        and meta.get("payload_hash") == payload_hash
-        and bool(meta.get("pre_exhibition")) == bool(result.get("pre_exhibition"))
-    ):
-        return {"status": "unchanged", "meta": meta}
-
-    try:
-        saved = save_latest_prediction_snapshot(
-            race_key=ctx,
-            venue=venue,
-            payload_json=payload_json,
-            payload_hash=payload_hash,
-            pre_exhibition=result.get("pre_exhibition", False),
-            collector_name=COLLECTOR_NAME,
-        )
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-    status = saved.get("status")
-    _snapshot_meta_cache()[ctx] = saved
-    out = {"status": status, "meta": saved}
-
-    # 当日レースを初めて保存したら、オッズ追跡にも登録する（従来の固定と同じ）。
-    if status == "inserted" and saved.get("snapshot_kind") == "same_day" and odds_tracking_available():
-        ok, msg = add_to_odds_watchlist(d.strftime("%Y%m%d"), jcd, rno)
-        if ok:
-            saved_now, save_msg = save_odds_snapshot_now(
-                d.strftime("%Y%m%d"), jcd, rno, odds
-            )
-            out["odds_message"] = (
-                "📈 オッズ自動追跡も開始しました。"
-                + (f" {save_msg}" if saved_now else "")
-            )
-        else:
-            out["odds_warning"] = f"オッズ追跡の開始に失敗しました。 {msg}"
+    if out.pop("rpc", False):
+        _snapshot_meta_cache()[ctx] = out["meta"]
     return out
-
-
-def _claude_reading(ctx, d, jcd, rno, work, final, tickets, odds, params, call_api=True):
-    """
-    3つの予想（管理者だけ）。call_api=True（Claudeのみ・両方の平均）なら Claude を呼ぶ。
-    同じ入力の予想がこのアプリの中か保存済みの予想にあれば API は呼ばない。
-    """
-    saved_section = None
-    try:
-        snap = load_prediction_snapshot(ctx)
-        saved_section = (json.loads((snap or {}).get("payload_json") or "{}") or {}).get("claude")
-    except Exception:
-        saved_section = None
-    return claude_tab.run_at_predict(
-        ctx, f"{d} {VENUES[jcd]} {rno}R", work, final, tickets, odds, params, _complete_adaptive_tickets,
-        api_key=_secret_text("ANTHROPIC_API_KEY"),
-        model=_secret_text("CLAUDE_READ_MODEL") or None,
-        saved_section=saved_section,
-        call_api=call_api,
-    )
 
 
 def _saved_prediction_frames(ctx, result):
@@ -1254,6 +1175,10 @@ with tab2:
 
 _perf.lap("タブ: 設定")
 with tab3:
+    if IS_ADMIN:
+        # 予想ボタンをどこで計算するか（GitHub Actions / アプリの中）。スタッフの予想ボタンにも効く
+        _remote_view.render_setting()
+        st.divider()
     st.subheader("🤖 自動固定状況")
     _auto_progress = _auto_random_progress()
     if _auto_progress is None:
@@ -2835,7 +2760,42 @@ with tab1:
                 _press_model = st.button("🤖 モデルのみ予想", type="primary")
                 _press_claude = _press_avg = False
             _press_mode = "claude" if _press_claude else ("avg" if _press_avg else "model")
-            if _press_model or _press_claude or _press_avg:
+            # 予想に渡す値（アプリで計算するときも Actions で計算するときも同じものを使う）
+            _pred_params = {
+                "display_weight": display_weight,
+                "weather_weight": weather_weight,
+                "venue_course_weight": venue_course_weight,
+                "hedge_enabled": hedge_enabled,
+                "longshot_min_prob_pct": longshot_min_prob_pct,
+                "total_budget": total_budget,
+                "min_bet": min_bet,
+                "value_bias": value_bias,
+            }
+            _pred_claude_params = {k: _pred_params[k] for k in (
+                "hedge_enabled", "longshot_min_prob_pct", "total_budget", "min_bet", "value_bias")}
+            _pred_label = f"{d} {VENUES[jcd]} {rno}R"
+            _pred_pressed = bool(_press_model or _press_claude or _press_avg)
+            # 予想ボタンの計算場所（管理者が設定タブで切り替える。既定は GitHub Actions）
+            _pred_runner = _remote_view.runner() if _pred_pressed else None
+            if _pred_pressed and _pred_runner == "actions":
+                try:
+                    _remote_view.request(
+                        ctx, _press_mode if IS_ADMIN else "model", "admin" if IS_ADMIN else "staff", COLLECTOR_NAME,
+                        {
+                            "date": d.isoformat(), "jcd": jcd, "rno": int(rno), "venue": VENUES[jcd],
+                            "deadlines": deadlines or {}, "work": work, "odds": odds,
+                            "params": _pred_params, "claude_params": _pred_claude_params,
+                            "label": _pred_label, "mode": _press_mode,
+                        },
+                    )
+                    st.session_state.pop("remote_prediction_error", None)
+                    if (st.session_state.get("result") or {}).get("context") == ctx:
+                        st.session_state.pop("result", None)
+                except Exception as e:
+                    print("[REMOTE_PREDICT] request error:", type(e).__name__, str(e)[:200], flush=True)
+                    st.warning(f"GitHub Actions に予想を頼めなかったため、アプリの中で計算します（{type(e).__name__}）")
+                    _pred_runner = "app"
+            if _pred_pressed and _pred_runner == "app":
                 # 段階ごとに時間を測り（Logs に [TIMING] の1行）、今どこまで進んだかを st.status に出す。
                 # 全体が PREDICT_TIMEOUT_SEC 秒を超えたら、次の段階に入るところで打ち切る。
                 _pred_rec = _perf.start("予想ボタン", limit_seconds=PREDICT_TIMEOUT_SEC)
@@ -2860,80 +2820,32 @@ with tab1:
                         with _perf.section("学習読込"):
                             model = train_cached(history, history_key)
                             _model_setting = load_prediction_model_setting()
-                        _mo_params = {
-                            "display_weight": display_weight,
-                            "weather_weight": weather_weight,
-                            "venue_course_weight": venue_course_weight,
-                            "hedge_enabled": hedge_enabled,
-                            "longshot_min_prob_pct": longshot_min_prob_pct,
-                            "total_budget": total_budget,
-                            "min_bet": min_bet,
-                            "value_bias": value_bias,
-                        }
-                        # 「買い目」には、新しいモデル・今までのモデルの予想（入れ子の区間）を引いた残りが入る
-                        with _perf.section("買い目"):
-                            if model is None:
-                                # 保存済みの今までのモデルが無い・読めない: 学習はせず、新しいモデルで
-                                # 予想できるレースだけ予想を出す（できなければ下の except でエラー表示）
-                                _legacy_err = _legacy_model_error()
-                                st.warning(
-                                    "⚠️ 今までのモデルが読めません"
-                                    + (f"（{_legacy_err}）" if _legacy_err else "")
-                                    + "。新しいモデルで予想できるレースだけ予想を出します。"
-                                )
-                                _mo = _legacy_model_mod.new_model_only_prediction(
-                                    work, odds, _mo_params,
-                                    _model_setting, d.strftime("%Y%m%d"), jcd, rno,
-                                )
-                            else:
-                                _mo = model_only_prediction(
-                                    model, work, odds, _mo_params,
-                                    _model_setting, d.strftime("%Y%m%d"), jcd, rno,
-                                )
-                        before, before_label, model_info = _mo["before"], _mo["before_label"], _mo["model_info"]
-                        final, tickets, hedge_lane = _mo["final"], _mo["tickets"], _mo["hedge_lane"]
-                        risk_reasons, research_variants = _mo["risk_reasons"], _mo["research_variants"]
-                        ticket_plan = _mo["ticket_plan"]
-                        st.session_state["result"] = {
-                            "context": ctx,
-                            "before": before,
-                            "before_label": before_label,
-                            "model_info": model_info,
-                            "final": final,
-                            "tickets": tickets,
-                            "work": work,
-                            "hedge_lane": hedge_lane,
-                            "risk_reasons": risk_reasons,
-                            "research_variants": research_variants,
-                            "ticket_plan": ticket_plan,
-                            # 展示データが揃う前の予想かどうか（保存する予想にも印を付ける）。
-                            "pre_exhibition": not _exhibition_ready(work),
-                        }
-                        # 管理者だけ: 3つの予想（Claudeのみ・両方の平均を押したときだけ Claude を1回呼ぶ。
-                        # モデルのみのときは呼ばず、前に取った予想があれば一緒に保存する）。
-                        # 失敗してもモデルの予想と買い目はそのまま出す。
+                        if model is None:
+                            # 保存済みの今までのモデルが無い・読めない: 学習はせず、新しいモデルで
+                            # 予想できるレースだけ予想を出す（できなければ下の except でエラー表示）
+                            _legacy_err = _legacy_model_error()
+                            st.warning(
+                                "⚠️ 今までのモデルが読めません"
+                                + (f"（{_legacy_err}）" if _legacy_err else "")
+                                + "。新しいモデルで予想できるレースだけ予想を出します。"
+                            )
+                        # 予想・Claude・保存は predict_flow.py（GitHub Actions で計算するときと同じ）
+                        st.session_state["result"] = _predict_flow.compute(
+                            model, work, odds, _pred_params, _model_setting,
+                            d.strftime("%Y%m%d"), jcd, rno, ctx,
+                        )
                         if IS_ADMIN:
-                            st.session_state["result"]["mode"] = _press_mode
-                            with _perf.section("Claude"):
-                                st.session_state["result"]["claude"] = _claude_reading(
-                                    ctx, d, jcd, rno, work, final, tickets, odds,
-                                    {
-                                        "hedge_enabled": hedge_enabled,
-                                        "longshot_min_prob_pct": longshot_min_prob_pct,
-                                        "total_budget": total_budget,
-                                        "min_bet": min_bet,
-                                        "value_bias": value_bias,
-                                    },
-                                    call_api=_press_mode != "model",
-                                )
-                            claude_tab.set_mode(ctx, _press_mode)
+                            _predict_flow.claude_step(
+                                st.session_state["result"], ctx, _pred_label, work, odds, _pred_claude_params,
+                                _press_mode, api_key=_secret_text("ANTHROPIC_API_KEY"),
+                                read_model=_secret_text("CLAUDE_READ_MODEL") or None,
+                            )
                         # 予想を出した時点で自動保存する。締切前の再押下は最新予想で上書きし、
                         # 締切後は上書きしない（スタッフが押した場合も同じ）。
-                        with _perf.section("保存"):
-                            st.session_state["result"]["save"] = _auto_save_prediction(
-                                ctx, d, jcd, VENUES[jcd], rno, deadlines, odds,
-                                st.session_state["result"],
-                            )
+                        st.session_state["result"]["save"] = _auto_save_prediction(
+                            ctx, d, jcd, VENUES[jcd], rno, deadlines, odds,
+                            st.session_state["result"],
+                        )
                     _pred_ok = True
                 except _perf.PredictionTimeout as e:
                     # 途中までの予想は出さない・保存しない（保存の段階に入っていれば保存は済んでいる）
@@ -2959,6 +2871,16 @@ with tab1:
                     )
                     if IS_ADMIN:
                         _pred_status.caption("かかった時間：" + _perf.stage_text(_pred_rec, PREDICT_STAGE_LABELS))
+
+            # GitHub Actions に頼んだ予想: 終わるまで5秒おきに確かめる（終わったらページを描き直して下に表示）
+            if _remote_view.pending(ctx):
+                _remote_view.render_wait(ctx)
+            _remote_err = st.session_state.get("remote_prediction_error")
+            if _remote_err and _remote_err.get("ctx") == ctx:
+                st.error(
+                    f"GitHub Actions での予想に失敗しました：{_remote_err['message']}。"
+                    "もう一度押すか、管理者は設定タブで「アプリの中で計算」に切り替えてください。"
+                )
 
             _perf.lap("予想: 予想の表示")
             result = st.session_state.get("result")
@@ -2997,6 +2919,15 @@ with tab1:
                         "新しいモデルで予想できなかったため、今までのモデルで予想しました"
                         f"（{_model_info['fallback_reason']}）"
                     )
+
+                _remote_info = result.get("remote") or {}
+                if _remote_info:
+                    if _remote_info.get("legacy_error"):
+                        st.warning(f"⚠️ 今までのモデルが読めませんでした（{_remote_info['legacy_error']}）。"
+                                   "新しいモデルの予想だけを出しています。")
+                    if IS_ADMIN:
+                        st.caption(f"🛰 GitHub Actions で計算（{_remote_info.get('seconds')}秒）："
+                                   f"{_remote_info.get('stage_text') or ''}")
 
                 if result.get("pre_exhibition"):
                     st.warning("⏳ 展示前の予想です。展示後にもう一度押してください")
