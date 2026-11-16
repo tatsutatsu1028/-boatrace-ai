@@ -12,6 +12,8 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import re  # noqa: E402
+
 import original_exhibition_fetcher as oe  # noqa: E402
 
 JST = oe.JST
@@ -295,3 +297,125 @@ def test_run_for_cap_counts_only_fetching_races(monkeypatch):
     oe.run_for(FakeSB(), online + offline, post, now)
     assert sum(k.startswith("20261110_03_") for k in done) == 3                  # 対象外はすべて
     assert sum(k.startswith("20261110_05_") for k in done) == oe.MAX_PER_RUN    # 通信する場は上限まで
+
+
+# ---------------------------------------------------------------
+# 尼崎・若松・唐津・徳山・丸亀の追加、津の「表示するデータがありません」、未確認の場を試す
+# ---------------------------------------------------------------
+def test_new_venues_source_url():
+    assert oe.source_url("13", "20261116_13_6") == ("https://www.boatrace-amagasaki.jp/modules/yosou/group-cyokuzen.php"
+                                                    "?day=20261116&race=6&kind=2&if=1")
+    assert oe.source_url("20", "20261116_20_1").startswith("https://www.wmb.jp/modules/yosou/group-cyokuzen.php")
+    assert oe.source_url("23", "20261116_23_11").endswith("day=20261116&race=11&kind=2&if=1")
+    assert oe.source_url("18", "20261116_18_3").endswith("/modules/yosou/tenji.php?day=20261116&race=3&if=1")
+    assert oe.source_url("15", "20261116_15_7").endswith("/asp/kyogi/15/pc/yoso0507.htm")
+    for jcd in ("02", "13", "15", "16", "18", "20", "23"):
+        assert jcd in oe.VENUES and jcd not in oe.UNSUPPORTED
+    assert oe.UNSUPPORTED["24"].startswith("対象外（オリジナル展示を公開していない")
+
+
+def test_parse_amagasaki_turn_range():
+    rows = [(l, "36.4%d" % l, "11.2%d" % l, "") for l in range(1, 7)]
+    page = _page(rows).replace("<th>直線</th>", "")
+    page = page.replace("<td class=\"col9\"></td>", "")
+    assert oe.parse(page, ("一周", "まわり足"))[0] == "format"              # 既定の範囲（〜10秒）では外れる
+    st, out, _ = oe.parse(page, ("一周", "まわり足"), ranges=oe.VENUES["13"]["ranges"])
+    assert st == "ok" and out[1] == {"original_lap": 36.41, "original_turn": 11.21, "original_straight": None}
+
+
+def test_parse_tokuyama_lane_in_second_cell_and_br_label():
+    head = ("<table><tr><th>気<br>配</th><th>枠</th><th>展示</th><th>一周</th><th>まわ<br>り足</th>"
+            "<th>レース</th><th>コース</th><th>ST</th><th>着<br>順</th></tr>")
+    rows = "".join(f"<tr><td class='col1 '>A</td><td class='col2 tei_color{l} waku'>{l}</td><td>選手</td>"
+                   f"<td>6.8{l}</td><td>36.5{l}</td><td>11.2{l}</td><td></td><td></td><td></td><td></td></tr>"
+                   "<tr><td class='col-buhin' colspan='5'><ul><li>ギヤ</li></ul></td></tr>" for l in range(1, 7))
+    v = oe.VENUES["18"]
+    st, out, _ = oe.parse(head + rows + "</table>", v["labels"], v["trailing"], v["ranges"])
+    assert st == "ok" and out[3] == {"original_lap": 36.53, "original_turn": 11.23, "original_straight": None}
+
+
+def test_parse_marugame_plain_lane():
+    head = "<table><tr><th>枠</th><th>展示</th><th>一周</th><th>まわり足</th><th>直線</th></tr>"
+    rows = "".join(f"<tbody><tr><td rowspan='2'>{l}</td><td rowspan='2'><div>選手</div></td><td>52.0</td>"
+                   f"<td rowspan='2'>6.7{l}</td><td>36.2{l}</td><td>5.6{l}</td><td>5.5{l}</td></tr>"
+                   "<tr><td class='small'>&nbsp;</td></tr></tbody>" for l in range(1, 7))
+    assert oe.parse(head + rows + "</table>")[0] == "format"                  # 枠の印が無いと読めない
+    st, out, _ = oe.parse(head + rows + "</table>", plain_lane=True)
+    assert st == "ok" and out[6] == {"original_lap": 36.26, "original_turn": 5.66, "original_straight": 5.56}
+    empty = "".join(f"<tbody><tr><td rowspan='2'>{l}</td><td rowspan='2'><div>選手</div></td><td>52.0</td>"
+                    f"<td rowspan='2'>6.7{l}</td><td class=''></td><td class=''></td><td class=''></td></tr>"
+                    "<tr><td class='small'>&nbsp;</td></tr></tbody>" for l in range(1, 7))   # 展示直後（まだ空欄）
+    assert oe.parse(head + empty + "</table>", plain_lane=True)[0] == "unpublished"
+
+
+def _tsu_rows(msg_lane=None, span=2):
+    out = ""
+    for l in range(1, 7):
+        cells = (f"<td class='col6' colspan='3' rowspan='{span}'>表示するデータがあり\n ません</td>" if l == msg_lane
+                 else f"<td>37.{l}0</td><td>4.{l}0</td><td>8.{l}0</td>")
+        out += (f"<tr><td rowspan='2' class='col1 waku tei_color{l} '>{l}</td><td>選手</td><td>52.0</td>"
+                f"<td>0.0</td><td>6.80</td>{cells}</tr><tr><td class='col3'></td></tr>")
+    return "<table><tr><th>枠</th><th>一周</th><th>まわり足</th><th>直線</th></tr>" + out + "</table>"
+
+
+def test_parse_tsu_no_data_cell():
+    st, out, _ = oe.parse(_tsu_rows(msg_lane=3))                      # 1艇だけ「表示するデータがありません」
+    assert st == "ok" and out[3] == {"original_lap": None, "original_turn": None, "original_straight": None}
+    assert out[1] == {"original_lap": 37.1, "original_turn": 4.1, "original_straight": 8.1}
+    # 1つの欄が全艇にまたがる（若松の未公開の形）→ 未公開
+    page = _tsu_rows(msg_lane=1, span=12)
+    page = re.sub(r"<td>37\.[2-6]0</td><td>4\.[2-6]0</td><td>8\.[2-6]0</td>", "", page)
+    st, _, why = oe.parse(page)
+    assert st == "unpublished" and "表示するデータ" in why
+
+
+def test_needs_fetch_retries_old_unsupported_rows():
+    old = {"status": "unsupported", "attempts": 0, "reason": "対象外（未確認の場。次の開催時に確認して追加する）"}
+    assert oe.needs_fetch(_t(jcd="13"), old, "done", _at("18:00"))           # 対応した場は、締切後でも取る
+    assert oe.needs_fetch(_t(jcd="06"), old, "done", _at("15:00"))           # 未確認の場も試す
+    assert not oe.needs_fetch(_t(jcd="03"), old, "done", _at("15:00"))       # 確かめて対象外の場は通信しない
+    assert not oe.needs_fetch(_t(jcd="24"), old, "done", _at("15:00"))
+
+
+def test_record_unconfirmed_venue_tries_and_records_reason(monkeypatch):
+    calls = []
+
+    def fake_probe(jcd, rk):
+        calls.append(jcd)
+        return "format", None, "未確認の場で試した: トップページにレース情報の枠が無い", "https://example.invalid/"
+
+    monkeypatch.setattr(oe, "probe", fake_probe)
+    sb = FakeSB()
+    assert oe.record(sb, _t(jcd="06"), {"status": "unsupported", "attempts": 0}) == "format"
+    row = sb.calls[-1][2]["json"]
+    assert calls == ["06"] and row["attempts"] == 1 and "未確認の場で試した" in row["reason"]
+    assert row["source_url"] == "https://example.invalid/" and row["last_tried_at"]
+
+
+def test_probe_without_site_does_not_fetch(monkeypatch):
+    monkeypatch.setattr(oe, "_get_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError("通信しない")))
+    st, rows, why, url = oe.probe("99", "20261116_99_1")
+    assert st == "format" and rows is None and url is None and "未登録" in why
+
+
+def test_probe_follows_tabs_and_subtab(monkeypatch):
+    top = "<li data-tab=\"group-syussou\"></li><li data-tab=\"group-cyokuzen\"></li><script>typelink = '/modules/yosou/' + t</script>"
+    sub = ('<li class="link" data-kind="0"><a href="#">直前情報</a></li>'
+           '<li class="link" data-kind="2"><a href="#">オリジナル展示データ</a></li>')
+    pages = {"https://www.boatrace-hamanako.jp/": top,
+             "https://www.boatrace-hamanako.jp/modules/yosou/group-cyokuzen.php?day=20261116&race=4&if=1": sub,
+             "https://www.boatrace-hamanako.jp/modules/yosou/group-cyokuzen.php?day=20261116&race=4&kind=2&if=1":
+                 _page(ROWS)}
+    seen = []
+    monkeypatch.setattr(oe, "_get_text", lambda url, timeout: seen.append(url) or (200, pages[url]))
+    st, rows, why, url = oe.probe("06", "20261116_06_4")
+    assert st == "ok" and rows[1]["original_lap"] == 36.63 and url.endswith("kind=2&if=1")
+    assert seen == list(pages)
+
+
+def test_run_for_counts_unconfirmed_as_online(monkeypatch):
+    done = []
+    monkeypatch.setattr(oe, "record", lambda sb, t, p, now=None: done.append(t["jcd"]) or "ok")
+    ts = [{**_t(jcd="06", deadline="16:00"), "race_key": f"20261110_06_{i}"} for i in range(1, 9)]
+    oe.run_for(FakeSB(), ts, {t["race_key"]: {"status": "done"} for t in ts}, _at("15:00"))
+    assert len(done) == oe.MAX_PER_RUN                                        # 通信するので上限に数える
