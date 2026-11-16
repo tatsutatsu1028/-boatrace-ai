@@ -125,3 +125,28 @@ update public.app_settings set prediction_model = 'current' where id = 1;
   集計表（約1.2MB）を1日1回ダウンロードして読み込むだけにする
 - 1レースの予想は、出走表・直前情報の取得と、学習済みモデルでの計算だけ（手元で約0.5秒）
 - 過去データ全体（data/history/）はアプリでは読まない
+
+## 候補の版 v3（2026-11。本番には使っていない）
+
+1着（頭）予想を強くするための候補。`ml_nightly.py train_candidate` で学習し、`models/latest.json` は書き換えない
+（本番は v2 のまま）。事後予想（`hindcast.py --model candidate`）で v2 と同じレースに並べて比べる。
+
+### 確認した結果（v2 に入っていたもの）
+
+| 依頼 | v2 の学習項目 | 足りなかったもの → v3 で足したもの |
+|---|---|---|
+| 風向き | `wind_rel`（水面の向きと風向きのアイコン番号の差。16方位）・`wind_head`（縦の成分＝追い風/向かい風）・`wind_cross`（横風の成分）。各場の水面の向きに合わせた値 | 直前情報（pages）がある期間だけで、無い期間は欠損 → 1つ前のレースの競走成績の風向（文字）と場の水面の向きで補った `wind_rel2`・`wind_head2`・`wind_cross2`、風の種類 `wind_kind`（無風/向かい風/追い風/横風） |
+| 選手×コースの決まり手 | `rc_k_nige`・`rc_k_makuri`・`rc_k_sashi`・`rc_k_msashi`（直近365日・そのコースで3走以上。1着の決まり手の割合）。ほかに選手×コースの1着率・2連率・3連率・ST・ST順位 | 負け方（そのコースで走ってまくられた・差された割合）と、艇同士の組み合わせ → `rc_lost_makuri`・`rc_lost_sashi`・`rc_k_attack`（まくり＋差し＋まくり差し）・`rk_attack`・`lane1_k_nige`・`lane1_lost_makuri`・`lane1_lost_sashi`・`x_makuri_vs1`（自分のまくり率×1号艇のまくられ率）・`x_sashi_vs1`・`outer_attack_max` |
+| 1号艇が負けたときに誰が勝つか | 無し（全レースで1着を学習） | サブモデル `head_alt`: 1号艇が1着でなかったレースだけで、2〜6号艇の1着を学習（`ChainModel(head_alt=True)`・`predict_head_alt`）。1着〜3着の段（本命・買い目）には使わない |
+
+- 風向きのアイコン番号の向き（差0が向かい風か追い風か）はまだデータで確かめていない（`wind_kind` の名前だけの話で、学習には影響しない）
+- v2 の列は値を変えていない（同じデータで作った表で全列が一致することを確かめた）。本番の集計表が古い形でも v2 の列は同じ値で出る
+
+### 比べ方
+
+- `hindcast_predictions` に v3 の行（`model_version` が `ml-chain-v3-...`）と、サブモデルの確率 `p_head_alt` が入る
+- ビュー `hindcast_candidate_summary`（1行1範囲: 全レース／万舟チャンスの印／1号艇が負けたレース）:
+  `v2_favorite_rate`・`v3_favorite_rate`（本命の的中率）と、頭1・頭2（1号艇以外で1着確率が高い2艇）の的中率を
+  base（v2 の1着確率＝今の決め方）・v3（v3 の1着確率）・alt（サブモデル）で並べる。レース別は `hindcast_candidate_races`
+- 合格基準: 万舟チャンスの印のレースで頭1・頭2の的中が base より上がり、全レースの本命の的中率が v2 より下がらないこと。
+  本番の切り替え（v3 を latest にする・万舟チャンスの頭をサブモデルにする）はオーナーの確認後

@@ -27,6 +27,7 @@ _CLASS_ORD = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
 _GRADE_ORD = {"SG": 5, "G1": 4, "G2": 3, "G3": 2, "一般": 1}
 _RACE_TYPE_ORD = {"一般": 0, "予選": 1, "その他": 1, "特別選抜": 2, "準優勝戦": 3, "優勝戦": 4}
 _KIMARITE_FLAGS = {"k_nige": "逃げ", "k_makuri": "まくり", "k_sashi": "差し", "k_msashi": "まくり差し"}
+_LOST_FLAGS = ["lost_makuri", "lost_sashi"]
 _WEATHER = {"晴": 1, "曇り": 2, "雨": 3, "雪": 4, "霧": 5}
 
 FEATURE_GROUPS = {
@@ -75,7 +76,7 @@ _MORE_RANKS = [
     ("rc_st", "rk_rc_st", True), ("local_win_rate", "rk_local", False), ("motor_3ren", "rk_motor3", False),
     ("boat_2ren", "rk_boat", False), ("meet_fin_adj", "rk_meet_adj", True), ("weight", "rk_weight", True),
 ]
-CAT_FEATURES = ["jcd", "wind_rel"]
+CAT_FEATURES = ["jcd", "wind_rel", "wind_rel2", "wind_kind"]
 FEATURES = [c for cols in FEATURE_GROUPS.values() for c in cols]
 # 2回目（特徴量の表との照合）で足した列。効果の確かめ（足す前の版との比較）に使う
 V2_ADDED = [
@@ -86,6 +87,17 @@ V2_ADDED = [
     "outer_win_sum", "outer_win_max", "outer_rc_win_sum",
 ]
 FEATURES_V1 = [c for c in FEATURES if c not in V2_ADDED]
+# 3回目（v3。2026-11 の候補。本番の v2 は FEATURES のまま）で足した列
+#   風向き: 直前情報の無い期間も補った風向き（wind_rel2・wind_head2・wind_cross2）と風の種類（wind_kind）
+#           （v2 の wind_rel・wind_head・wind_cross は直前情報のある期間だけ）
+#   選手×コースの負け方と、艇同士の決まり手の組み合わせ
+V3_WIND = ["wind_rel2", "wind_head2", "wind_cross2", "wind_kind"]
+V3_KIMARITE = [
+    "rc_lost_makuri", "rc_lost_sashi", "rc_k_attack", "rk_attack", "lane1_k_nige", "lane1_lost_makuri",
+    "lane1_lost_sashi", "x_makuri_vs1", "x_sashi_vs1", "outer_attack_max",
+]
+V3_ADDED = V3_WIND + V3_KIMARITE
+FEATURES_V3 = [c for c in FEATURES if c not in ("wind_rel", "wind_head", "wind_cross")] + V3_ADDED
 # 艇番を除いた実力（艇番・コース・隣の艇に関わる列を除く）。ml_model の「艇番なし」モデルが使う
 LANE_FREE_FEATURES = [
     "class_ord", "national_win_rate", "national_2ren", "national_3ren", "age", "weight", "racer_no",
@@ -185,6 +197,10 @@ def _events(k):
     kim = e["kimarite"].astype(str)
     for col, name in _KIMARITE_FLAGS.items():
         e[col] = ((fin == 1) & kim.eq(name)).astype(float)
+    # 負けたときの決まり手（そのコースで走って、他の艇にまくられた・差された）。v3 で足した列
+    lost = fin.ne(1)
+    e["lost_makuri"] = (lost & kim.eq("まくり")).astype(float)
+    e["lost_sashi"] = (lost & kim.isin(["差し", "まくり差し"])).astype(float)
     # そのレースの中でのSTの順位（フライング・出遅れは除く）
     e["st_rank"] = e.groupby("race_key")["st_ok"].rank(method="min")
     return e
@@ -230,7 +246,8 @@ def _rates(prefix, sums, cols, min_n=1):
     return out
 
 
-_COURSE_COLS = ["one", "win", "top2", "top3", "st_n", "st_sum", "stk_n", "stk_sum", *_KIMARITE_FLAGS]
+_COURSE_COLS = ["one", "win", "top2", "top3", "st_n", "st_sum", "stk_n", "stk_sum", *_KIMARITE_FLAGS,
+                *_LOST_FLAGS]
 
 
 def build_state(e, keep_days=None):
@@ -346,7 +363,8 @@ def history_features(base, state):
     out["f_period"] = now - old
 
     # 選手×コース（予想時点の想定コース = 展示の進入コース、無ければ艇番）
-    ecols = _COURSE_COLS
+    # 前の版のコードで作った集計表（v3 の列が無い）でも v2 の列は同じ値で出す
+    ecols = [c for c in _COURSE_COLS if c in state["course"].columns]
     t = base.assign(ckey=base["exp_course"].astype(int).astype(str))
     s = _window(t, state["course"], ["racer_id", "ckey"], ecols, 365)
     out.update(_rates("rc", s, ecols, min_n=1))
@@ -357,6 +375,8 @@ def history_features(base, state):
     rn = np.where(s[:, ecols.index("one")] >= 3, s[:, ecols.index("one")], np.nan)
     for col in _KIMARITE_FLAGS:
         out[f"rc_{col}"] = s[:, ecols.index(col)] / rn
+    for col in _LOST_FLAGS:
+        out[f"rc_{col}"] = s[:, ecols.index(col)] / rn if col in ecols else np.full(len(base), np.nan)
 
     # 選手×場
     r = _rates("rv", _window(base, state["venue"], ["racer_id", "jcd"], cols, 365), cols)
@@ -451,8 +471,12 @@ def _meet_flow(meet_ids, racer_ids, adj):
 
 def prev_race_weather(k):
     """同じ場・同じ日の1つ前のレースの気象（競走成績の値）。直前情報が無い期間の代わり。"""
-    r = k.drop_duplicates("race_key")[["race_key", "race_date", "jcd", "race_no", "wind_speed",
-                                       "wave_cm", "weather"]].copy()
+    cols = ["race_key", "race_date", "jcd", "race_no", "wind_speed", "wave_cm", "weather"]
+    if "wind_direction" in k.columns:
+        cols.append("wind_direction")
+    r = k.drop_duplicates("race_key")[cols].copy()
+    if "wind_direction" not in r.columns:
+        r["wind_direction"] = np.nan
     r["race_no"] = _num(r["race_no"])
     r = r.sort_values(["race_date", "jcd", "race_no"])
     g = r.groupby(["race_date", "jcd"], sort=False)
@@ -461,7 +485,38 @@ def prev_race_weather(k):
         "pw_wind_speed": g["wind_speed"].shift(1).pipe(_num),
         "pw_wave_cm": g["wave_cm"].shift(1).pipe(_num),
         "pw_weather": g["weather"].shift(1).map(_WEATHER),
+        "pw_wind_dir": g["wind_direction"].shift(1),
     })
+
+
+def wind_code_maps(p, pw):
+    """
+    直前情報の無い期間に風向きを補うための対応表（データから作る）。
+      text2code: 競走成績の風向（「北西」などの文字）→ 直前情報の風向アイコンの番号（is-windN の N）
+                 直前情報は「1つ前のレース時点」の値なので、同じレースの pw_wind_dir（1つ前のレースの
+                 競走成績の風向）と並べ、文字ごとに一番多い番号を使う
+      venue2dir: 場 → 水面の向きのアイコンの番号（is-directionN の N。場ごとに決まった値）
+    出走表・直前情報と競走成績が重なる期間が短く、数が足りない文字・場は対応表に入れない。
+    """
+    x = p[["race_key", "wind_direction_code", "stadium_direction_code"]].drop_duplicates("race_key")
+    x = x.merge(pw[["race_key", "pw_wind_dir"]], on="race_key", how="inner")
+    wc = _num(x["wind_direction_code"])
+    txt = x["pw_wind_dir"].astype(str).str.strip()
+    ok = wc.between(1, 16) & txt.ne("") & txt.ne("nan") & txt.ne("無風")
+    t2c = {}
+    for t, g in wc[ok].groupby(txt[ok]):
+        vc = g.value_counts()
+        if vc.sum() >= 50 and vc.iloc[0] / vc.sum() >= 0.5:
+            t2c[t] = float(vc.index[0])
+    y = p[["race_key", "stadium_direction_code"]].drop_duplicates("race_key")
+    sc = _num(y["stadium_direction_code"])
+    jcd = y["race_key"].astype(str).str.split("_").str[1].str.zfill(2)
+    v2d = {}
+    for j, g in sc[sc.between(1, 16)].groupby(jcd[sc.between(1, 16)]):
+        vc = g.value_counts()
+        if vc.sum() >= 20:
+            v2d[j] = float(vc.index[0])
+    return t2c, v2d
 
 
 # ---------------------------------------------------------------
@@ -490,7 +545,12 @@ def build_table(k, b, p, start=None, end=None):
 
     pp = p[_PAGES_COLS].drop_duplicates(["race_key", "lane"]).rename(columns=_PAGES_RENAME)
     base = base.merge(pp, on=["race_key", "lane"], how="left")
-    base = base.merge(prev_race_weather(k), on="race_key", how="left")
+    pw = prev_race_weather(k)
+    base = base.merge(pw, on="race_key", how="left")
+    # v3: 直前情報の無い期間の風向きを、1つ前のレースの競走成績の風向と場の水面の向きで補う
+    t2c, v2d = wind_code_maps(p, pw)
+    base["pw_wind_code"] = base["pw_wind_dir"].astype(str).str.strip().map(t2c)
+    base["venue_dir_code"] = base["jcd"].astype(str).str.zfill(2).map(v2d)
     e = _events(k)
     return assemble(base, build_state(e), meet_features(e))
 
@@ -558,6 +618,16 @@ def assemble(base, state, meet):
     ang = rel * (2 * np.pi / 16)
     f["wind_head"] = (np.cos(ang) * f["wind_speed"]).where(rel.notna())
     f["wind_cross"] = (np.sin(ang) * f["wind_speed"]).where(rel.notna())
+    # v3: 直前情報の無い期間も、1つ前のレースの風向き（競走成績）と場の水面の向きで補った版。
+    # 直前情報がある行（本番は全部）は上の3列と同じ値。v2 の列は変えない（今の本番の学習を変えないため）
+    wc2 = wc.fillna(num("pw_wind_code"))
+    sc2 = sc.fillna(num("venue_dir_code"))
+    rel2 = ((wc2 - sc2) % 16).where(wc2.between(1, 16) & sc2.between(1, 16))
+    f["wind_rel2"] = rel2.where(f["wind_speed"] > 0, -1).where(rel2.notna() | (f["wind_speed"] == 0))
+    ang2 = rel2 * (2 * np.pi / 16)
+    f["wind_head2"] = (np.cos(ang2) * f["wind_speed"]).where(rel2.notna())
+    f["wind_cross2"] = (np.sin(ang2) * f["wind_speed"]).where(rel2.notna())
+    f["wind_kind"] = wind_kind(f["wind_rel2"])
 
     ex_course = num("exhibition_course").where(lambda s: s.between(1, 6))
     f["exp_course"] = ex_course.fillna(f["lane"])
@@ -571,6 +641,20 @@ def assemble(base, state, meet):
     f["f_flag"] = (f["f_count"].fillna(f["f_period"]) > 0).astype(float)
     f["has_pages"] = base["has_pages"].to_numpy()
     return add_relations(f)
+
+
+# 風の種類（wind_kind）。水面の向きと風向きのアイコンの番号の差（16方位）で分ける:
+#   差 0（±1 を含む） → 向かい風 / 差 8（±1）→ 追い風 / それ以外 → 横風（斜めを含む）
+# 番号の向き（どちらが追い風か）はデータでの確かめが要る（tools/ml_v3_eval.py の報告書の「風」の表）。
+# 学習には向きの名前は関係しない（木のモデルは番号の分け方だけを見る）。
+WIND_KIND = {0: "無風", 1: "向かい風", 2: "追い風", 3: "横風"}
+
+
+def wind_kind(rel):
+    r = pd.to_numeric(rel, errors="coerce")
+    out = pd.Series(np.where(r.isin([15, 0, 1]), 1.0, np.where(r.isin([7, 8, 9]), 2.0, 3.0)), index=r.index)
+    out = out.where(r >= 0, 0.0)
+    return out.where(r.notna())
 
 
 def _merge_meet(f, meet):
@@ -637,6 +721,19 @@ def add_relations(f):
     f["outer_rc_win_sum"] = f["race_key"].map(outer["rc_win"].sum())
     f["n_front_entry"] = (f["front_entry"] > 0).groupby(f["race_key"]).transform("sum").where(
         f["front_entry"].notna())
+
+    # v3: 選手×コースの決まり手を艇同士で比べる（「1号艇が負けたら誰が勝つか」に効く組み合わせ）
+    if "rc_lost_makuri" in f.columns:
+        f["rc_k_attack"] = f["rc_k_makuri"] + f["rc_k_sashi"] + f["rc_k_msashi"]
+        f["rk_attack"] = f.groupby("race_key", sort=False)["rc_k_attack"].rank(ascending=False, method="average")
+        f["lane1_k_nige"] = f["race_key"].map(lane1["rc_k_nige"])
+        f["lane1_lost_makuri"] = f["race_key"].map(lane1["rc_lost_makuri"])
+        f["lane1_lost_sashi"] = f["race_key"].map(lane1["rc_lost_sashi"])
+        # 自分の得意な決まり手 × 1号艇の負け方（まくりの得意な艇 × まくられやすい1号艇 など）
+        f["x_makuri_vs1"] = f["rc_k_makuri"] * f["lane1_lost_makuri"]
+        f["x_sashi_vs1"] = (f["rc_k_sashi"] + f["rc_k_msashi"]) * f["lane1_lost_sashi"]
+        attack = f["rc_k_attack"].where(f["lane"] != 1)
+        f["outer_attack_max"] = attack.groupby(f["race_key"]).transform("max")
     return f
 
 

@@ -7,6 +7,11 @@
                                続けて展示前モデル（ml_pre.py）も同じ期間で学習し直し、
                                models/<展示前の版>.joblib と models/pre_latest.json を書く
   python ml_nightly.py train_pre  展示前モデルだけ学習し直す（手動用）
+  python ml_nightly.py train_candidate --as-of 20261026,20261102
+                               候補の版（v3: 風向きの補い・選手×コースの負け方と決まり手の組み合わせ・
+                               「1号艇が負けたレース」の1着サブモデル）を基準日ごとに学習し、
+                               models/<版>.joblib と models/candidate_latest.json だけを書く。
+                               本番が使う models/latest.json は書き換えない（事後予想で並べて比べる用）
   python ml_nightly.py legacy  毎晩（state の後）: 今までのモデル（prediction.train・train_lane_agnostic）を
                                sample_history.csv で学習し、models/legacy_model.pkl.gz と
                                models/legacy_model.json を書く（legacy_model.py。数十秒）。
@@ -44,6 +49,9 @@ CALIB_DAYS = 28
 # 特徴量の版（v2: 特徴量の表と照合して足した列と、艇番を除いた実力のモデルの列を含む）
 MODEL_SET = "v2"
 HISTORY_START = "20240927"
+# 候補の版（本番に使わない。事後予想 hindcast.py --model candidate で今の版と並べる）
+CANDIDATE_SET = "v3"
+CANDIDATE_LATEST_FILE = "models/candidate_latest.json"
 # 新しい版の LogLoss が前の版よりこれ以上悪ければ入れ替えない
 MAX_LOGLOSS_WORSE = 0.01
 
@@ -156,9 +164,31 @@ def train(as_of=None, main=True, pre=True):
         _fit_and_publish(ml_pre.new_model(version), train_f, calib_f, ml_pre.PRE_LATEST_FILE, t0, "展示前モデル ")
 
 
+def train_candidate(as_of_list):
+    """候補の版を基準日ごとに学習する（特徴量の表は1回だけ作る）。latest.json は触らない。"""
+    t0 = time.time()
+    days = sorted({str(d).strip() for d in as_of_list if str(d).strip()}) or [_today()]
+    k, b, p = mf.load_sources(HISTORY_START)
+    f = mf.build_table(k, b, p)
+    print(f"[ML] 候補 特徴量の表 {f['race_key'].nunique()}レース {time.time() - t0:.0f}秒", flush=True)
+    for as_of in days:
+        train_f, calib_f = _split(f, as_of)
+        version = f"{mm.MODEL_FAMILY}-{CANDIDATE_SET}-lgb-2y-{as_of}"
+        model = mm.ChainModel(mf.FEATURES_V3 + mm.LANE_FREE_DERIVED, version, engine="lgb",
+                              lane_free=mf.LANE_FREE_FEATURES, head_alt=True)
+        model.fit(train_f, calib_f, log=lambda *a: None)
+        model.save(data_path(model_file(version)))
+        print(f"[ML] 候補 {version} 学習 {model.info['train_races']}レース（{model.info['train_from']}〜"
+              f"{model.info['train_to']}） 調整 {model.info.get('calib_races')}レース {time.time() - t0:.0f}秒",
+              flush=True)
+    path = data_path(CANDIDATE_LATEST_FILE)
+    path.write_text(json.dumps({"version": f"{mm.MODEL_FAMILY}-{CANDIDATE_SET}-lgb-2y-{days[-1]}",
+                                "trained_at": datetime.now(JST).isoformat()}, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("task", choices=["state", "train", "train_pre", "legacy"])
+    ap.add_argument("task", choices=["state", "train", "train_pre", "legacy", "train_candidate"])
     ap.add_argument("--as-of", default="")
     a = ap.parse_args()
     if a.task == "state":
@@ -167,6 +197,8 @@ if __name__ == "__main__":
         import legacy_model
 
         legacy_model.build(log=lambda m: print(m, flush=True))
+    elif a.task == "train_candidate":
+        train_candidate(a.as_of.split(","))
     elif a.task == "train_pre":
         train(a.as_of or None, main=False)
     else:

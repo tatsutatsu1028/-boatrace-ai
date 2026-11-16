@@ -5,6 +5,8 @@ name: ML Model
 #   task=train: 2年分で学習し直し models/<版>.joblib と models/latest.json を書く（毎週。数分）。
 #               続けて展示前モデル（ml_pre.py。「🌅 展示前厳選10」用）も学習し直し models/pre_latest.json を書く
 #   task=train_pre: 展示前モデルだけ学習し直す（手動用）
+#   task=train_candidate: 候補の版（v3）を as_of の基準日ごとに学習する（手動用。カンマ区切りで複数可）。
+#               models/latest.json は書き換えないので本番の予想は変わらない（事後予想で並べて比べる）
 #   task=legacy: 今までのモデル（prediction.train）を学習し models/legacy_model.pkl.gz と
 #               models/legacy_model.json を書く（手動用。task=state のときも state の後に毎晩作る）。
 #               Streamlit アプリはこれを読むだけで、中では学習しない（CPU 制限で学習が終わらないため）
@@ -18,11 +20,11 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "state（集計表＋今までのモデル）/ train（学習し直し）/ train_pre（展示前モデルだけ）/ legacy（今までのモデルだけ）"
+        description: "state（集計表＋今までのモデル）/ train（学習し直し）/ train_pre（展示前モデルだけ）/ legacy（今までのモデルだけ）/ train_candidate（候補の版。本番は変えない）"
         required: true
         default: "state"
       as_of:
-        description: "基準日 (YYYYMMDD)。空なら今日（JST）"
+        description: "基準日 (YYYYMMDD)。空なら今日（JST）。train_candidate はカンマ区切りで複数可"
         required: false
         default: ""
 
@@ -33,7 +35,7 @@ concurrency:
 jobs:
   ml:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     # このリポジトリへは書き込まない（保存先は _data/ の非公開リポジトリ）
     permissions:

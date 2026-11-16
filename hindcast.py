@@ -388,6 +388,17 @@ def chain_tri(model, feats):
     return {str(c): round(float(p), 6) for c, p in zip(tri["combo"], tri["prob"])}
 
 
+def head_alt_probs(model, feats):
+    """候補の版のサブモデル（1号艇が1着でなかったレースだけで学習）の、2〜6号艇の1着確率。
+    1〜6号艇の順のリスト（1号艇と、いない艇は null）。サブモデルの無い版は None。"""
+    fn = getattr(model, "predict_head_alt", None)
+    t = fn(feats) if fn else None
+    if t is None:
+        return None
+    m = {int(ln): float(p) for ln, p in zip(t["lane"], t["p_alt"])}
+    return [round(m[ln], 6) if ln in m else None for ln in range(1, 7)]
+
+
 def tri_probs(final):
     """今のモデルの3連単の全120通りの確率 {組番: 確率}（買い目を選んだのと同じ trifecta(final)）。"""
     tri = trifecta(final)
@@ -509,6 +520,9 @@ def run_day(day, history_full, sample_history, k, runtime, code_sha, calibration
             pred_rows[-1]["candidate_hit_probability_calibrated"] = _clean(calibrated)
             pred_rows[-1]["hit_calibration_id"] = calibration.get("id") if calibrated is not None else None
         pred_rows[-1]["tri_probs"] = chain_tri(model, feats) if ml is not None else tri_probs(final)
+        alt = head_alt_probs(model, feats) if ml is not None else None
+        if alt is not None:
+            pred_rows[-1]["p_head_alt"] = alt
         for rec in race.to_dict("records"):
             input_rows.append({
                 "race_key": race_key,
@@ -600,18 +614,23 @@ def _code_sha():
 # 以前は models/ml-chain-pre-*.json も版の候補に入り、2026-10-15〜17 は展示前モデルで作っていた
 # （その日は保存済みと見なさないので、次の回に展示後のモデルで作り直す）。
 PRE_PREFIX = "ml-chain-pre"
-ML_VERSION_FILTER = ["like.ml-chain*", f"not.like.{PRE_PREFIX}*"]
+# 版の系統: --model ml は本番の系統（v2）、--model candidate は候補の系統（v3。ml_nightly.train_candidate）。
+# 同じ日に両方の行ができるので、保存済みの判定も系統ごとに分ける。
+ML_PREFIX = "ml-chain-v2-"
+CANDIDATE_PREFIX = "ml-chain-v3-"
+ML_VERSION_FILTER = [f"like.{ML_PREFIX}*"]
+CANDIDATE_VERSION_FILTER = [f"like.{CANDIDATE_PREFIX}*"]
 
 
-def ml_versions():
-    """データ用リポジトリ models/ にある学習済みの版（版名 → 確率の調整に使った最後の日）。"""
+def ml_versions(prefix=ML_PREFIX):
+    """データ用リポジトリ models/ にある学習済みの版のうち prefix の系統（版名 → 確率の調整に使った最後の日）。"""
     import json as _json
 
     out = {}
     for p in sorted(data_path("models").glob("ml-chain-*.json")):
         try:
             info = _json.loads(p.read_text(encoding="utf-8"))
-            if str(info["version"]).startswith(PRE_PREFIX):
+            if not str(info["version"]).startswith(prefix):
                 continue
             out[info["version"]] = str(info["info"].get("calib_to") or info["info"].get("train_to"))
         except Exception:  # noqa: BLE001
@@ -657,7 +676,8 @@ def main():
     ap.add_argument("--redo", action="store_true", help="保存済みの日も作り直す")
     ap.add_argument("--max-minutes", type=float, default=300)
     ap.add_argument("--model", default="current",
-                    help="current（今のモデル）/ ml（その日より前に学習した最新の新モデル）/ 新モデルの版名")
+                    help="current（今のモデル）/ ml（その日より前に学習した最新の新モデル。v2）/ "
+                         "candidate（候補の版 v3。本番には使わない）/ 新モデルの版名")
     args = ap.parse_args()
     use_ml = args.model != "current"
     deadline = time.time() + args.max_minutes * 60
@@ -666,7 +686,11 @@ def main():
     days = [_ymd(d) for d in pd.date_range(pd.Timestamp(start), pd.Timestamp(end))]
 
     if not args.dry_run and not args.redo:
-        saved = _saved_dates(start, end, ML_VERSION_FILTER if use_ml else None)
+        vf = None
+        if use_ml:
+            vf = CANDIDATE_VERSION_FILTER if args.model == "candidate" else (
+                [f"like.{args.model.split('+')[0]}*"] if args.model not in ("ml", "candidate") else ML_VERSION_FILTER)
+        saved = _saved_dates(start, end, vf)
         days = [d for d in days if d not in saved]
     if not days:
         print("[HINDCAST] 対象日なし（すべて保存済み）", flush=True)
@@ -688,7 +712,12 @@ def main():
     if use_ml and days:
         import ml_features as mf
 
-        versions = ml_versions()
+        if args.model == "candidate":
+            versions = ml_versions(CANDIDATE_PREFIX)
+        elif args.model == "ml":
+            versions = ml_versions(ML_PREFIX)
+        else:
+            versions = ml_versions("ml-chain-")
         ml_sources = mf.load_sources(_ymd(pd.Timestamp(days[0]) - pd.Timedelta(days=400)), days[-1])
     print(f"[HINDCAST] 補正 id={calibration['id'] if calibration else 'なし'}", flush=True)
     print(f"[HINDCAST] 版 {'新モデル ' + args.model if use_ml else HINDCAST_MODEL_VERSION}"
@@ -711,7 +740,7 @@ def main():
             continue
         ml = None
         if use_ml:
-            version = ml_version_for(d, versions, None if args.model == "ml" else args.model)
+            version = ml_version_for(d, versions, None if args.model in ("ml", "candidate") else args.model)
             if version is None:
                 print(f"[HINDCAST] {d}: その日より前に学習した新モデルの版が無いため飛ばす", flush=True)
                 continue

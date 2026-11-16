@@ -326,17 +326,23 @@ def test_hindcast_skips_pre_models():
     with tempfile.TemporaryDirectory() as d:
         models = Path(d) / "models"
         models.mkdir()
-        for v, last in (("ml-chain-v2-lgb-2y-20261008", "20261007"), ("ml-chain-pre-v2-lgb-2y-20261016", "20261015")):
+        for v, last in (("ml-chain-v2-lgb-2y-20261008", "20261007"), ("ml-chain-pre-v2-lgb-2y-20261016", "20261015"),
+                        ("ml-chain-v3-lgb-2y-20261109", "20261108")):
             (models / f"{v}.json").write_text(json.dumps({"version": v, "info": {"calib_to": last}}))
         orig = hindcast.data_path
         hindcast.data_path = lambda p: Path(d) / p
         try:
             versions = hindcast.ml_versions()
+            candidates = hindcast.ml_versions(hindcast.CANDIDATE_PREFIX)
         finally:
             hindcast.data_path = orig
+    # 本番の系統（v2）だけ。展示前モデルと候補の版（v3）は混ぜない
     assert list(versions) == ["ml-chain-v2-lgb-2y-20261008"]
     assert hindcast.ml_version_for("20261017", versions) == "ml-chain-v2-lgb-2y-20261008"
-    assert "not.like.ml-chain-pre*" in hindcast.ML_VERSION_FILTER
+    assert hindcast.ML_VERSION_FILTER == ["like.ml-chain-v2-*"]
+    assert list(candidates) == ["ml-chain-v3-lgb-2y-20261109"]
+    assert hindcast.ml_version_for("20261109", candidates) == "ml-chain-v3-lgb-2y-20261109"
+    assert hindcast.ml_version_for("20261108", candidates) is None
 
 
 if __name__ == "__main__":

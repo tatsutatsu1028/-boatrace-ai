@@ -190,6 +190,15 @@ def second_rows(f):
     return _rel_cols(x, "w")
 
 
+def alt_rows(f):
+    """1号艇が1着でなかったレースの、2〜6号艇の行（1号艇の行は除く）。1号艇のいないレースは使わない。"""
+    win = f[f["finish"] == 1].drop_duplicates("race_key").set_index("race_key")["lane"]
+    has1 = set(f.loc[f["lane"] == 1, "race_key"])
+    keys = [k for k, ln in win.items() if ln != 1 and k in has1]
+    x = f[f["race_key"].isin(keys) & (f["lane"] != 1)]
+    return x.reset_index(drop=True)
+
+
 def third_rows(f):
     w = f[f["finish"] == 1].drop_duplicates("race_key").set_index("race_key")["lane"]
     s = f[f["finish"] == 2].drop_duplicates("race_key").set_index("race_key")["lane"]
@@ -260,8 +269,12 @@ def _lane_free_cols(scores, f):
 
 
 class ChainModel:
-    def __init__(self, features, version, engine="lgb", lane_free=None):
+    def __init__(self, features, version, engine="lgb", lane_free=None, head_alt=False):
         self.features = list(features)
+        # head_alt: 「1号艇が1着でなかったレース」だけで2〜6号艇の1着を学習するサブモデルも作る
+        #           （万舟チャンスの頭を決める候補。本命の決め方＝1着〜3着の段には使わない）
+        self.head_alt = bool(head_alt)
+        self.head_alt_model = None
         self.version = version
         self.engine = engine
         # lane_free: 艇番を除いた実力のモデルに使う列（None なら使わない）
@@ -279,6 +292,13 @@ class ChainModel:
         if self.lane_free:
             f = self._fit_lane_free(f, log=log)
             log(f"[ML] 艇番なしモデル {time.time() - t0:.0f}秒")
+        if self.head_alt:
+            x = alt_rows(f)
+            self.head_alt_model = _fit_lgb_softmax(_prep(x, self.features), (x["finish"] == 1).astype(int),
+                                                   x["race_key"].to_numpy(), x["race_date"], log=log)
+            self.info["head_alt_rows"] = int(len(x))
+            self.info["head_alt_iter"] = int(self.head_alt_model.n_iter_)
+            log(f"[ML] 1号艇が負けたレースの1着モデル {len(x)}行 {time.time() - t0:.0f}秒")
         rows = {1: f, 2: second_rows(f), 3: third_rows(f)}
         for stage in (1, 2, 3):
             cols = stage_cols(self.features, stage)
@@ -336,6 +356,10 @@ class ChainModel:
             x = rows[stage]
             z = self._z(x, stage)
             self.temps[stage] = _fit_temperature(z, x["race_key"].to_numpy(), x["finish"] == stage)
+        if self.head_alt_model is not None:
+            x = alt_rows(c)
+            z = self.head_alt_model.predict_raw(_prep(x, self.features))
+            self.temps["alt"] = _fit_temperature(z, x["race_key"].to_numpy(), x["finish"] == 1)
         self.info["calib_races"] = int(c["race_key"].nunique())
         self.info["calib_from"] = str(c["race_date"].min())
         self.info["calib_to"] = str(c["race_date"].max())
@@ -349,6 +373,17 @@ class ChainModel:
         return _logit(m.predict_proba(_prep(x, cols))[:, 1])
 
     # 予想 -------------------------------------------------------
+    def predict_head_alt(self, f):
+        """1号艇が1着にならなかったときの、2〜6号艇の1着確率（race_key, lane, p_alt。レースの中で合計1）。
+        サブモデルの無い版は None。"""
+        if self.head_alt_model is None:
+            return None
+        f = self.with_lane_free(f)
+        x = f[f["lane"] != 1].reset_index(drop=True)
+        z = self.head_alt_model.predict_raw(_prep(x, self.features))
+        p = _group_softmax(z, x["race_key"].to_numpy(), self.temps.get("alt", 1.0))
+        return pd.DataFrame({"race_key": x["race_key"].to_numpy(), "lane": x["lane"].to_numpy(), "p_alt": p})
+
     def predict_tables(self, f, chunk_races=1500):
         """小分けにして _predict_tables を呼ぶ（3着の行はレース数×約120行になるため）。"""
         races = pd.unique(f["race_key"])
@@ -441,7 +476,8 @@ class ChainModel:
         joblib.dump({"format": MODEL_FORMAT, "version": self.version, "features": self.features,
                      "models": self.models, "temps": self.temps, "info": self.info,
                      "engine": self.engine, "lane_free": self.lane_free,
-                     "lane_free_model": self.lane_free_model}, path, compress=3)
+                     "lane_free_model": self.lane_free_model, "head_alt": self.head_alt,
+                     "head_alt_model": self.head_alt_model}, path, compress=3)
         meta = {"version": self.version, "temps": self.temps, "info": self.info,
                 "features": self.features}
         path.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
@@ -455,6 +491,7 @@ class ChainModel:
         m = cls(d["features"], d["version"], d.get("engine", "hgb"))
         m.models, m.temps, m.info = d["models"], d["temps"], d["info"]
         m.lane_free, m.lane_free_model = d.get("lane_free"), d.get("lane_free_model")
+        m.head_alt, m.head_alt_model = bool(d.get("head_alt")), d.get("head_alt_model")
         return m
 
 

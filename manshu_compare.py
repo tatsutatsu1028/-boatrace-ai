@@ -42,8 +42,9 @@ from zoneinfo import ZoneInfo
 JST = ZoneInfo("Asia/Tokyo")
 START = "20261017"          # 万舟チャンスの印を付け始めた日
 TABLE = "manshu_aim_compare"
-# 事後予想のうち展示後のモデルの版（hindcast.ML_VERSION_FILTER と同じ。展示前モデルは使わない）
-HINDCAST_FILTERS = [("model_version", "like.ml-chain*"), ("model_version", "not.like.ml-chain-pre*")]
+# 事後予想のうち本番の系統（v2）の展示後のモデルの版（hindcast.ML_VERSION_FILTER と同じ。
+# 展示前モデルと、本番に使っていない候補の版 v3 は使わない）
+HINDCAST_FILTERS = [("model_version", "like.ml-chain-v2-*")]
 MISSING_PRE = "朝の3連単の確率がありません"
 MISSING_POST = "事後予想の3連単の確率がまだありません"
 # 比べる作り方 {名前: (並べ方, 中穴の点数, 万舟の点数)}。どれも1号艇1着を外す・30倍以上・計10点・各100円
