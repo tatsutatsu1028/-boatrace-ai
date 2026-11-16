@@ -77,7 +77,9 @@ VENUES = {
     "15": {"url": "https://www.marugameboat.jp/asp/kyogi/15/pc/yoso05{rr}.htm", "plain_lane": True,
            "cut": ('id="yoso03_03"', 'class="swiper-slide"'),
            "page_mark": r"raceDate={day}&(?:amp;)?raceNumber={race}(?![0-9])"},
-    "16": {"url": "https://www.kojimaboat.jp/asp/kyogi/16/pc/st02{rr}.htm"},
+    # 児島: URL に日付が無いので、丸亀と同じくページ内の展示リプレイの raceDate・raceNumber で日付とレースを確かめる
+    "16": {"url": "https://www.kojimaboat.jp/asp/kyogi/16/pc/st02{rr}.htm",
+           "page_mark": r"raceDate={day}&(?:amp;)?raceNumber={race}(?![0-9])"},
     # 徳山: トップの「展示」タブ（tenji.php）。一周・まわり足の後ろに前走成績の4列
     "18": {"url": "https://www.boatrace-tokuyama.jp/modules/yosou/tenji.php?day={day}&race={race}&if=1",
            "labels": ("一周", "まわり足"), "trailing": 4, "ranges": {"original_turn": (8.0, 15.0)}},
