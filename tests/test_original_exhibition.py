@@ -419,3 +419,20 @@ def test_run_for_counts_unconfirmed_as_online(monkeypatch):
     ts = [{**_t(jcd="06", deadline="16:00"), "race_key": f"20261110_06_{i}"} for i in range(1, 9)]
     oe.run_for(FakeSB(), ts, {t["race_key"]: {"status": "done"} for t in ts}, _at("15:00"))
     assert len(done) == oe.MAX_PER_RUN                                        # 通信するので上限に数える
+
+
+def test_dateless_url_venues_check_race_date(monkeypatch):
+    """丸亀・児島は URL に日付が無いので、ページ内の raceDate・raceNumber が違えば取らない（別の日の値を記録しない）。"""
+    import polite_http
+
+    page = ('<iframe src="https://front.player.boatrace-cdn.jp/player/vod?raceType=exhibition&raceDate=20261116'
+            '&raceNumber=7&bitrate=low"></iframe>' + _page(ROWS))
+
+    class R:
+        status_code = 200
+        content = page.encode("utf-8")
+
+    monkeypatch.setattr(polite_http, "get", lambda url, timeout=15, binary=False: R())
+    assert oe.fetch("16", "20261116_16_7")[0] == "ok"
+    assert oe.fetch("16", "20261111_16_7")[0] == "format"          # 別の日
+    assert oe.fetch("16", "20261116_16_1")[0] == "format"          # 別のレース
