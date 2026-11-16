@@ -243,9 +243,9 @@ def render(ctx, d, venue, rno, deadline, saved_final, model_tickets, work, api_k
         if not avg:
             st.caption("「両方の予想平均」は、Claudeの予想を取ったレース（🧠／⚖️ のボタンで予想）だけ選べます。")
         if mark and not aim:
-            st.caption("「中穴〜万舟狙いの買い目」は、上の万舟狙いの買い目を作ると選べます（オッズが必要）。")
+            st.caption("「万舟チャンスの買い目」は、上の万舟チャンスの買い目を作ると選べます（オッズが必要）。")
         if source == "aim":
-            st.caption("中穴〜万舟狙いの買い目（" + _aim_when(mark) + "）を「中穴」「万舟」に分けて載せ、"
+            st.caption("万舟チャンスの買い目（" + _aim_when(mark) + "）を頭2艇ごとに「3-45-全／3-全-45」の形で載せ、"
                        "本文も荒れる展開を中心に書きます。")
     if source == "avg" and avg:
         tickets, probs = avg

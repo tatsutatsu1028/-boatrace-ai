@@ -53,23 +53,73 @@ def test_aim_tickets_mix_mid_and_high():
     t2 = manshu.aim_tickets(probs, few, method="MIX", mix={"中穴": 5, "万舟": 5}, exclude=())
     assert len(t2) == 7 and [x["tier"] for x in t2].count("中穴") == 1  # 中穴1組＋万舟6組（全部）
     assert manshu.odds_tier(29.9) is None and manshu.odds_tier(30) == "中穴" and manshu.odds_tier(100) == "万舟"
-    assert manshu.aim_method_name() == "MIX5+5-prob-no1"
+    assert manshu.aim_method_name("MIX") == "MIX5+5-prob-no1"  # 前の作り方（2026-11-16 まで）
+    assert manshu.aim_method_name() == "HEAD2-NB2-28"
 
 
 def test_aim_tickets_exclude_lane1_first_by_default():
-    # 既定（本番）: 1号艇が1着の組は選ばない（1-5-6 は300倍でも外す）。2・3着の1号艇は残す
-    t = manshu.aim_tickets(PROBS, ODDS)
+    # 前の作り方（MIX）の既定: 1号艇が1着の組は選ばない（1-5-6 は300倍でも外す）。2・3着の1号艇は残す
+    t = manshu.aim_tickets(PROBS, ODDS, method="MIX")
     combos = [x["combo"] for x in t]
     assert combos and all(not c.startswith("1") for c in combos)
     assert "1-5-6" not in combos and "4-1-2" in combos
     # 本命も外す（検証用）: 1着確率が一番高いのは 1号艇（0.21）なので結果は同じ。本命が2号艇なら2号艇も外す
-    assert manshu.aim_tickets(PROBS, ODDS, exclude=("1", "fav")) == t
+    assert manshu.aim_tickets(PROBS, ODDS, method="MIX", exclude=("1", "fav")) == t
     probs2 = {**PROBS, "2-3-1": 0.30}
     assert manshu.favorite_lane(probs2) == "2"
-    t2 = manshu.aim_tickets(probs2, ODDS, exclude=("1", "fav"))
+    t2 = manshu.aim_tickets(probs2, ODDS, method="MIX", exclude=("1", "fav"))
     assert all(x["combo"][0] not in "12" for x in t2)
     assert manshu.excluded_first(probs2, ("1", "fav")) == {"1", "2"}
     assert manshu.favorite_lane({}) is None
+
+
+def _tri_from_first(first):
+    """1着確率 {艇番: 確率} から3連単120通りの確率（2着・3着は残りで等分）。"""
+    out = {}
+    for a, pa in first.items():
+        for b in first:
+            for c in first:
+                if len({a, b, c}) == 3:
+                    out[f"{a}-{b}-{c}"] = pa / 20
+    return out
+
+
+def test_head2_neighbors_and_combos():
+    assert [manshu.neighbors(h) for h in range(1, 7)] == [(2, 3), (3, 4), (4, 5), (5, 6), (6, 1), (1, 2)]
+    c = manshu.head2_combos(3)
+    assert len(c) == 14 and len(set(c)) == 14 and all(x[0] == "3" for x in c)
+    # 頭-隣2艇-全（8点）＋ 頭-全-隣2艇（8点）− 重なり2点（3-4-5・3-5-4）
+    assert {"3-4-1", "3-5-6", "3-1-4", "3-6-5", "3-4-5", "3-5-4"} <= set(c) and "3-1-2" not in c and "3-2-6" not in c
+    assert manshu.formation_text(3) == "3-45-全／3-全-45"
+    assert manshu.formation_text(5) == "5-61-全／5-全-61" and manshu.formation_text(6) == "6-12-全／6-全-12"
+
+
+def test_head2_tickets_heads_and_28_points():
+    # 本命 1号艇・頭1（2番目）5号艇・頭2（3番目）2号艇。同じ確率なら内側を上にする
+    probs = _tri_from_first({1: 0.35, 2: 0.15, 3: 0.15, 4: 0.05, 5: 0.25, 6: 0.05})
+    odds = {c: (5.0 if c.startswith("1") else 120.0) for c in probs}
+    t = manshu.aim_tickets(probs, odds)
+    assert manshu.head2_lanes(probs) == [5, 2]
+    assert len(t) == 28 and len({x["combo"] for x in t}) == 28
+    assert [x["head_rank"] for x in t] == [1] * 14 + [2] * 14 and {x["head"] for x in t} == {5, 2}
+    assert all(x["stake"] == 100 and x["payout"] == 12000 and x["tier"] == "万舟" for x in t)
+    assert manshu.is_head2(t) and not manshu.is_head2([{"combo": "1-2-3"}])
+    assert manshu.head2_lines(t) == ["頭1 5号艇: 5-61-全／5-全-61（14点）", "頭2 2号艇: 2-34-全／2-全-34（14点）"]
+    # 本命が1号艇以外なら、1号艇も頭になれる
+    probs2 = _tri_from_first({1: 0.3, 2: 0.1, 3: 0.4, 4: 0.1, 5: 0.05, 6: 0.05})
+    assert manshu.head2_lanes(probs2) == [1, 2]
+    # 朝は保存した p_first（頭本命と同じ値）で頭を決める
+    assert manshu.head2_lanes(probs2, manshu.first_from_p_first([0.1, 0.1, 0.4, 0.3, 0.05, 0.05])) == [4, 1]
+    # 欠場の艇を含む組はオッズが無いので外れる。オッズが無ければ作らない
+    no6 = {c: o for c, o in odds.items() if "6" not in c}
+    assert len(manshu.aim_tickets(probs, no6)) < 28 and manshu.aim_tickets(probs, {}) == []
+
+
+def test_head2_result_uses_28_points():
+    probs = _tri_from_first({1: 0.35, 2: 0.15, 3: 0.15, 4: 0.05, 5: 0.25, 6: 0.05})
+    aim = manshu.aim_tickets(probs, {c: 50.0 for c in probs})
+    out = pre_picks.manshu_result_fields({"tickets": [], "aim_tickets": aim}, [("5-6-3", 23450)])
+    assert out["aim_hit"] is True and out["aim_stake"] == 2800 and out["aim_return"] == 23450
 
 
 def test_aim_tickets_missing_odds():
@@ -87,7 +137,7 @@ def test_odds_dict_from_frame():
 
 
 def test_aim_result_fields():
-    aim = manshu.aim_tickets(PROBS, ODDS)
+    aim = manshu.aim_tickets(PROBS, ODDS, method="MIX")
     row = {"tickets": [{"combo": "1-2-3", "stake": 2000}], "longshot_tickets": [], "aim_tickets": aim}
     out = pre_picks.manshu_result_fields(row, [("4-1-2", 15230)])
     assert out["aim_hit"] is True and out["aim_stake"] == 400 and out["aim_return"] == 15230
@@ -277,9 +327,9 @@ def test_zero_stake_candidate_is_not_a_hit():
 
 
 def test_morning_aim_tickets_saved_with_rows():
-    """朝の選定で、10レース分のオッズから中穴〜万舟狙いの買い目を作って一緒に保存する。"""
-    probs = {"2-1-3": 0.06, "3-1-2": 0.05, "5-1-2": 0.02, "1-2-3": 0.3}
-    odds = {"2-1-3": 31.0, "3-1-2": 45.0, "5-1-2": 150.0, "1-2-3": 3.0}
+    """朝の選定で、10レース分のオッズから万舟チャンスの買い目（頭2艇・28点）を作って一緒に保存する。"""
+    probs = _tri_from_first({1: 0.4, 2: 0.25, 3: 0.15, 4: 0.1, 5: 0.06, 6: 0.04})
+    odds = {c: 40.0 for c in probs}
     rows = [{"race_key": "20261019_01_1", "tri_probs": probs}, {"race_key": "20261019_01_2", "tri_probs": probs},
             {"race_key": "20261019_01_3", "tri_probs": None}]
     fetched = []
@@ -291,7 +341,9 @@ def test_morning_aim_tickets_saved_with_rows():
         return odds
     n = pre_picks.add_morning_aim(rows, fetch=fetch)
     assert n == 1 and fetched == ["20261019_01_1", "20261019_01_2"]  # 確率の無いレースは取りに行かない
-    assert [t["combo"] for t in rows[0]["aim_tickets"]] == ["2-1-3", "3-1-2", "5-1-2"]
+    aim = rows[0]["aim_tickets"]
+    assert len(aim) == 28 and {t["head"] for t in aim} == {2, 3}   # 頭1 = 2号艇（2番目）・頭2 = 3号艇（3番目）
+    assert rows[0]["aim_method"] == "HEAD2-NB2-28"
     assert rows[0]["aim_source"] == "morning" and rows[0]["aim_odds_at"]
     # まとめて保存できるよう、全部の行に同じ列がそろう
     assert all(set(r) >= set(pre_picks.AIM_COLS) for r in rows)
@@ -313,11 +365,11 @@ def test_morning_aim_records_fetch_errors():
             raise pre_picks.NoOdds("オッズがまだそろっていません（120通り中80通り）")
         if rk.endswith("_2"):
             raise TimeoutError()
-        return {"2-1-3": 3.0}   # 30倍以上の組が無い
+        return {"1-2-3": 3.0}   # 28点のどれにもオッズが無い
     assert pre_picks.add_morning_aim(rows, fetch=fetch) == 0
     assert [r["aim_error"] for r in rows] == ["オッズがまだそろっていません（120通り中80通り）",
                                               "オッズを読めませんでした（TimeoutError）",
-                                              "オッズ30倍以上の組がありません"]
+                                              "頭の艇を決められないか、28点のオッズがありません"]
 
 
 class _Patch:
@@ -422,7 +474,8 @@ def _run_aim(monkeypatch):
     assert (done, total) == (1, 2)   # 09:03 締切のレースは対象外
     patches = [(p, j) for m, p, j in calls if m == "PATCH"]
     assert len(patches) == 2 and all("aim_tickets=is.null" in p for p, _ in patches)
-    assert patches[0][1]["aim_error"] is None and len(patches[0][1]["aim_tickets"]) == 2
+    # 頭は 2号艇（1着確率1位）を除いた 5号艇だけ（3番目の艇が無い）。5-6-x / 5-x-6 / 5-1-x / 5-x-1 のうちオッズのある 5-1-2
+    assert patches[0][1]["aim_error"] is None and [t["combo"] for t in patches[0][1]["aim_tickets"]] == ["5-1-2"]
     assert patches[1][1]["aim_error"] == "オッズがまだ出ていません（発売前など）" and "aim_tickets" not in patches[1][1]
 
     # 点検: 空のレースがあれば失敗にする

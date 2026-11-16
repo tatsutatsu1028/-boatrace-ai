@@ -458,8 +458,9 @@ def fetch_odds3t(race_key):
     return {str(c): float(v) for c, v in zip(o["combo"], o["odds"])}
 
 
-def make_aim(probs, race_key, fetch=None):
-    """1レースの中穴〜万舟狙いの買い目を作る。戻り値 (買い目, 理由)。作れなければ買い目は空で理由を返す。"""
+def make_aim(probs, race_key, fetch=None, first=None):
+    """1レースの万舟チャンスの買い目（頭2艇・28点）を作る。戻り値 (買い目, 理由)。作れなければ買い目は空で理由を返す。
+    first: {艇番: 1着確率}（朝は保存した p_first。頭本命 head_axis_lane と同じ値で頭を決める）"""
     import manshu
 
     if not probs:
@@ -472,9 +473,9 @@ def make_aim(probs, race_key, fetch=None):
         return [], f"オッズを読めませんでした（{type(e).__name__}）"
     if not odds:
         return [], "オッズがまだ出ていません（発売前など）"
-    tickets = manshu.aim_tickets(probs, odds)
+    tickets = manshu.aim_tickets(probs, odds, first=first)
     if not tickets:
-        return [], "オッズ30倍以上の組がありません"
+        return [], "頭の艇を決められないか、28点のオッズがありません"
     return tickets, None
 
 
@@ -494,7 +495,8 @@ def add_morning_aim(rows, fetch=None):
         for k in AIM_COLS:
             r.setdefault(k, None)
         now = datetime.now(JST).isoformat(timespec="seconds")
-        tickets, why = make_aim(r.get("tri_probs"), r["race_key"], fetch)
+        tickets, why = make_aim(r.get("tri_probs"), r["race_key"], fetch,
+                                first=manshu.first_from_p_first(r.get("p_first")))
         r["aim_tried_at"] = now
         if not tickets:
             r["aim_error"] = why
@@ -538,7 +540,9 @@ def run_aim(date=None, fetch=None):
     done, reasons = 0, {}
     for r in rows:
         probs = r.get("post_tri_probs") or r.get("tri_probs")
-        tickets, why = make_aim(probs, r["race_key"], fetch)
+        # 展示後の確率があればその1着確率（post_head_axis_lane と同じ）、無ければ朝の p_first で頭を決める
+        first = None if r.get("post_tri_probs") else manshu.first_from_p_first(r.get("p_first"))
+        tickets, why = make_aim(probs, r["race_key"], fetch, first=first)
         now = datetime.now(JST).isoformat(timespec="seconds")
         patch = {"aim_tried_at": now, "aim_error": why}
         if tickets:

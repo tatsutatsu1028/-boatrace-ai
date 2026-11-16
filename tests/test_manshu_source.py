@@ -93,16 +93,17 @@ def _odds(v=50.0):
     return {c: (5.0 if c[0] == "1" else v) for c in COMBOS}
 
 
-def test_compare_tickets_is_production_rule():
+def test_compare_tickets_is_recorded_rule():
     import manshu
 
     probs = dict(zip(COMBOS, _tri()["prob"]))
     odds = {c: (5.0 if c[0] == "1" else (50.0 if int(c[2]) % 2 else 300.0)) for c in COMBOS}
     t = ms.compare_tickets(probs, odds)
-    assert t == manshu.aim_tickets(probs, odds)
+    # 記録を終了した比較は、記録してきた作り方（中穴5＋万舟5）のまま（本番は頭2艇・28点）
+    assert t == manshu.aim_tickets(probs, odds, method=ms.LEGACY_METHOD)
     assert [x["tier"] for x in t].count("中穴") == 5 and [x["tier"] for x in t].count("万舟") == 5
     assert all(x["combo"][0] != "1" for x in t)
-    assert ms.method_name() == manshu.aim_method_name()
+    assert ms.method_name() == manshu.aim_method_name(ms.LEGACY_METHOD) == "MIX5+5-prob-no1"
 
 
 def test_source_probs_claude_not_filled_by_model():
@@ -436,25 +437,19 @@ def test_sync_memos_never_raises(monkeypatch):
 # ---------------------------------------------------------------
 # 展示後の自動予想からの呼び出し
 # ---------------------------------------------------------------
-def test_auto_post_calls_compare_for_manshu_even_when_already(monkeypatch):
+def test_auto_post_no_longer_calls_compare(monkeypatch):
+    """予想3種の比較の記録は 2026-11-17 に終了: 展示後の自動予想から呼ばない（Claude の費用を使わない）。"""
     import auto_post_predict as ap
     from test_auto_post_predict import _Fake, _pick
 
-    fake = _Fake(exhibition=6, snapshot={"collector_name": "owner", "pre_exhibition": False})
-    fake.install(monkeypatch)
     seen = []
-    monkeypatch.setattr(ap, "compare_sources", lambda ctx, t, *a, **k: seen.append((t["race_key"], a)) or "3種を記録")
-    pre_only, both = ap.merge_targets([_pick("01", 5, "11:30"), _pick("02", 1, "11:40")], [_pick("02", 1, "11:40")])
-    assert ap.handle_window(None, pre_only, None) == "already"
-    assert ap.handle_window(None, both, None) == "already"
-    assert seen == [(both["race_key"], ())]  # 万舟チャンスだけ・予想し直す（final を渡さない）
-
-    fake2 = _Fake(exhibition=6)
-    fake2.install(monkeypatch)
-    seen.clear()
-    monkeypatch.setattr(ap, "compare_sources", lambda ctx, t, *a, **k: seen.append((t["race_key"], a)) or "3種を記録")
-    assert ap.handle_window(None, both, None) == "done"
-    assert len(seen) == 1 and seen[0][0] == both["race_key"] and len(seen[0][1]) == 3  # 保存した予想を渡す
+    for fake, want in ((_Fake(exhibition=6, snapshot={"collector_name": "owner", "pre_exhibition": False}), "already"),
+                       (_Fake(exhibition=6), "done")):
+        fake.install(monkeypatch)
+        monkeypatch.setattr(ap, "compare_sources", lambda ctx, t, *a, **k: seen.append(t["race_key"]) or "3種を記録")
+        _, both = ap.merge_targets([_pick("01", 5, "11:30"), _pick("02", 1, "11:40")], [_pick("02", 1, "11:40")])
+        assert ap.handle_window(None, both, None) == want
+    assert seen == []
 
 
 def test_compare_sources_never_raises(monkeypatch):
@@ -465,6 +460,8 @@ def test_compare_sources_never_raises(monkeypatch):
         raise RuntimeError("x")
 
     monkeypatch.setattr(manshu_source, "recorded", boom)
+    assert ap.compare_sources(None, dict(T)) == "記録を終了"  # 終了後は Claude も Supabase も呼ばない
+    monkeypatch.setattr(ap, "SOURCE_COMPARE_ENABLED", True)
     assert ap.compare_sources(None, dict(T)) == "エラー（RuntimeError）"
 
 

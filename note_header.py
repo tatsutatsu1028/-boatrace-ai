@@ -117,11 +117,11 @@ def available():
 
 
 def with_aim_in_article(text):
-    """記事の本文に中穴〜万舟狙いの買い目が載っているか（見出しか「万舟狙い」の言葉で見る）。"""
+    """記事の本文に万舟チャンスの買い目が載っているか（見出しか「万舟狙い」の言葉、28点の「【頭1 」で見る）。"""
     import manshu
 
     t = str(text or "")
-    return manshu.AIM_LABEL in t or "万舟狙い" in t
+    return manshu.AIM_LABEL in t or "万舟狙い" in t or "【頭1 " in t
 
 
 def file_name(key, date_iso, label):

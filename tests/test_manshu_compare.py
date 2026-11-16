@@ -90,7 +90,7 @@ def test_compare_row_uses_same_odds_for_both():
     assert all(t["combo"][0] != "1" for t in row["pre_tickets"] + row["post_tickets"])
     assert row["pre_hit"] is False and row["pre_stake"] == 1000 and row["pre_return"] == 0
     assert row["post_hit"] is True and row["post_return"] == 15000 and row["is_manshu"] is True
-    assert row["hindcast_model_version"] == "ml-chain-v2-x+p" and row["method"] == manshu.aim_method_name()
+    assert row["hindcast_model_version"] == "ml-chain-v2-x+p" and row["method"] == manshu.aim_method_name(manshu_compare.LEGACY_METHOD)
     # 確率が無い側は理由だけ
     row = manshu_compare.compare_row({**pick, "tri_probs": None}, odds, None, [("4-1-2", 15000)])
     assert row["pre_tickets"] is None and row["pre_error"] == "朝の3連単の確率がありません"

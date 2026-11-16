@@ -41,6 +41,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
+# 2026-11-17 に記録を終了（auto_post_predict.SOURCE_COMPARE_ENABLED）。本番の買い目は頭2艇・28点になったので、
+# 記録してきた作り方（中穴5点＋万舟5点・確率順・1号艇1着を外す）のまま作る（過去の記録と比べられるように）
+LEGACY_METHOD = "MIX"
 TABLE = "manshu_source_compare"
 SOURCES = ("model", "claude", "blend", "claude_memo", "blend_memo")
 MEMO_SOURCE = "claude_memo"
@@ -59,7 +62,7 @@ def method_name():
     """保存する買い目の作り方の名前（本番と同じ。例: MIX5+5-prob-no1）。"""
     import manshu
 
-    return manshu.aim_method_name()
+    return manshu.aim_method_name(LEGACY_METHOD)
 
 
 def compare_tickets(probs, odds):
@@ -67,7 +70,7 @@ def compare_tickets(probs, odds):
     → [{combo, prob, odds, tier, stake, payout}]"""
     import manshu
 
-    return manshu.aim_tickets(probs, odds)
+    return manshu.aim_tickets(probs, odds, method=LEGACY_METHOD)
 
 
 def source_probs(model_tri, reading):
