@@ -7,6 +7,7 @@ name: ML Model
 #   task=train_pre: 展示前モデルだけ学習し直す（手動用）
 #   task=train_candidate: 候補の版（v3）を as_of の基準日ごとに学習する（手動用。カンマ区切りで複数可）。
 #               models/latest.json は書き換えないので本番の予想は変わらない（事後予想で並べて比べる）
+#   task=coverage: 学習データの期間と、選手×コースの決まり手の空きの割合を出すだけ（手動用。何も保存しない）
 #   task=legacy: 今までのモデル（prediction.train）を学習し models/legacy_model.pkl.gz と
 #               models/legacy_model.json を書く（手動用。task=state のときも state の後に毎晩作る）。
 #               Streamlit アプリはこれを読むだけで、中では学習しない（CPU 制限で学習が終わらないため）

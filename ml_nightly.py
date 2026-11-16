@@ -186,9 +186,55 @@ def train_candidate(as_of_list):
                                 "trained_at": datetime.now(JST).isoformat()}, ensure_ascii=False))
 
 
+def coverage(as_of=None):
+    """
+    学習データの期間と、選手×コースの決まり手（rc_k_*）の空きの割合を出す（手動用）。
+    出すのは期間・件数・空きの割合だけ（成績・確率は出さない）。
+    空きの割合は「今の条件（直近365日・そのコースで3走以上）」と、広げた案
+    （直近730日・3走以上／直近365日・1走以上／直近730日・2走以上）を、想定コース（1〜6）ごとに並べる。
+    """
+    as_of = as_of or _today()
+    t0 = time.time()
+    k, b, p = mf.load_sources(HISTORY_START)
+    f = mf.build_table(k, b, p)
+    train_f, calib_f = _split(f, as_of)
+    print(f"[ML] 期間: 全体 {f['race_date'].min()}〜{f['race_date'].max()} {f['race_key'].nunique()}レース / "
+          f"学習 {train_f['race_date'].min()}〜{train_f['race_date'].max()} {train_f['race_key'].nunique()}レース / "
+          f"調整 {calib_f['race_date'].min()}〜{calib_f['race_date'].max()}", flush=True)
+    pages = f.groupby(f["race_date"].str[:6])["has_pages"].mean()
+    print("[ML] 月ごとの直前情報（pages）のある行の割合: "
+          + " ".join(f"{m}:{v:.0%}" for m, v in pages.items()), flush=True)
+    for c in ("wind_rel", "wind_rel2"):
+        print(f"[ML] {c} の空き {f[c].isna().mean():.1%}（直前情報の無い行 {f.loc[~f['has_pages'], c].isna().mean():.1%}）",
+              flush=True)
+
+    # 選手×コースの決まり手の空き（学習期間の行。想定コースごと）
+    e = mf._events(k)
+    state = mf.build_state(e)
+    base = train_f[["race_date", "racer_id", "exp_course"]].copy()
+    base["d"] = pd.to_datetime(base["race_date"].astype(str), format="%Y%m%d")
+    t = base.assign(ckey=base["exp_course"].astype(int).astype(str))
+    cols = [c for c in mf._COURSE_COLS if c in state["course"].columns]
+    course = base["exp_course"].astype(int).to_numpy()
+    for days, min_n in ((365, 3), (730, 3), (365, 1), (730, 2), (None, 1)):
+        s = mf._window(t, state["course"], ["racer_id", "ckey"], cols, days)
+        n = s[:, cols.index("one")]
+        empty = n < min_n
+        label = f"直近{days}日" if days else "全期間"
+        print(f"[ML] rc_k_* の空き {label}・{min_n}走以上: "
+              + " ".join(f"{c}コース {empty[course == c].mean():.1%}" for c in range(1, 7)), flush=True)
+        if days == 365 and min_n == 3:
+            # 1着が無い（割合0）も多いので、決まり手の1着が1回以上ある割合も出す（4〜6コース）
+            wins = s[:, cols.index("win")]
+            print("[ML] 　うち、そのコースで1着が1回以上: "
+                  + " ".join(f"{c}コース {((wins > 0) & ~empty)[course == c].mean():.1%}" for c in range(1, 7)),
+                  flush=True)
+    print(f"[ML] 集計 {time.time() - t0:.0f}秒", flush=True)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("task", choices=["state", "train", "train_pre", "legacy", "train_candidate"])
+    ap.add_argument("task", choices=["state", "train", "train_pre", "legacy", "train_candidate", "coverage"])
     ap.add_argument("--as-of", default="")
     a = ap.parse_args()
     if a.task == "state":
@@ -197,6 +243,8 @@ if __name__ == "__main__":
         import legacy_model
 
         legacy_model.build(log=lambda m: print(m, flush=True))
+    elif a.task == "coverage":
+        coverage(a.as_of or None)
     elif a.task == "train_candidate":
         train_candidate(a.as_of.split(","))
     elif a.task == "train_pre":

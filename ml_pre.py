@@ -37,13 +37,15 @@ PRE_DROP = [
     "rk_exh_time", "rk_exh_st", "d_exh_time", "d_exh_st", "in_exh_st", "lane1_exh_st", "st12_ex_diff",
     "wind_speed", "wave_cm", "temperature", "water_temperature", "weather_code", "wind_rel", "wind_head",
     "wind_cross", "stabilizer",
+    # v3 の風向き（1つ前のレースの風で補った列）。朝は前のレースが終わっていないので使わない
+    "wind_rel2", "wind_head2", "wind_cross2", "wind_kind",
 ]
 # 特徴量を組み立てる前の元の列のうち、展示・直前情報のもの（欠損にしてから組み立てる）
 _PRE_BLANK_BASE = [
     "exhibition_time", "p_exhibition_time", "exhibition_course", "exhibition_st", "tilt", "propeller_new",
     "parts_exchanged", "adjust_weight", "p_weight", "temperature", "water_temperature", "p_wind_speed",
     "p_wave_cm", "weather_code", "wind_direction_code", "stadium_direction_code", "stabilizer",
-    "pw_wind_speed", "pw_wave_cm", "pw_weather",
+    "pw_wind_speed", "pw_wave_cm", "pw_weather", "pw_wind_dir", "pw_wind_code",
 ]
 PRE_FEATURES = [c for c in mf.FEATURES + mm.LANE_FREE_DERIVED if c not in PRE_DROP]
 PRE_LANE_FREE = [c for c in mf.LANE_FREE_FEATURES if c not in PRE_DROP]

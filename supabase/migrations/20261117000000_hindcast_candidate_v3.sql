@@ -6,10 +6,13 @@
 --   hindcast_model_daily            : 検証タブのビュー。新モデル（'new'）を本番の系統 v2 だけにする
 --                                     （v3 の行が「新しい版」として混ざらないように）
 --   hindcast_candidate_races        : 同じレースの v2 と v3 を1行に並べ、本命の的中と
---                                     万舟チャンスの頭（1号艇以外で1着確率が高い2艇。頭1・頭2）の的中を出す
---                                       base = v2 の1着確率（今の頭の決め方）
---                                       v3   = v3 の1着確率（本命と同じ1着の段）
---                                       alt  = v3 のサブモデル（1号艇が負けたレースだけで学習）
+--                                     万舟チャンスの頭（本命艇以外で1着確率が高い2艇。頭1・頭2。万舟チャンスの
+--                                     28点の買い目と同じ決め方）の的中を出す
+--                                       base = v2 の1着確率で、v2 の本命以外の上位2艇（今の頭の決め方）
+--                                       v3   = v3 の1着確率で、v3 の本命以外の上位2艇
+--                                       alt  = v3 のサブモデルで、v3 の本命以外の上位2艇。サブモデルは「1号艇が
+--                                              負けたとき」の確率なので、(1 − v3 の1号艇の1着確率) × サブモデルの確率に
+--                                              直し、1号艇は v3 の1着確率のまま並べる（本命が1号艇以外でも1号艇を頭にできる）
 --   hindcast_candidate_summary      : 上を「全レース／万舟チャンスの印のレース／1号艇が負けたレース」で集計
 --
 -- 合格基準（2026-11 の依頼）: 万舟チャンスの印のレースで頭1・頭2の的中が今（base）より上がり、
@@ -59,15 +62,25 @@ group by race_date, model;
 
 grant select on public.hindcast_model_daily to anon, authenticated;
 
--- 1〜6号艇の確率の配列から、2〜6号艇で確率が高い上位2艇（同じ確率なら内側）
-create or replace function public.top2_non_lane1(p real[])
+-- 1〜6号艇の確率の配列から、本命艇（fav）以外で確率が高い上位2艇（同じ確率なら内側）
+create or replace function public.top2_except(p real[], fav int)
 returns int[] language sql immutable as $$
   select coalesce(array(
     select u.ord::int
     from unnest(p) with ordinality as u(prob, ord)
-    where u.ord > 1 and u.prob is not null
+    where u.ord <> coalesce(fav, 0) and u.prob is not null
     order by u.prob desc, u.ord
     limit 2), '{}'::int[])
+$$;
+
+-- サブモデル（1号艇が負けたときの2〜6号艇の確率）を、全体の1着確率の形に直す
+--   1号艇 = v3 の1号艇の1着確率、i号艇 = (1 − v3 の1号艇の1着確率) × サブモデルの確率
+create or replace function public.head_alt_full(p_first real[], p_alt real[])
+returns real[] language sql immutable as $$
+  select case when p_alt is null or p_first is null then null else
+    array(select case when i = 1 then p_first[1]
+                      else ((1 - coalesce(p_first[1], 0)) * p_alt[i])::real end
+          from generate_series(1, 6) i order by i) end
 $$;
 
 create or replace view public.hindcast_candidate_races
@@ -87,9 +100,9 @@ with v2 as (
          a.model_version as v2_version, b.model_version as v3_version,
          a.favorite_lane as v2_favorite, b.favorite_lane as v3_favorite,
          a.favorite_hit as v2_favorite_hit, b.favorite_hit as v3_favorite_hit,
-         public.top2_non_lane1(a.p_first) as base_heads,
-         public.top2_non_lane1(b.p_first) as v3_heads,
-         public.top2_non_lane1(b.p_head_alt) as alt_heads,
+         public.top2_except(a.p_first, a.favorite_lane) as base_heads,
+         public.top2_except(b.p_first, b.favorite_lane) as v3_heads,
+         public.top2_except(public.head_alt_full(b.p_first, b.p_head_alt), b.favorite_lane) as alt_heads,
          exists (select 1 from public.manshu_chance_picks m where m.race_key = a.race_key) as manshu_mark
   from v2 a join v3 b using (race_key)
 )
