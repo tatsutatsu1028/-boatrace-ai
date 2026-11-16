@@ -42,6 +42,9 @@ from zoneinfo import ZoneInfo
 JST = ZoneInfo("Asia/Tokyo")
 START = "20261017"          # 万舟チャンスの印を付け始めた日
 TABLE = "manshu_aim_compare"
+# 2026-11-17 に記録を終了（hindcast.yml から外した）。本番の買い目は頭2艇・28点になったので、
+# 手で動かしたときも記録してきた作り方（中穴5点＋万舟5点・確率順・1号艇1着を外す）のまま作る
+LEGACY_METHOD = "MIX"
 # 事後予想のうち本番の系統（v2）の展示後のモデルの版（hindcast.ML_VERSION_FILTER と同じ。
 # 展示前モデルと、本番に使っていない候補の版 v3 は使わない）
 HINDCAST_FILTERS = [("model_version", "like.ml-chain-v2-*")]
@@ -77,7 +80,7 @@ def side_fields(prefix, probs, odds, pays, missing):
     if not probs:
         out[f"{prefix}_error"] = missing
         return out
-    tickets = manshu.aim_tickets(probs, odds)
+    tickets = manshu.aim_tickets(probs, odds, method=LEGACY_METHOD)
     if not tickets:
         out[f"{prefix}_error"] = "オッズ30倍以上の組がありません"
         return out
@@ -133,7 +136,7 @@ def compare_row(pick, odds, post, pays, variants=True):
     row = {
         "race_key": pick["race_key"],
         "race_date": pick["race_date"],
-        "method": manshu.aim_method_name(),
+        "method": manshu.aim_method_name(LEGACY_METHOD),
         "hindcast_model_version": version,
         "trifecta_actual": " ".join(c for c, _ in pays),
         "trifecta_payout": int(max(po for _, po in pays)),

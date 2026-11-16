@@ -145,7 +145,8 @@ def longshot_tickets(tri, n=LONGSHOT_N):
 #   "B":   A と同じ組の中で、4〜6号艇が1着か2着に入る組を優先（足りなければ残りで埋める）
 #   AIM_EXCLUDE_FIRST: 1着から外す艇番（既定 "1"）。過去約9,700レースで、万舟の86.5%は1号艇以外の1着
 #          （1号艇1着のレースの万舟率は4.0%）。"fav" を入れると本命（1着確率が一番高い艇）も外す（検証用）
-AIM_METHOD = "MIX"
+# 本番の作り方は HEAD2-NB2-28（頭2艇・28点。下の head2_tickets）。"MIX" などは前の作り方（検証の再現用）
+AIM_METHOD = "HEAD2-NB2-28"
 AIM_EXCLUDE_FIRST = ("1",)
 AIM_MIX = {"中穴": 5, "万舟": 5}
 AIM_ORDER = "prob"
@@ -154,18 +155,113 @@ AIM_MID_MIN = 30.0          # 中穴 = 3連単オッズ 30〜99倍
 AIM_HIGH_MIN = 100.0        # 万舟 = 100倍以上
 AIM_ODDS_MIN = AIM_HIGH_MIN  # 互換（A・B の下限）
 AIM_STAKE = 100             # 1点あたり（資金配分しない）
-AIM_LABEL = "中穴〜万舟狙いの買い目"
-AIM_NOTE = ("検証中・参考: 1号艇の1着を外し、今の時点の3連単オッズで、中穴（30〜99倍）から5点・万舟（100倍以上）から"
-            "5点を、モデルの確率が高い順に選んでいます。儲かるとは限りません。")
+AIM_LABEL = "万舟チャンスの買い目（頭2艇・28点）"
+AIM_NOTE = ("頭本命（1着確率2番目の艇）と、本命・頭本命を除いて1着確率が一番高い艇の2艇を1着にし、"
+            "それぞれ「頭-外側の隣2艇-全」「頭-全-外側の隣2艇」の14点、計28点（各100円）。儲かるとは限りません。")
 AIM_MORNING_NOTE = "朝の時点のオッズは売れ始めで当てになりません。締切前に「オッズを更新」で取り直してください。"
 
 
-def aim_method_name():
-    """保存する作り方の名前（例: MIX5+5-prob）。"""
+def aim_method_name(method=None):
+    """保存する作り方の名前（今は HEAD2-NB2-28。前の作り方は例: MIX5+5-prob-no1）。"""
+    method = method or AIM_METHOD
+    if method == HEAD2_METHOD:
+        return HEAD2_METHOD
     ex = "".join(f"-no{x}" for x in AIM_EXCLUDE_FIRST)
-    if AIM_METHOD == "MIX":
+    if method == "MIX":
         return f"MIX{AIM_MIX['中穴']}+{AIM_MIX['万舟']}-{AIM_ORDER}{ex}"
-    return f"{AIM_METHOD}{AIM_N}{ex}"
+    return f"{method}{AIM_N}{ex}"
+
+
+# ---------------------------------------------------------------
+# 万舟チャンスの買い目（2026-11-17〜）: 頭2艇・28点（HEAD2-NB2-28）
+# ---------------------------------------------------------------
+#   頭1 = 頭本命（1着確率が2番目に高い艇。head_axis_lane / 展示後は post_head_axis_lane と同じ決め方）
+#   頭2 = 本命艇と頭1を除いて1着確率が一番高い艇（= 1着確率が3番目に高い艇）
+#   1頭あたり「頭-隣2艇-全」＋「頭-全-隣2艇」（重なる2点は1つ）の14点、2頭で28点。各 AIM_STAKE 円
+#   隣2艇 = 頭の外側の2艇（6を超えたら1に戻る）: 1→23、2→34、3→45、4→56、5→61、6→12
+#   1着確率は、渡した3連単確率を1着の艇で足したもの（展示後は post_tri_probs、朝は朝の3連単確率）
+#   オッズがある組だけ買う（欠場の艇を含む組はオッズが出ないので外れる）
+HEAD2_METHOD = "HEAD2-NB2-28"
+HEAD2_LABEL = "万舟チャンスの買い目（頭2艇・28点）"
+HEAD2_NOTE = ("頭本命（1着確率2番目の艇）と、本命・頭本命を除いて1着確率が一番高い艇の2艇を1着にし、"
+              "それぞれ「頭-外側の隣2艇-全」「頭-全-外側の隣2艇」の14点、計28点（各100円）。儲かるとは限りません。")
+
+
+def neighbors(head):
+    """頭の外側の隣2艇（6を超えたら1に戻る）。1→(2,3)、5→(6,1)、6→(1,2)"""
+    h = int(head)
+    return (h % 6) + 1, ((h + 1) % 6) + 1
+
+
+def head2_lanes(probs, first=None):
+    """3連単確率 {組番: 確率} から [頭1, 頭2]（1着確率の2番目・3番目。同じ確率なら内側）。足りなければ短いリスト。
+    first（{艇番: 1着確率}）を渡せばそれで決める（朝は保存した p_first と同じ値で頭本命をそろえる）。"""
+    first = {int(k): float(v) for k, v in first.items() if v is not None} if first else first_probs(probs)
+    ranked = sorted(first, key=lambda k: (-first[k], k))
+    return ranked[1:3]
+
+
+def head2_combos(head):
+    """1頭分の14点（頭-隣2艇-全 ＋ 頭-全-隣2艇。重なりは1つ）。並びは組番の順。"""
+    h = int(head)
+    nb = neighbors(h)
+    out = set()
+    for n in nb:
+        for x in range(1, 7):
+            if x in (h, n):
+                continue
+            out.add(f"{h}-{n}-{x}")
+            out.add(f"{h}-{x}-{n}")
+    return sorted(out)
+
+
+def formation_text(head):
+    """1頭分の書き方（例: 3-45-全／3-全-45）。"""
+    h = int(head)
+    nb = "".join(str(n) for n in neighbors(h))
+    return f"{h}-{nb}-全／{h}-全-{nb}"
+
+
+def head2_tickets(probs, odds, first=None):
+    """28点の買い目 → [{combo, prob, odds, tier, stake, payout, head, head_rank}]。
+    tier は "中穴"（30〜99倍）/"万舟"（100倍以上）/"30倍未満"。オッズが無い（取れない）ときは []。"""
+    if not odds:
+        return []
+    rows = []
+    for rank, h in enumerate(head2_lanes(probs, first), start=1):
+        for combo in head2_combos(h):
+            try:
+                o = float(odds.get(combo))
+            except (TypeError, ValueError):
+                continue
+            if o != o:
+                continue
+            p = float((probs or {}).get(combo) or 0.0)
+            rows.append({"combo": combo, "prob": round(p, 5), "odds": o, "tier": odds_tier(o) or "30倍未満",
+                         "stake": AIM_STAKE, "payout": int(round(o * AIM_STAKE)), "head": int(h),
+                         "head_rank": rank})
+    return rows
+
+
+def is_head2(tickets):
+    """28点（頭2艇）の買い目か（各組に頭の艇番が入っている）。"""
+    return bool(tickets) and all(isinstance(t, dict) and t.get("head") is not None for t in tickets)
+
+
+def head2_groups(tickets):
+    """28点の買い目 → [(頭の順位, 頭の艇番, 書き方, [組番])]（頭1・頭2の順）。"""
+    out = {}
+    for t in tickets or []:
+        if t.get("head") is None:
+            continue
+        key = (int(t.get("head_rank") or 0), int(t["head"]))
+        out.setdefault(key, []).append(str(t["combo"]))
+    return [(r, h, formation_text(h), combos) for (r, h), combos in sorted(out.items())]
+
+
+def head2_lines(tickets):
+    """表示用の1頭1行（例: 頭1 3号艇: 3-45-全／3-全-45（14点））。"""
+    return [f"頭{r} {h}号艇: {text}（{len(c)}点）" for r, h, text, c in head2_groups(tickets)]
 
 
 def odds_tier(odds):
@@ -211,11 +307,13 @@ def excluded_first(probs, exclude=None):
     return out
 
 
-def aim_tickets(probs, odds, method=None, n=None, mix=None, order=None, exclude=None):
+def aim_tickets(probs, odds, method=None, n=None, mix=None, order=None, exclude=None, first=None):
     """中穴〜万舟狙いの買い目。probs: {組番: 3連単確率} / odds: {組番: オッズ}
     exclude: 1着から外す艇番（既定 AIM_EXCLUDE_FIRST。"fav" で本命も外す。() で外さない）
     → [{combo, prob, odds, tier, stake, payout}]（tier は "中穴"/"万舟"、payout は当たったときの払戻）"""
     method = method or AIM_METHOD
+    if method == HEAD2_METHOD:
+        return head2_tickets(probs, odds, first)
     n = n or AIM_N
     mix = mix or AIM_MIX
     order = order or AIM_ORDER
@@ -440,6 +538,13 @@ def second_lane(first):
     """1着確率 {艇番: 確率} から、1着確率が2番目に高い艇 (艇番, 確率)。同じ確率なら内側を上にする。2艇未満なら None。"""
     ranked = sorted(((int(k), float(v)) for k, v in (first or {}).items() if v is not None), key=lambda x: (-x[1], x[0]))
     return ranked[1] if len(ranked) >= 2 else None
+
+
+def first_from_p_first(p_first):
+    """1〜6号艇の1着確率のリスト（p_first）→ {艇番: 確率}。無ければ None。"""
+    if not p_first:
+        return None
+    return {i + 1: float(p) for i, p in enumerate(p_first) if p is not None}
 
 
 def head_axis_from_p_first(p_first):

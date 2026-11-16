@@ -151,14 +151,14 @@ def record_header(sb, t, work=None):
 # ---------------------------------------------------------------
 MANSHU_TITLE_HEAD = "【万舟チャンス】"
 MANSHU_INTRO = "💥 このレースは「万舟チャンス」に選ばれたレースです。モデルが、3連単100倍以上の高配当（万舟）が出やすいと見ています。"
-MANSHU_AIM_HEAD = "■ 万舟チャンスの買い目（中穴〜万舟狙い）"
+MANSHU_AIM_HEAD = "■ 万舟チャンスの買い目（頭2艇・28点）"
 MANSHU_NO_AIM = ("■ 万舟チャンスの買い目\n展示後に万舟チャンスの買い目を作り直せなかったため、今回は載せていません。"
                  "通常の予想の買い目をお届けします。")
 MANSHU_MODEL_HEAD = "■ 通常の予想（本線・抑え）"
 OVERLAP_NOTE = "※重複：万舟チャンスの買い目と通常の予想の両方に入っている組です。"
-PAYWALL_MANSHU = "ここから先は有料部分です。展示後の詳しい予想展開と、万舟チャンスの買い目（中穴〜万舟狙い）・通常の予想（本線・抑え）の2種類の買い目をお届けします。"
+PAYWALL_MANSHU = "ここから先は有料部分です。展示後の詳しい予想展開と、万舟チャンスの買い目（頭2艇・28点）・通常の予想（本線・抑え）の2種類の買い目をお届けします。"
 PAYWALL_MANSHU_NO_AIM = "ここから先は有料部分です。展示後の詳しい予想展開と、通常の予想（本線・抑え）の買い目をお届けします。"
-MANSHU_PROMPT_VERSION = "note-article-manshu-v1"
+MANSHU_PROMPT_VERSION = "note-article-manshu-v2"
 MANSHU_KEYS = ("lead", "development", "aim_comment", "ticket_comment")
 MANSHU_SCHEMA = {
     "type": "object",
@@ -170,13 +170,14 @@ MANSHU_SYSTEM = """あなたはボートレース予想の note 記事を書く�
 このレースは「万舟チャンス」（モデルが、3連単100倍以上の高配当が出やすいと見ているレース）に選ばれています。
 渡されるのは、1レース分のデータ（出走表・展示・気象）、各艇の1着確率、想定ST・1マークの想定の並び、
 「万舟チャンス」の情報（万舟になる確率・本命と本命の1着確率・頭本命（1着軸）・展示後の注意）、
-記事に載せる2種類の3連単の買い目（万舟チャンスの買い目＝中穴・万舟、通常の予想＝本線・抑え）です。
+記事に載せる2種類の3連単の買い目（万舟チャンスの買い目＝頭1・頭2の2艇をそれぞれ1着にした14点ずつ計28点
+（例: 3-45-全／3-全-45。頭の外側の隣2艇を2着か3着に入れる）、通常の予想＝本線・抑え）です。
 
 書くもの:
 - lead: 読者へのあいさつと、このレースの見どころ（60〜100字）。万舟チャンスのレースであることに触れる
 - development: 展示後の予想展開。スタート → 1マーク → 2着・3着争いの順に（200〜350字）
 - aim_comment: 万舟チャンスの買い目の解説（2〜3文）。なぜ荒れそうと見ているかを、本命の1着確率から見た信頼度や、
-  展示で気になった点など、渡されたデータにあることで書く。頭本命（1着軸）が渡されていれば、その艇に必ず触れる
+  展示で気になった点など、渡されたデータにあることで書く。頭1・頭2の2艇には必ず触れる
 - ticket_comment: 通常の予想（本線・抑え）の組み立ての考え方（80〜150字）
 
 守ること:
@@ -258,11 +259,22 @@ def compose_manshu(parts, aim, model):
         paras.append(parts["lead"].strip())
     if str(parts.get("development") or "").strip():
         paras.append("■ 展示後の予想展開\n" + parts["development"].strip())
-    if aim:
+    if aim and na.is_head2(aim):
+        comment = str(parts.get("aim_comment") or "").strip()
+        lines = []
+        for label, text, n in na.head_sections(aim):
+            lines += ([""] if lines else []) + [f"【{label}】", f"{text}（{n}点）"]
+        paras += [MANSHU_AIM_HEAD + ("\n" + comment if comment else ""), "\n".join(lines), na.AIM_NOTE]
+        if overlap:
+            from threads_poster import compact_combos
+
+            paras.append("※重複：通常の予想にも入っている組 " + "、".join(compact_combos(sorted(overlap))))
+            overlap = set()  # 通常の予想の欄には「※重複」を付けない（上の1行で示した）
+    elif aim:
         comment = str(parts.get("aim_comment") or "").strip()
         mid, high = na.aim_groups(aim)
         paras += [MANSHU_AIM_HEAD + ("\n" + comment if comment else ""),
-                  _block([(na.AIM_GROUPS["中穴"], mid), (na.AIM_GROUPS["万舟"], high)], overlap), na.AIM_NOTE]
+                  _block([(na.AIM_GROUPS["中穴"], mid), (na.AIM_GROUPS["万舟"], high)], overlap), na.AIM_NOTE_OLD]
     else:
         paras.append(MANSHU_NO_AIM)
     comment = str(parts.get("ticket_comment") or "").strip()
@@ -279,10 +291,13 @@ def manshu_brief(brief, mark, aim, model, probs):
     from threads_poster import split_main_cover
 
     b = dict(brief)
-    mid, high = na.aim_groups(aim)
     main, cover = split_main_cover(model)
-    b["載せる買い目"] = {"万舟チャンスの買い目": {na.AIM_GROUPS["中穴"]: mid, na.AIM_GROUPS["万舟"]: high},
-                     "通常の予想": {"本線": main, "抑え": cover}}
+    if na.is_head2(aim):
+        aim_b = {label: f"{text}（{n}点）" for label, text, n in na.head_sections(aim)}
+    else:
+        mid, high = na.aim_groups(aim)
+        aim_b = {na.AIM_GROUPS["中穴"]: mid, na.AIM_GROUPS["万舟"]: high}
+    b["載せる買い目"] = {"万舟チャンスの買い目": aim_b, "通常の予想": {"本線": main, "抑え": cover}}
     fav = max(probs, key=lambda k: probs[k]) if probs else None
     head = (mark or {}).get("post_head_axis_lane") or (mark or {}).get("head_axis_lane")
     mp = (mark or {}).get("post_manshu_prob") or (mark or {}).get("manshu_prob")
