@@ -15,12 +15,13 @@
   - 1レース1回だけ。展示後の予想が保存済み（手動・自動固定）ならスキップ。展示前に保存された予想は上書きする
   - 保存は手動と同じ save_latest_prediction_snapshot()。collector_name = auto_post（自動固定 auto_random とは別。
     自動固定の1日の件数・結果の自動記録には数えない）。保存するとトリガーが一覧の展示後の欄（post_*）を書く
-  - 万舟チャンスのレースは、展示後の3連単の確率とその時点のオッズで中穴〜万舟狙いの買い目を作り直して
-    保存する（予想タブの「展示後に作り直す」と同じ。aim_source = auto）。締切前の Discord 通知
+  - 万舟チャンスのレースは、展示後の3連単の確率とその時点のオッズで万舟チャンスの買い目（頭2艇・28点。
+    manshu.head2_tickets）を作り直して保存する（予想タブの「展示後に作り直す」と同じ。aim_source = auto）。締切前の Discord 通知
     （notify_due_races）はこの作り直しを待って送り、送った買い目を固定する（aim_locked_at。以後は書き換えない。
     20261101000000_manshu_aim_lock.sql）。比較の model の行・成績もこの1つの買い目を使う
-  - 保存する予想に Claude の予想は使わない（手動のまま）。ただし万舟チャンスのレースだけ、買い目を作り直すのと
-    同じタイミングで「モデルのみ／Claudeのみ／両方の予想平均」の3種の比較を記録する（manshu_source.py。
+  - 保存する予想に Claude の予想は使わない（手動のまま）。万舟チャンスの「モデルのみ／Claudeのみ／両方の予想平均」の
+    3種の比較の記録（manshu_source.py）は 2026-11-17 に終了した（SOURCE_COMPARE_ENABLED。以下は終了前の動き）。
+    終了前は、万舟チャンスのレースだけ、買い目を作り直すのと同じタイミングで3種の比較を記録していた（manshu_source.py。
     展示後の予想が保存済みでスキップしたレースも記録する。Claude の費用は1日の上限あり）
   - 比較の「メモ入りの Claude（claude_memo）」と「メモ入りの平均（blend_memo）」は、記録のときにオーナーのメモ
     （manshu_memos）があれば作り、無ければ「記録なし」。記録の後・締切前にメモが保存・変更されたら作り直す（メモの保存が task=memo を起動。
@@ -350,8 +351,8 @@ def start_odds_tracking(t, odds):
 
 
 def rebuild_aim(t, final, odds):
-    """万舟チャンス: 展示後の3連単の確率とその時点のオッズで中穴〜万舟狙いの買い目を作り直して保存する。
-    戻り値は記録用の短い文。"""
+    """万舟チャンス: 展示後の3連単の確率とその時点のオッズで万舟チャンスの買い目（頭2艇・28点）を作り直して保存する。
+    頭は展示後の1着確率の2番目・3番目（post_head_axis_lane と同じ決め方）。戻り値は記録用の短い文。"""
     import manshu
     from prediction import trifecta
 
@@ -361,12 +362,18 @@ def rebuild_aim(t, final, odds):
         return "オッズを取れず作り直せませんでした"
     aim = manshu.aim_tickets(probs, odds_d)
     if not aim:
-        return "オッズ30倍以上の組が無く作り直せませんでした"
+        return "頭の艇を決められないか、28点のオッズが無く作り直せませんでした"
     ok = _sb("POST", "rpc/manshu_save_aim", json={
         "p_race_key": t["race_key"], "p_tickets": aim, "p_method": manshu.aim_method_name(),
         "p_source": "auto", "p_odds_at": datetime.now(JST).isoformat(timespec="seconds"),
     }).json()
     return f"作り直して保存（{len(aim)}点）" if ok else "保存されませんでした（通知済みで固定・締切後・結果記録済み）"
+
+
+# 予想3種（モデルのみ／Claudeのみ／両方の予想平均）の比較の記録は 2026-11-17 に終了した（Claude の費用を減らすため）。
+# 過去の記録（manshu_source_compare）とビューは残している。メモ入りの予想（claude_memo・blend_memo）も、
+# この記録の model の行があるレースだけで作るので、あわせて作られなくなる。
+SOURCE_COMPARE_ENABLED = False
 
 
 def compare_sources(ctx, t, final=None, work=None, odds=None):
@@ -375,6 +382,8 @@ def compare_sources(ctx, t, final=None, work=None, odds=None):
     失敗しても自動予想は止めない。戻り値は記録用の短い文。
     model の行の買い目は作り直さず、本番の買い目（rebuild_aim の後の manshu_chance_picks.aim_tickets。
     締切前の通知で固定したもの）を使う（manshu_source.record が読む）。"""
+    if not SOURCE_COMPARE_ENABLED:
+        return "記録を終了"
     import manshu_source
 
     try:
@@ -526,8 +535,6 @@ def handle_window(ctx, t, prev):
     if done:
         note = make_note_from_saved(ctx, t)
         status = write_log(t, prev, done[0], done[1], **note_extra(note))["status"]
-        if "manshu" in t["sources"]:
-            log(f"締切 {t.get('deadline')}: 予想3種の比較 {compare_sources(ctx, t)}")
         return status
     date8 = t["race_key"][:8]
     try:
@@ -568,9 +575,6 @@ def handle_window(ctx, t, prev):
     note = make_note(ctx, t, res["final"], res.get("tickets"), res.get("work"), odds)
     row = write_log(t, prev, "done", reason, tried=True, snapshot_status=status, aim_status=aim_status,
                     **note_extra(note))
-    if "manshu" in t["sources"]:
-        log(f"締切 {t.get('deadline')}: 予想3種の比較 "
-            f"{compare_sources(ctx, t, res['final'], res.get('work'), odds)}")
     return row["status"]
 
 

@@ -26,7 +26,7 @@ JST = ZoneInfo("Asia/Tokyo")
 COLLECTOR_LABELS = {"auto_post": "展示後の自動予想", "auto_random": "展示後の自動固定"}
 MANUAL_LABEL = "展示後の手動予想"
 MORNING_LABEL = "朝の予想（展示前）"
-STYLE_LABELS = {"normal": "通常の予想", "aim": "中穴〜万舟狙い"}
+STYLE_LABELS = {"normal": "通常の予想", "aim": "万舟チャンスの買い目（28点）"}
 
 
 def _restore(snapshot):

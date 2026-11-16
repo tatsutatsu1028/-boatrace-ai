@@ -173,7 +173,7 @@ def test_aim_brief_and_split():
                            "桐生 5R", "14:50", "aim")
     assert brief["載せる買い目"] == {"中穴（オッズ30〜99倍）": ["2-1-3", "2-1-4"], "万舟（オッズ100倍以上）": ["4-5-6"],
                                 "予想の種類": "中穴〜万舟狙いの買い目"}
-    assert "中穴〜万舟狙いの買い目" in na.SYSTEM_PROMPT
+    assert "万舟チャンスの買い目（頭2艇・28点）" in na.SYSTEM_PROMPT
     parts = {"lead": "こんにちは！荒れやすいレースです。",
              "development": "スタートは外が速そうです。2号艇の差しが届く展開に期待します。",
              "ticket_comment": "中穴は 2-1-3 から、万舟は 4-5-6 を狙います。"}
@@ -183,6 +183,30 @@ def test_aim_brief_and_split():
     assert free.endswith(na.PAYWALL_LEAD_AIM) and "【中穴" in paid and "【万舟" in paid
     # 普段の記事の案内は今までどおり
     assert na.split_article(na.template_article(TICKETS), "桐生 5R", "14:50")[0].endswith(na.PAYWALL_LEAD)
+
+
+def test_head2_note_block_and_split():
+    """万舟チャンスの買い目（頭2艇・28点）: 頭ごとに「3-45-全／3-全-45」の形で載せ、有料側に回す。"""
+    import manshu
+
+    first = {1: 0.35, 2: 0.1, 3: 0.25, 4: 0.1, 5: 0.15, 6: 0.05}
+    probs = {f"{a}-{b}-{c}": first[a] / 20 for a in first for b in first for c in first if len({a, b, c}) == 3}
+    mark = {"aim_tickets": manshu.aim_tickets(probs, {c: 80.0 for c in probs})}
+    aim = na.aim_option(mark)
+    assert len(aim) == 28 and {x["group"] for x in aim} == {"頭1", "頭2"} and na.is_head2(aim) and na.is_aim(aim)
+    assert na.head_sections(aim) == [("頭1 3号艇", "3-45-全／3-全-45", 14), ("頭2 5号艇", "5-61-全／5-全-61", 14)]
+    body = na.template_article(aim)
+    assert "【頭1 3号艇】\n3-45-全／3-全-45（14点）" in body and "【頭2 5号艇】\n5-61-全／5-全-61（14点）" in body
+    f = _final()
+    brief = na.build_brief(f, f, aim, na.p_first_map(f), build_visual_rows(f, None, top_combo="3-4-5"),
+                           "桐生 5R", "14:50", "aim")
+    assert brief["載せる買い目"]["頭1 3号艇"] == "3-45-全／3-全-45（14点）"
+    free, paid = na.split_article(na.compose({"lead": "こんにちは。", "development": "外が速そうです。続きです。",
+                                              "ticket_comment": "3号艇のまくりを狙います。"}, aim), "桐生 5R", "14:50")
+    assert "3-45" not in free and "【頭1 3号艇】" in paid and free.endswith(na.PAYWALL_LEAD_AIM)
+    png = pick_card.render_card("桐生", 5, "14:50", "2026/11/17", aim, na.p_first_map(f),
+                                build_visual_rows(f, None, top_combo="3-4-5"), na.SOURCE_LABELS["aim"])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_aim_card_renders_png():
@@ -196,7 +220,7 @@ def test_threads_aim_style():
     from threads_poster import build_post_text
 
     t = build_post_text("10/21", "桐生", 5, final=_final(), publication_type="PAID", style="aim")
-    assert "万舟チャンス" in t and "中穴〜万舟狙い" in t and "◎" not in t and "noteから" in t
+    assert "万舟チャンス" in t and "28点" in t and "◎" not in t and "noteから" in t
     n = build_post_text("10/21", "桐生", 5, final=_final(), publication_type="PAID")
     assert "万舟チャンス" not in n and "展示後予想" in n
 
@@ -228,7 +252,7 @@ def test_note_view_aim_option():
     at = AppTest.from_function(_note_app, default_timeout=60)
     at.session_state["mark"] = MARK
     at.run()
-    assert at.radio[0].options == ["モデルのみ予想", "中穴〜万舟狙いの買い目"]
+    assert at.radio[0].options == ["モデルのみ予想", na.SOURCE_LABELS["aim"]]
     at.radio[0].set_value("aim").run()
     assert not at.exception
     body = at.text_area[0].value
@@ -240,4 +264,4 @@ def test_note_view_aim_option():
     at.session_state["mark"] = {**MARK, "aim_tickets": None}
     at.run()
     assert at.radio[0].options == ["モデルのみ予想"]
-    assert any("万舟狙いの買い目を作ると選べます" in c.value for c in at.caption)
+    assert any("万舟チャンスの買い目を作ると選べます" in c.value for c in at.caption)

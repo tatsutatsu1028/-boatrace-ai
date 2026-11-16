@@ -10,7 +10,8 @@
   - 予想画面: 印のレースなら注意書き（本命が来にくい傾向）。管理者には参考として穴寄りの買い目
     （1号艇を1着から外した上位10点・資金配分しない）
 
-  - 中穴〜万舟狙いの買い目（管理者だけ）: 1号艇の1着を外し、3連単オッズ30倍以上から確率順に10点。
+  - 万舟チャンスの買い目（管理者だけ。2026-11-17〜 頭2艇・28点 manshu.head2_tickets。それまでは中穴〜万舟狙いの10点）:
+    頭本命（1着確率2番目）と本命・頭本命を除いた1着確率1位の2艇を1着に、「頭-隣2艇-全」「頭-全-隣2艇」の14点ずつ。
     朝の買い目は「仮（朝のオッズ）」。展示後に予想タブで予想すると、その時点のオッズで作り直して保存する。
     締切前の Discord 通知で送った後は固定（aim_locked_at）。画面でも作り直さず、通知した買い目を出す
     （通知・表示・記録・成績を同じ買い目にする。20261101000000_manshu_aim_lock.sql）
@@ -182,6 +183,11 @@ def jst_hhmm(ts):
 
 
 def aim_frame(tickets):
+    if manshu.is_head2(tickets):
+        return pd.DataFrame([{"頭": f"頭{t.get('head_rank')} {t['head']}号艇", "オッズ帯": t.get("tier") or "—",
+                              "買い目": t["combo"], "確率": f"{float(t['prob']):.1%}",
+                              "オッズ": f"{float(t['odds']):.1f}倍", "賭け金": _yen(t["stake"]),
+                              "当たった時の払戻": _yen(t["payout"])} for t in tickets])
     return pd.DataFrame([{"区分": t.get("tier") or manshu.odds_tier(t.get("odds")) or "—",
                           "買い目": t["combo"], "確率": f"{float(t['prob']):.1%}", "オッズ": f"{float(t['odds']):.1f}倍",
                           "賭け金": _yen(t["stake"]), "当たった時の払戻": _yen(t["payout"])} for t in tickets])
@@ -270,9 +276,11 @@ def render_aim_compare(mark, final, tickets, odds_df, is_admin=False, pre_exhibi
     with c2:
         st.markdown(f"**{manshu.AIM_LABEL}**（各100円・資金配分なし）")
         if aim:
+            for line in manshu.head2_lines(aim):
+                st.markdown(f"- {line}")
             st.dataframe(aim_frame(aim), hide_index=True, use_container_width=True)
         else:
-            st.caption("オッズ30倍以上の組がありません。")
+            st.caption("頭の艇を決められないか、28点のオッズがありません。")
     _aim_caption(at)
     if aim and not _deadline_passed(datetime.fromisoformat(f"{rk[:4]}-{rk[4:6]}-{rk[6:8]}").date(),
                                     mark.get("deadline")):
@@ -300,9 +308,11 @@ def _render_locked_pair(mark, tickets, odds):
     with c2:
         st.markdown(f"**{manshu.AIM_LABEL}**（各100円・資金配分なし）")
         if saved:
+            for line in manshu.head2_lines(saved):
+                st.markdown(f"- {line}")
             st.dataframe(aim_frame(saved), hide_index=True, use_container_width=True)
         else:
-            st.caption("中穴〜万舟狙いの買い目なしで通知しました。")
+            st.caption("万舟チャンスの買い目なしで通知しました。")
     st.caption(locked_text(mark))
 
 
@@ -408,7 +418,10 @@ def _render_mark(d, r):
 # 管理者の一覧（「🌅 展示前厳選10」と同じ部品。違うのは確率の行と買い目の欄だけ）
 # ---------------------------------------------------------------
 def aim_text(tickets):
-    """中穴〜万舟狙いの買い目を1行に（区分の印・組番・オッズだけ）。"""
+    """万舟チャンスの買い目を短く（頭2艇・28点は「頭1 3号艇: 3-45-全／3-全-45（14点）」の形。
+    前の作り方は区分の印・組番・オッズ）。"""
+    if manshu.is_head2(tickets):
+        return "　".join(manshu.head2_lines(tickets))
     return "　".join(f"【{t.get('tier') or manshu.odds_tier(t.get('odds')) or '—'}】{t['combo']} {float(t['odds']):.1f}倍"
                     for t in (tickets or []))
 
@@ -482,7 +495,7 @@ def _manshu_tickets_block(d, r, passed):
     if rk in shown:
         tickets, at, which = shown[rk]
         st.caption(f"{manshu.AIM_LABEL}（{jst_hhmm(at)} のオッズ・{which}の確率で作成）")
-        st.markdown(aim_text(tickets) if tickets else "オッズ30倍以上の組がありません。")
+        st.markdown(aim_text(tickets) if tickets else "頭の艇を決められないか、28点のオッズがありません。")
     elif saved:
         st.caption(f"{manshu.AIM_LABEL}{aim_source_text(r)}")
         st.markdown(aim_text(saved))
@@ -497,7 +510,7 @@ def _manshu_tickets_block(d, r, passed):
 
 
 def rebuild_aim(r):
-    """その時点のオッズで中穴〜万舟狙いの買い目を作り直して保存する（一覧の「オッズを更新」と、
+    """その時点のオッズで万舟チャンスの買い目（頭2艇・28点）を作り直して保存する（一覧の「オッズを更新」と、
     一覧の note記事・スレッズ投稿の欄で共通）。作れたら True。結果は一覧の表示（manshu_aim_list）にも入れる。"""
     rk = r["race_key"]
     if r.get("aim_locked_at"):
@@ -515,7 +528,9 @@ def rebuild_aim(r):
     if not odds:
         st.caption("オッズがまだ出ていません（発売前など）。")
         return False
-    tickets = manshu.aim_tickets(probs, odds)
+    # 朝の確率で作るときは、保存した p_first（頭本命 head_axis_lane と同じ値）で頭を決める
+    first = manshu.first_from_p_first(r.get("p_first")) if which == "展示前" else None
+    tickets = manshu.aim_tickets(probs, odds, first=first)
     if tickets and save_aim(rk, tickets, "list", at) is False:
         # 保存されなかった買い目は出さない（出すと本番・通知と違う買い目が画面に残る）
         st.session_state.setdefault("manshu_aim_list", {}).pop(rk, None)

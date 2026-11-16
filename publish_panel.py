@@ -39,7 +39,7 @@ def _toggle(name):
 
 
 def _aim_block(d, mark, key):
-    """中穴〜万舟狙いの買い目: 最後に作り直した時刻と、その場で作り直すボタン。"""
+    """万舟チャンスの買い目: 最後に作り直した時刻と、その場で作り直すボタン。"""
     import manshu
     import manshu_view
 
@@ -54,7 +54,7 @@ def _aim_block(d, mark, key):
         st.caption(f"{manshu.AIM_LABEL}: まだ作っていません。")
     if manshu_view._deadline_passed(d, mark.get("deadline")):
         return
-    if st.button("🔄 オッズを更新して中穴〜万舟狙いの買い目を作り直す", key=f"{key}_aim_{rk}",
+    if st.button("🔄 オッズを更新して万舟チャンスの買い目（28点）を作り直す", key=f"{key}_aim_{rk}",
                  use_container_width=True):
         if manshu_view.rebuild_aim(mark):
             st.rerun()
