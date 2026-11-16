@@ -28,6 +28,8 @@ _GRADE_ORD = {"SG": 5, "G1": 4, "G2": 3, "G3": 2, "一般": 1}
 _RACE_TYPE_ORD = {"一般": 0, "予選": 1, "その他": 1, "特別選抜": 2, "準優勝戦": 3, "優勝戦": 4}
 _KIMARITE_FLAGS = {"k_nige": "逃げ", "k_makuri": "まくり", "k_sashi": "差し", "k_msashi": "まくり差し"}
 _LOST_FLAGS = ["lost_makuri", "lost_sashi"]
+# 決まり手の率を全選手の平均に寄せる強さ（この走数ぶんの「平均的な選手」を足したのと同じ）。v3 の *_s の列
+SHRINK_N = 10.0
 _WEATHER = {"晴": 1, "曇り": 2, "雨": 3, "雪": 4, "霧": 5}
 
 FEATURE_GROUPS = {
@@ -92,12 +94,15 @@ FEATURES_V1 = [c for c in FEATURES if c not in V2_ADDED]
 #           （v2 の wind_rel・wind_head・wind_cross は直前情報のある期間だけ）
 #   選手×コースの負け方と、艇同士の決まり手の組み合わせ
 V3_WIND = ["wind_rel2", "wind_head2", "wind_cross2", "wind_kind"]
+V3_SHRUNK = ["rc_k_nige_s", "rc_k_makuri_s", "rc_k_sashi_s", "rc_k_msashi_s", "rc_lost_makuri_s", "rc_lost_sashi_s"]
 V3_KIMARITE = [
-    "rc_lost_makuri", "rc_lost_sashi", "rc_k_attack", "rk_attack", "lane1_k_nige", "lane1_lost_makuri",
+    *V3_SHRUNK, "rc_k_attack", "rk_attack", "lane1_k_nige", "lane1_lost_makuri",
     "lane1_lost_sashi", "x_makuri_vs1", "x_sashi_vs1", "outer_attack_max",
 ]
 V3_ADDED = V3_WIND + V3_KIMARITE
-FEATURES_V3 = [c for c in FEATURES if c not in ("wind_rel", "wind_head", "wind_cross")] + V3_ADDED
+#   決まり手の率は v3 では全選手の平均に寄せた値（*_s）に置き換える（v2 の rc_k_* は値も列も変えない）
+FEATURES_V3 = [c for c in FEATURES if c not in ("wind_rel", "wind_head", "wind_cross", "rc_k_nige", "rc_k_makuri",
+                                               "rc_k_sashi", "rc_k_msashi")] + V3_ADDED
 # 艇番を除いた実力（艇番・コース・隣の艇に関わる列を除く）。ml_model の「艇番なし」モデルが使う
 LANE_FREE_FEATURES = [
     "class_ord", "national_win_rate", "national_2ren", "national_3ren", "age", "weight", "racer_no",
@@ -270,6 +275,8 @@ def build_state(e, keep_days=None):
         "start": _cum_by_day(e2, ["racer_id"], ["st_n", "st_sum", "st_sq", "late", "shift_n", "shift_sum"]),
         "f": _cum_by_day(e, ["racer_id"], ["is_f"]),
         "course": _cum_by_day(ec, ["racer_id", "ckey"], _COURSE_COLS),
+        # コース全体（全選手）の集計。v3 の決まり手の補正（全選手の平均に寄せる）に使う
+        "course_all": _cum_by_day(ec, ["ckey"], _COURSE_COLS),
         "venue": _cum_by_day(e, ["racer_id", "jcd"], cols),
         "motor": _cum_by_day(em, ["mkey"], cols),
     }
@@ -377,6 +384,20 @@ def history_features(base, state):
         out[f"rc_{col}"] = s[:, ecols.index(col)] / rn
     for col in _LOST_FLAGS:
         out[f"rc_{col}"] = s[:, ecols.index(col)] / rn if col in ecols else np.full(len(base), np.nan)
+    # v3: 決まり手の率を全選手の平均に寄せる（走数が少ないほど、そのコースの全選手の率に近づく）
+    #   (その選手の回数 + SHRINK_N × コース全体の率) ÷ (その選手の走数 + SHRINK_N)。どちらも直近365日・前日まで
+    sh_cols = [c for c in (*_KIMARITE_FLAGS, *_LOST_FLAGS) if c in ecols]
+    if "course_all" in state and sh_cols:
+        acols = ["one"] + sh_cols
+        a = _window(t, state["course_all"], ["ckey"], acols, 365)
+        an = np.where(a[:, 0] > 0, a[:, 0], np.nan)
+        n = s[:, ecols.index("one")]
+        for i, col in enumerate(sh_cols, start=1):
+            prior = a[:, i] / an
+            out[f"rc_{col}_s"] = (s[:, ecols.index(col)] + SHRINK_N * prior) / (n + SHRINK_N)
+    else:  # 前の版のコードで作った集計表（コース全体の集計が無い）
+        for col in (*_KIMARITE_FLAGS, *_LOST_FLAGS):
+            out[f"rc_{col}_s"] = np.full(len(base), np.nan)
 
     # 選手×場
     r = _rates("rv", _window(base, state["venue"], ["racer_id", "jcd"], cols, 365), cols)
@@ -723,15 +744,16 @@ def add_relations(f):
         f["front_entry"].notna())
 
     # v3: 選手×コースの決まり手を艇同士で比べる（「1号艇が負けたら誰が勝つか」に効く組み合わせ）
-    if "rc_lost_makuri" in f.columns:
-        f["rc_k_attack"] = f["rc_k_makuri"] + f["rc_k_sashi"] + f["rc_k_msashi"]
+    # 決まり手は全選手の平均に寄せた値（*_s）を使う（走数の少ない選手で 0 や 1 に振れすぎないように）
+    if "rc_lost_makuri_s" in f.columns:
+        f["rc_k_attack"] = f["rc_k_makuri_s"] + f["rc_k_sashi_s"] + f["rc_k_msashi_s"]
         f["rk_attack"] = f.groupby("race_key", sort=False)["rc_k_attack"].rank(ascending=False, method="average")
-        f["lane1_k_nige"] = f["race_key"].map(lane1["rc_k_nige"])
-        f["lane1_lost_makuri"] = f["race_key"].map(lane1["rc_lost_makuri"])
-        f["lane1_lost_sashi"] = f["race_key"].map(lane1["rc_lost_sashi"])
+        f["lane1_k_nige"] = f["race_key"].map(lane1["rc_k_nige_s"])
+        f["lane1_lost_makuri"] = f["race_key"].map(lane1["rc_lost_makuri_s"])
+        f["lane1_lost_sashi"] = f["race_key"].map(lane1["rc_lost_sashi_s"])
         # 自分の得意な決まり手 × 1号艇の負け方（まくりの得意な艇 × まくられやすい1号艇 など）
-        f["x_makuri_vs1"] = f["rc_k_makuri"] * f["lane1_lost_makuri"]
-        f["x_sashi_vs1"] = (f["rc_k_sashi"] + f["rc_k_msashi"]) * f["lane1_lost_sashi"]
+        f["x_makuri_vs1"] = f["rc_k_makuri_s"] * f["lane1_lost_makuri"]
+        f["x_sashi_vs1"] = (f["rc_k_sashi_s"] + f["rc_k_msashi_s"]) * f["lane1_lost_sashi"]
         attack = f["rc_k_attack"].where(f["lane"] != 1)
         f["outer_attack_max"] = attack.groupby(f["race_key"]).transform("max")
     return f
