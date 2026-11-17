@@ -43,6 +43,8 @@ jobs:
       # 当日分の全量取得（締切一覧込み）がまだ無い・欠けている場合は、
       # schedule_prefetcher.py側で自動的に全量取得へ切り替える
       # （prefetch_scheduleの朝の実行が遅延・欠落した場合の保険）。
+      # あわせて、一覧（厳選10・万舟チャンス）のレースがある会場だけ締切を取り直し、変わっていれば
+      # daily_schedule.deadlines と一覧の deadline を書き換える（江戸川の遅延など。schedule_prefetcher.refresh_pick_deadlines）。
       - name: Refresh schedule status (full prefetch if missing)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

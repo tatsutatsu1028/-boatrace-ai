@@ -199,6 +199,93 @@ def missing_full_reason(existing_rows):
     return None
 
 
+# 締切の取り直し（日中の status の回）: 一覧（厳選10・万舟チャンス）にまだ結果の無いレースがある会場だけ、
+# 公式の出走表から締切を取り直し、変わっていれば daily_schedule.deadlines と一覧の deadline を書き換える。
+# 朝の全量取得の後に締切が変わる（江戸川の遅延など）と、展示後の自動予想・締切前の通知・結果の記録が
+# 古い締切で動いてしまうため（2026-11-17 江戸川1R: 10:59 → 11:14）。
+PICK_TABLES = ("pre_exhibition_picks", "manshu_chance_picks")
+DEADLINE_FETCH_INTERVAL_SEC = 3.4   # 公式サイトへのアクセスの間隔（polite_http と同じ）
+
+
+def _get(path):
+    url, _ = _cfg()
+    return _request("GET", f"{url}/rest/v1/{path}", headers=_headers(), timeout=30).json() or []
+
+
+def _patch(path, body):
+    url, _ = _cfg()
+    _request("PATCH", f"{url}/rest/v1/{path}", headers=_headers("return=minimal"), json=body, timeout=30)
+
+
+def _hhmm(v):
+    try:
+        h, m = (int(x) for x in str(v).split(":"))
+        return h * 60 + m
+    except (TypeError, ValueError):
+        return None
+
+
+def changed_deadlines(old, new):
+    """{R: "HH:MM"} の新旧 → 変わったレース {R: (旧, 新)}。新しい値が読めないレースは変えない。"""
+    out = {}
+    for r, v in (new or {}).items():
+        if _hhmm(v) is None:
+            continue
+        if str((old or {}).get(str(r)) or "") != str(v):
+            out[str(r)] = ((old or {}).get(str(r)), str(v))
+    return out
+
+
+def refresh_pick_deadlines(date_str, fetch=None, sleep=time.sleep, now=None):
+    """一覧のレースがある会場の締切を取り直す。書き換えた (会場数, 一覧の行数) を返す。"""
+    fetch = fetch or fetch_venue_deadlines
+    now = now or datetime.now(JST)
+    iso = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+    picks = []
+    for table in PICK_TABLES:
+        try:
+            rows = _get(f"{table}?race_date=eq.{iso}&result_at=is.null&select=race_key,deadline")
+        except Exception as e:  # noqa: BLE001  表が無いなど。開催状況の更新は止めない
+            print(f"[SCHEDULE_PREFETCH] {table} を読めない {type(e).__name__}", flush=True)
+            continue
+        picks += [(table, r) for r in rows]
+    # 締切を過ぎてから時間のたったレースしか無い会場は取り直さない（もう動かす処理が無い）
+    venues = sorted({str(r["race_key"]).split("_")[1] for _, r in picks
+                     if (_hhmm(r.get("deadline")) or 0) + 30 >= now.hour * 60 + now.minute})
+    if not venues:
+        return 0, 0
+    stored = {str(r["jcd"]).zfill(2): r.get("deadlines") or {}
+              for r in _get(f"{SCHEDULE_TABLE}?race_date=eq.{date_str}&select=jcd,deadlines")}
+    n_venues = n_rows = 0
+    for i, jcd in enumerate(venues):
+        if i:
+            sleep(DEADLINE_FETCH_INTERVAL_SEC)
+        try:
+            new = {str(k): v for k, v in (fetch(date_str, jcd) or {}).items()}
+        except Exception as e:  # noqa: BLE001
+            print(f"[SCHEDULE_PREFETCH] 締切の取り直しに失敗 jcd={jcd} {type(e).__name__}", flush=True)
+            continue
+        if not new:
+            continue
+        diff = changed_deadlines(stored.get(jcd), new)
+        if diff:
+            _patch(f"{SCHEDULE_TABLE}?race_date=eq.{date_str}&jcd=eq.{jcd}",
+                   {"deadlines": {**stored.get(jcd, {}), **new}})
+            n_venues += 1
+            print(f"[SCHEDULE_PREFETCH] 締切の変更 jcd={jcd} "
+                  + " ".join(f"{r}R {a}→{b}" for r, (a, b) in sorted(diff.items(), key=lambda kv: int(kv[0]))),
+                  flush=True)
+        for table, r in picks:
+            _, pj, rno = str(r["race_key"]).split("_")
+            want = new.get(str(int(rno)))
+            if pj == jcd and want and _hhmm(want) is not None and str(r.get("deadline") or "") != want:
+                _patch(f"{table}?race_key=eq.{r['race_key']}&result_at=is.null", {"deadline": want})
+                n_rows += 1
+    if n_venues or n_rows:
+        print(f"[SCHEDULE_PREFETCH] 締切を書き換え 会場 {n_venues}・一覧 {n_rows}行", flush=True)
+    return n_venues, n_rows
+
+
 def run(mode, date_str=None):
     """
     mode:
@@ -207,7 +294,8 @@ def run(mode, date_str=None):
                あれば full と同じ処理を行う（朝の複数回実行用）。
       status : 開催一覧の状態のみ更新する。ただし当日分の全量取得が
                済んでいなければ full に切り替える（朝の実行が遅延・欠落
-               した場合の保険）。
+               した場合の保険）。続けて、一覧（厳選10・万舟チャンス）のレースが
+               ある会場だけ締切を取り直す（refresh_pick_deadlines）。
     """
     date_str = date_str or datetime.now(JST).strftime("%Y%m%d")
 
@@ -236,6 +324,12 @@ def run(mode, date_str=None):
         f"[SCHEDULE_PREFETCH] mode={mode} date={date_str} "
         f"rows={len(rows)} holding={holding_count}"
     )
+    if mode == "status":
+        # 日中の回: 一覧のレースがある会場の締切を取り直す（失敗しても開催状況の更新は済んでいる）
+        try:
+            refresh_pick_deadlines(date_str)
+        except Exception as e:  # noqa: BLE001
+            print(f"[SCHEDULE_PREFETCH] 締切の取り直しに失敗 {type(e).__name__}: {e}", flush=True)
 
 
 def main():
