@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import unicodedata
 
 import warnings
@@ -29,11 +30,42 @@ def _norm(x):
     return re.sub(r"\s+", " ", s).strip()
 
 
+# 公式サイトはときどき一時的に 403・5xx を返す（2026-11-18 は GitHub Actions
+# から開催一覧ページだけ3回続けて 403 になった）。名乗り（User-Agent）は変えず、
+# 間をあけて同じ取得を最大3回まで試す。
+RETRY_WAITS = (10, 30)   # 2回目・3回目の前に待つ秒数
+
+
+def _http_get(url, sleep=time.sleep):
+    """公式ページを取得する。403・5xx・接続エラーは待って最大3回まで試す。"""
+    last_error = None
+    for attempt in range(len(RETRY_WAITS) + 1):
+        if attempt:
+            sleep(RETRY_WAITS[attempt - 1])
+        try:
+            r = requests.get(url, headers=UA, timeout=20)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_error = e
+            continue
+        if r.status_code == 403 or r.status_code >= 500:
+            print(
+                f"[TODAY_SCHEDULE] HTTP {r.status_code} "
+                f"({attempt + 1}/{len(RETRY_WAITS) + 1}回目): {url}",
+                flush=True,
+            )
+            last_error = requests.HTTPError(
+                f"{r.status_code} Error for url: {url}", response=r
+            )
+            continue
+        r.raise_for_status()
+        r.encoding = r.apparent_encoding or "utf-8"
+        return r
+    raise last_error
+
+
 def _get(date_yyyymmdd):
     url = f"{BASE}?hd={date_yyyymmdd}"
-    r = requests.get(url, headers=UA, timeout=20)
-    r.raise_for_status()
-    r.encoding = r.apparent_encoding or "utf-8"
+    r = _http_get(url)
     return r.text, url
 
 
@@ -235,9 +267,7 @@ def fetch_venue_deadlines(date_yyyymmdd, jcd):
     )
 
     try:
-        r = requests.get(url, headers=UA, timeout=20)
-        r.raise_for_status()
-        r.encoding = r.apparent_encoding or "utf-8"
+        r = _http_get(url)
 
         soup = BeautifulSoup(r.text, "lxml")
         page_text = _norm(soup.get_text(" ", strip=True))
