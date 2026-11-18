@@ -741,6 +741,39 @@ def cached_fetch_race_bundle(date_str, jcd, rno, include_odds=True):
     return race, odds
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _live_today_schedule(date_str):
+    """公式サイトの開催一覧（Supabase に無いときのフォールバック）。
+
+    取得に失敗すると全場 holding=False が返り、画面側はそれをセッションに保持しないため、
+    以前は画面を触るたびに公式サイトを取り直していた。5分間は同じ結果を使い回す。
+    """
+    return fetch_today_schedule(date_str)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _live_venue_deadlines(date_str, codes):
+    """公式サイトの会場ごとの締切一覧 {jcd: {...}}（フォールバック）。失敗（空）も5分間は取り直さない。
+
+    キャッシュはこの関数（会場まとめて1回）にかけ、並列取得のスレッドの中では生の取得を使う。
+    """
+    out = {}
+    if not codes:
+        return out
+    with ThreadPoolExecutor(max_workers=min(8, len(codes))) as executor:
+        future_codes = {
+            executor.submit(fetch_venue_deadlines, date_str, code): code
+            for code in codes
+        }
+        for future in as_completed(future_codes):
+            code = future_codes[future]
+            try:
+                out[code] = future.result()
+            except Exception:
+                pass
+    return out
+
+
 def fetch_daily_schedule(date_str):
     """
     その日の開催会場一覧・締切一覧を返す。
@@ -780,17 +813,8 @@ def fetch_daily_schedule(date_str):
             "[SCHEDULE] Supabase daily_schedule has holding venues without "
             "deadlines, fetching live for:", missing_codes, date_str, flush=True,
         )
-        with ThreadPoolExecutor(max_workers=min(8, len(missing_codes))) as executor:
-            future_codes = {
-                executor.submit(fetch_venue_deadlines, date_str, code): code
-                for code in missing_codes
-            }
-            for future in as_completed(future_codes):
-                code = future_codes[future]
-                try:
-                    from_supabase[code]["deadlines"] = future.result()
-                except Exception:
-                    pass
+        for code, deadlines in _live_venue_deadlines(date_str, tuple(sorted(missing_codes))).items():
+            from_supabase[code]["deadlines"] = deadlines
         return from_supabase
 
     print(
@@ -798,7 +822,7 @@ def fetch_daily_schedule(date_str):
         date_str, flush=True,
     )
 
-    schedule = fetch_today_schedule(date_str)
+    schedule = _live_today_schedule(date_str)
     result = {
         str(row["jcd"]).zfill(2): {
             "jcd": str(row["jcd"]).zfill(2),
@@ -817,17 +841,8 @@ def fetch_daily_schedule(date_str):
         if info["holding"] and info["status"] not in {"開催終了", "中止"}
     ]
     if active_codes:
-        with ThreadPoolExecutor(max_workers=min(8, len(active_codes))) as executor:
-            future_codes = {
-                executor.submit(fetch_venue_deadlines, date_str, code): code
-                for code in active_codes
-            }
-            for future in as_completed(future_codes):
-                code = future_codes[future]
-                try:
-                    result[code]["deadlines"] = future.result()
-                except Exception:
-                    pass
+        for code, deadlines in _live_venue_deadlines(date_str, tuple(sorted(active_codes))).items():
+            result[code]["deadlines"] = deadlines
 
     return result
 

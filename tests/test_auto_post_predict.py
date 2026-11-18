@@ -109,6 +109,7 @@ class _Fake:
         race = pd.DataFrame({"lane": range(1, 7),
                              "exhibition_time": [6.7] * self.exhibition + [None] * (6 - self.exhibition)})
         monkeypatch.setattr(official_fetcher, "fetch_official_race", lambda *a: race)
+        monkeypatch.setattr(official_fetcher, "fetch_beforeinfo", lambda *a: race)
         monkeypatch.setattr(official_fetcher, "fetch_odds3t", lambda *a: pd.DataFrame({"combo": [], "odds": []}))
         monkeypatch.setattr(ap, "predict_race", lambda ctx, t, race, odds: (
             {"final": None, "model_info": {"model_used": "ml-chain-test"}}, "{}", "h"))
@@ -241,3 +242,32 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_window_not_ready_reads_only_beforeinfo(monkeypatch):
+    """展示タイムがそろう前は直前情報ページ1枚だけ読み、約10ページの fetch_official_race は呼ばない。"""
+    import official_fetcher
+
+    fake = _Fake(exhibition=4)
+    fake.install(monkeypatch)
+    calls = []
+    monkeypatch.setattr(official_fetcher, "fetch_official_race", lambda *a: calls.append(a))
+    pre_only, _ = ap.merge_targets([_pick("01", 5, "11:30"), _pick("02", 1, "11:40")], [_pick("02", 1, "11:40")])
+    assert ap.handle_window(None, pre_only, None) == "waiting"
+    assert calls == []
+    assert "4/6" in fake.logs[pre_only["race_key"]]["reason"]
+
+
+def test_window_beforeinfo_error_is_waiting(monkeypatch):
+    import official_fetcher
+
+    fake = _Fake(exhibition=6)
+    fake.install(monkeypatch)
+
+    def boom(*a):
+        raise RuntimeError("403")
+
+    monkeypatch.setattr(official_fetcher, "fetch_beforeinfo", boom)
+    pre_only, _ = ap.merge_targets([_pick("01", 5, "11:30"), _pick("02", 1, "11:40")], [_pick("02", 1, "11:40")])
+    assert ap.handle_window(None, pre_only, None) == "waiting"
+    assert "公式サイトを読めませんでした" in fake.logs[pre_only["race_key"]]["reason"]

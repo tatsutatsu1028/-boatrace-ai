@@ -163,12 +163,44 @@ def _parse_race_key(race_key):
     return date_key, str(jcd).zfill(2), int(rno)
 
 
-def _deadline_passed(date_key, jcd, rno, cache):
-    """公式締切から5分以上経過したレースだけ結果ページを取りに行く。"""
+def _stored_deadlines(date_key):
+    """daily_schedule に保存済みの締切一覧 {jcd: {"1": "10:59", ...}}（読めなければ空dict）。
+
+    締切一覧は朝の全量取得が保存し、日中は30分おきの refresh_schedule_status が一覧のレースの会場だけ
+    取り直して書き換えている。結果集めの15分おきの実行のたびに公式の締切ページを取らないよう、こちらを読む。
+    """
+    url, _ = _cfg()
+    try:
+        r = _request(
+            "GET",
+            f"{url}/rest/v1/daily_schedule",
+            params={"race_date": f"eq.{date_key}", "select": "jcd,deadlines"},
+            headers=_headers(),
+            timeout=20,
+        )
+        return {str(row.get("jcd", "")).zfill(2): row.get("deadlines") or {} for row in r.json() or []}
+    except Exception as e:  # noqa: BLE001
+        print("[AUTO_RESULT] stored deadlines error:", date_key, type(e).__name__, e, flush=True)
+        return {}
+
+
+def _deadline_hhmm(date_key, jcd, rno, cache, stored=None, fetch=None):
+    """締切 "HH:MM"。保存済みの締切を使い、無い会場だけ公式の締切ページを取る（その実行の中で1回）。"""
+    stored = stored or _stored_deadlines
+    if ("stored", date_key) not in cache:
+        cache[("stored", date_key)] = stored(date_key)
+    hhmm = (cache[("stored", date_key)].get(jcd) or {}).get(str(int(rno)))
+    if hhmm:
+        return hhmm
     cache_key = (date_key, jcd)
     if cache_key not in cache:
-        cache[cache_key] = fetch_venue_deadlines(date_key, jcd)
-    hhmm = (cache[cache_key] or {}).get(int(rno))
+        cache[cache_key] = (fetch or fetch_venue_deadlines)(date_key, jcd)
+    return (cache[cache_key] or {}).get(int(rno))
+
+
+def _deadline_passed(date_key, jcd, rno, cache):
+    """公式締切から5分以上経過したレースだけ結果ページを取りに行く。"""
+    hhmm = _deadline_hhmm(date_key, jcd, rno, cache)
     if not hhmm:
         return False
     hour, minute = [int(x) for x in str(hhmm).split(":")]

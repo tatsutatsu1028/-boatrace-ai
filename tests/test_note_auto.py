@@ -162,6 +162,7 @@ def test_note_made_when_auto_fix_saved_first(monkeypatch):
                         {"status": status})
     import official_fetcher
     monkeypatch.setattr(official_fetcher, "fetch_official_race", lambda *a: race)
+    monkeypatch.setattr(official_fetcher, "fetch_beforeinfo", lambda *a: race)
     monkeypatch.setattr(official_fetcher, "fetch_odds3t", lambda *a: None)
     assert ap.handle_window(object(), T, None) == "already"
     assert made == [T["race_key"]] and written[-1][1]["note"] == {"status": "ok"}
