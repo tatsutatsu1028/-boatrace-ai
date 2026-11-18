@@ -299,19 +299,6 @@ def run(mode, date_str=None):
     """
     date_str = date_str or datetime.now(JST).strftime("%Y%m%d")
 
-    if mode == "status":
-        # 日中の30分おきの回は、公式サイトに一時的に断られて（403など）取れなくても
-        # 次の回で取り直せる。失敗のたびに通知が来ないよう、ログを残して正常終了する。
-        # 朝の全量取得（prefetch_schedule.yml の full / ensure）は従来どおり失敗にする。
-        try:
-            _run(mode, date_str)
-        except ScheduleFetchError as e:
-            print(f"[SCHEDULE_PREFETCH] mode=status 取得できず、次の回に任せます: {e}", flush=True)
-        return
-    _run(mode, date_str)
-
-
-def _run(mode, date_str):
     if mode in ("ensure", "status"):
         reason = missing_full_reason(fetch_existing_rows(date_str))
         if reason is None and mode == "ensure":
