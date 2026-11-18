@@ -252,8 +252,13 @@ def render_aim_compare(mark, final, tickets, odds_df, is_admin=False, pre_exhibi
             try:
                 auto[rk] = (sig, odds_for(rk, refresh=True))
             except Exception as e:  # noqa: BLE001
+                # 失敗も覚えておき、画面を触るたびに公式サイトを取り直さない（取り直しは上の「オッズを更新」）
+                auto[rk] = (sig, None)
                 st.caption(f"オッズを取れませんでした（{type(e).__name__}）")
                 return
+        if auto[rk][1] is None:
+            st.caption("オッズを取れませんでした。上の「オッズを更新」で取り直せます。")
+            return
         odds, at = auto[rk][1]
     if not odds:
         if not st.button("💰 オッズを取得して万舟狙いの買い目を作る", key=f"manshu_aim_pred_{rk}"):

@@ -282,6 +282,18 @@ def exhibition_count(race):
     return int(t.between(6.0, 8.5).sum())
 
 
+def exhibition_ready(date8, jcd, rno, fetch=None):
+    """展示タイムがそろったか（0〜6）を、直前情報ページ1枚だけで調べる。
+
+    fetch_official_race は出走表・今節成績・直前情報・場の特性・6選手のコース成績の約10ページを取る。
+    展示前に毎回それを取り直すと公式サイトへのアクセスが無駄に増えるので、先にこのページだけ見て、
+    6艇そろってから fetch_official_race を呼ぶ（判定に使う展示タイムは fetch_official_race と同じ列）。
+    """
+    if fetch is None:
+        from official_fetcher import fetch_beforeinfo as fetch
+    return exhibition_count(fetch(date8, jcd, rno))
+
+
 def predict_race(ctx, t, race, odds):
     """「モデルのみ予想」と同じ予想・買い目を出し、保存する予想（payload_json）を作る。"""
     import hit_calibration
@@ -393,6 +405,9 @@ def compare_sources(ctx, t, final=None, work=None, odds=None):
             from official_fetcher import fetch_odds3t, fetch_official_race
 
             date8 = t["race_key"][:8]
+            n = exhibition_ready(date8, t["jcd"], t["race_no"])
+            if n != 6:
+                return f"展示タイムがそろっていないため記録しませんでした（{n}/6）"
             race = fetch_official_race(date8, t["jcd"], t["race_no"])
             n = exhibition_count(race)
             if race is None or len(race) != 6 or n != 6:
@@ -445,6 +460,9 @@ def rebuild_memo(ctx, t, memo):
 
     try:
         date8 = t["race_key"][:8]
+        n = exhibition_ready(date8, t["jcd"], t["race_no"])
+        if n != 6:
+            return f"展示タイムがそろっていないため作り直しませんでした（{n}/6）"
         race = fetch_official_race(date8, t["jcd"], t["race_no"])
         n = exhibition_count(race)
         if race is None or len(race) != 6 or n != 6:
@@ -538,6 +556,10 @@ def handle_window(ctx, t, prev):
         return status
     date8 = t["race_key"][:8]
     try:
+        # 展示前の回は直前情報ページ1枚だけで済ませる（約10ページを毎回取り直さない）
+        n = exhibition_ready(date8, t["jcd"], t["race_no"])
+        if n != 6:
+            return write_log(t, prev, "waiting", f"展示タイムがそろっていません（{n}/6）", tried=True)["status"]
         race = fetch_official_race(date8, t["jcd"], t["race_no"])
     except Exception as e:  # noqa: BLE001
         return write_log(t, prev, "waiting", f"公式サイトを読めませんでした（{type(e).__name__}）", tried=True)["status"]
