@@ -137,6 +137,62 @@ def _is_expired(created_at):
         return False
 
 
+SCHEDULE_TABLE = "daily_schedule"
+
+
+def _stored_deadlines(race_date):
+    """daily_schedule に保存済みの締切一覧 {jcd: {"1": "10:59", ...}}（取れなければ空dict）。
+
+    締切一覧は朝の全量取得（prefetch_schedule）が保存し、日中は30分おきの
+    refresh_schedule_status が一覧のレースの会場だけ取り直して書き換えている。
+    """
+    hd = _normalize_race_date(race_date)
+    endpoint = (
+        f"{SUPABASE_URL}/rest/v1/{SCHEDULE_TABLE}"
+        f"?race_date=eq.{hd}&select=jcd,deadlines"
+    )
+    try:
+        r = requests.get(endpoint, headers=_headers(), timeout=20)
+        r.raise_for_status()
+        return {
+            str(row.get("jcd", "")).zfill(2): row.get("deadlines") or {}
+            for row in r.json() or []
+        }
+    except Exception as e:
+        print("[TRACK_ODDS] stored deadlines error:", hd, type(e).__name__, str(e), flush=True)
+        return {}
+
+
+def _parse_stored_deadline(race_date, hhmm):
+    hd = _normalize_race_date(race_date)
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(hhmm or ""))
+    if len(hd) != 8 or not m:
+        return None
+    try:
+        return datetime.strptime(hd, "%Y%m%d").replace(
+            hour=int(m.group(1)), minute=int(m.group(2)), tzinfo=JST
+        )
+    except ValueError:
+        return None
+
+
+def _deadline_for(race_date, jcd, rno, cache, fetch=None):
+    """締切時刻。まず daily_schedule の保存値を使い、無いときだけ公式の出走表を取りにいく。
+
+    以前は5分おきの実行のたびに追跡中の全レースの出走表を公式サイトから取っていた
+    （1日500〜850回）。締切は refresh_schedule_status が30分おきに保存しているので、
+    公式サイトへのアクセスを減らすためにそちらを読む。
+    """
+    hd = _normalize_race_date(race_date)
+    if hd not in cache:
+        cache[hd] = _stored_deadlines(hd)
+    hhmm = (cache[hd].get(str(jcd).zfill(2)) or {}).get(str(int(rno)))
+    deadline = _parse_stored_deadline(hd, hhmm)
+    if deadline is not None:
+        return deadline
+    return (fetch or _fetch_deadline)(race_date, jcd, rno)
+
+
 def _fetch_deadline(race_date, jcd, rno):
     """
     BOAT RACE公式出走表から「締切予定時刻」の12個の時刻を直接読み取る。
@@ -622,6 +678,7 @@ def main():
         return
 
     print(f"[TRACK_ODDS] active races={len(watchlist)}")
+    schedule_cache = {}
 
     for item in watchlist:
         race_date = str(item.get("race_date", "")).strip()
@@ -631,7 +688,7 @@ def main():
         if not race_date or not jcd or rno <= 0:
             continue
 
-        deadline = _fetch_deadline(race_date, jcd, rno)
+        deadline = _deadline_for(race_date, jcd, rno, schedule_cache)
 
         if deadline is not None:
             now_jst = datetime.now(JST)
