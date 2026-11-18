@@ -2,7 +2,8 @@ name: Track Odds
 
 on:
   workflow_dispatch:
-  schedule:
+  # 2026-11-18 一時停止（公式サイトが GitHub Actions を403で断っているため）。再開時に戻す
+  # schedule:
     # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
     # 評価される（指定しても無視される）。JST 8:00〜22:00の5分おきに実行する
     # ため、9時間分ずらしたUTC 23:00（前日）〜13:55で指定する
@@ -13,8 +14,8 @@ on:
     # prefetch_schedule.ymlで実際に数時間単位の欠落を確認し、同様の理由で
     # 分をずらす対策済み）。2026-09-21にtrack_odds.ymlでも約2時間schedule
     # 実行が一度も発火しない欠落が発生したため、同じ対策として2分ずらす。
-    - cron: "2-57/5 0-13 * * *"
-    - cron: "2-57/5 23 * * *"
+    # - cron: "2-57/5 0-13 * * *"
+    # - cron: "2-57/5 23 * * *"
 
 jobs:
   track-odds:

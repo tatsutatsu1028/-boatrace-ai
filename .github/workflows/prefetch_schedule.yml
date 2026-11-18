@@ -13,7 +13,8 @@ on:
           - full
           - ensure
         default: full
-  schedule:
+  # 2026-11-18 一時停止（公式サイトが GitHub Actions を403で断っているため）。再開時に戻す
+  # schedule:
     # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
     # 評価される（指定しても無視される）。JST 07:00 に実行するため、
     # 9時間分ずらしたUTC 22:00（前日）で指定する。
@@ -32,7 +33,7 @@ on:
     # それでも欠落するため、同じ時刻にSupabaseのpg_cronからも
     # workflow_dispatch（inputs.mode=ensure）で起動している（track_odds.ymlと
     # 同じ仕組み）。このscheduleは保険として残す。
-    - cron: "5,35 21-23 * * *"
+    # - cron: "5,35 21-23 * * *"
 
 jobs:
   prefetch-schedule:

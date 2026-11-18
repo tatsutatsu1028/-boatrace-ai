@@ -2,7 +2,8 @@ name: Refresh Schedule Status
 
 on:
   workflow_dispatch:
-  schedule:
+  # 2026-11-18 一時停止（公式サイトが GitHub Actions を403で断っているため）。再開時に戻す
+  # schedule:
     # GitHub Actionsのscheduleトリガーはtimezoneフィールドを解釈せず常にUTCで
     # 評価される（指定しても無視される）。JST 8:00〜22:30 の30分おきにするため、
     # 9時間分ずらしたUTC 23:00（前日）〜13:30で指定する
@@ -17,8 +18,8 @@ on:
     # Supabaseのpg_cronからworkflow_dispatchで起動している（track_odds.ymlと
     # 同じ仕組み。supabase/migrations/20260926010500_trigger_refresh_schedule_status_via_pg_cron.sql）。
     # このscheduleは保険として残す。
-    - cron: "5,35 0-13 * * *"
-    - cron: "5,35 23 * * *"
+    # - cron: "5,35 0-13 * * *"
+    # - cron: "5,35 23 * * *"
 
 jobs:
   refresh-schedule-status:
