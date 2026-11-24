@@ -4,7 +4,7 @@
 公式サイトにはアクセスしない。使うのは PDF・データ用リポジトリの過去データ（成績・集計表）・学習済みモデルだけ。
 オッズは使わない。
 
-  BOATRACE_DATA_DIR=../-boatrace-ai-data python pdf_predict.py 20261125 08 常滑 SG 2 path/to/08_20261125.pdf
+  BOATRACE_DATA_DIR=../-boatrace-ai-data python pdf_predict.py 20261125 08 常滑 SG 2 08_20261125_3.pdf 08_20261125_4.pdf
 
 PDFに無い値:
   - 当地勝率: データ用リポジトリの競走成績から、その会場の着順点（1着10・2着8・3着6・4着4・5着2・6着1）の平均で代わりに作る
@@ -52,7 +52,7 @@ def meet_events(programs, runs, date):
     return pd.DataFrame(rows)
 
 
-def predict(pdf_path, date, jcd, venue, grade, day_no):
+def predict(pdf_paths, date, jcd, venue, grade, day_no):
     import history_store as store
     import manshu
     import ml_live
@@ -63,7 +63,11 @@ def predict(pdf_path, date, jcd, venue, grade, day_no):
     from data_paths import data_path
     from pre_picks import build_tickets, risk_race
 
-    programs, racelists, runs = pdf_racecard.parse_pdf(pdf_path, date, jcd, venue, grade=grade, day_no=day_no)
+    parts = [pdf_racecard.parse_pdf(pth, date, jcd, venue, grade=grade, day_no=day_no)
+             for pth in ([pdf_paths] if isinstance(pdf_paths, str) else pdf_paths)]
+    programs = pd.concat([x[0] for x in parts], ignore_index=True)
+    racelists = pd.concat([x[1] for x in parts], ignore_index=True)
+    runs = pd.concat([x[2] for x in parts], ignore_index=True).drop_duplicates(["racer_id", "n"])
     k = store.read_kind("k_results", "20240927")
     k["racer_id"] = k["racer_id"].astype(str).str.replace(r"\.0$", "", regex=True).str.strip()
     lw = local_win_rates(k, date, jcd)
@@ -104,8 +108,8 @@ def predict(pdf_path, date, jcd, venue, grade, day_no):
 
 
 if __name__ == "__main__":
-    date, jcd, venue, grade, day_no, path = sys.argv[1:7]
-    c, _ = predict(path, date, jcd, venue, grade, int(day_no))
+    date, jcd, venue, grade, day_no = sys.argv[1:6]
+    c, _ = predict(sys.argv[6:], date, jcd, venue, grade, int(day_no))
     pd.set_option("display.width", 250)
     pd.set_option("display.max_colwidth", 120)
     print(c.attrs)

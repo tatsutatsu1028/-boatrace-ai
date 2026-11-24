@@ -127,8 +127,11 @@ def parse_pdf(path, date_yyyymmdd, jcd, venue, grade="", day_no=None, race_type=
                     nat_win, (nat2, rec2, loc2) = _rate_line(_text(ws, y, 200, 282))
                     rec_win, (nat3, rec3, loc3) = _rate_line(_text(ws, yb, 200, 282))
                     st = re.match(r"(\d{2})", _text(ws, y, 338, 352))
-                    motor = [w for w in ws if 425 <= w["x0"] < 446 and w["size"] > 14 and y - 4 < w["top"] < yb + 4]
-                    boat = [w for w in ws if 514 <= w["x0"] < 533 and w["size"] > 12 and y - 4 < w["top"] < yb + 4]
+                    # ページによって列が数ピクセルずれるので、モーター・ボートの値は番号の位置から読む
+                    motor = [w for w in ws if 420 <= w["x0"] < 450 and w["size"] > 14 and y - 4 < w["top"] < yb + 4]
+                    boat = [w for w in ws if 508 <= w["x0"] < 535 and w["size"] > 12 and y - 4 < w["top"] < yb + 4]
+                    mx = motor[0]["x0"] if motor else 430.0
+                    bx = boat[0]["x0"] if boat else 521.0
                     name = _text(ws, y + 1, 90, 165, tol=4)
                     prog.append({
                         "race_date": d, "jcd": jcd, "venue": venue, "race_no": rno, "race_key": rk,
@@ -141,9 +144,9 @@ def parse_pdf(path, date_yyyymmdd, jcd, venue, grade="", day_no=None, race_type=
                         "national_win_rate": nat_win,
                         "national_2ren": nat2, "local_win_rate": np.nan, "local_2ren": loc2,
                         "motor_no": _z2h(motor[0]["text"]) if motor else "",
-                        "motor_2ren": _float(_text(ws, yb, 444, 462)),
+                        "motor_2ren": _float(_text(ws, yb, mx + 10, mx + 30)),
                         "boat_no": _z2h(boat[0]["text"]) if boat else "",
-                        "boat_2ren": _float(_text(ws, yb, 532, 552)),
+                        "boat_2ren": _float(_text(ws, yb, bx + 10, bx + 30)),
                         "meet_results_raw": "", "hayami": "",
                     })
                     rl.append({
@@ -153,8 +156,8 @@ def parse_pdf(path, date_yyyymmdd, jcd, venue, grade="", day_no=None, race_type=
                         "national_3ren": nat3, "local_3ren": loc3,
                         "motor_3ren": np.nan, "boat_3ren": np.nan,
                     })
-                    for i, (fin, course, stv) in enumerate(_runs(_text(ws, y, 550, 735) + " "
-                                                                + _text(ws, yb, 550, 735))):
+                    for i, (fin, course, stv) in enumerate(_runs(_text(ws, y, bx + 30, 735) + " "
+                                                                + _text(ws, yb, bx + 30, 735))):
                         runs.append({"racer_id": a["text"], "n": i + 1, "finish": fin, "course": course,
                                      "st": stv})
     return pd.DataFrame(prog), pd.DataFrame(rl), pd.DataFrame(runs)
